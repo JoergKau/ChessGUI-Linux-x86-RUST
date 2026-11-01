@@ -1,0 +1,31 @@
+# Cargo build artifacts
+target/
+
+# Cargo.lock is committed (binary-application best practice); do not add it
+# to .gitignore. Library crates ignore it; binaries commit it.
+
+# Local user state for egui / eframe
+.siliconboard/
+*.siliconboard
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# IDE config
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage / docs build output
+coverage/
+lcov.info
+doc/
+
+# Logs
+*.log
+
+# Generated demo / scratch files
+/scratch/
+/notes.md
