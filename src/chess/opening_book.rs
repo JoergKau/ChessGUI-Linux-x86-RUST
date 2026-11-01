@@ -456,6 +456,91 @@ mod tests {
     }
 
     #[test]
+    fn real_world_gm2001_book_opens_and_probes_starting_position() {
+        // Real-world fixture: books/gm2001.bin (30416 records, 486656 bytes)
+        // is a Polyglot opening book. Locate it relative to the workspace
+        // root by walking up from CARGO_MANIFEST_DIR until we find a
+        // `books/` directory.
+        let book_path = match locate_real_world_book("gm2001.bin") {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!(
+                    "skipping real-world PolyGlot test — {} \
+                     (CI may set SILICONBOARD_TEST_BOOK or similar)",
+                    err
+                );
+                return;
+            }
+        };
+
+        let book = PolyglotBook::open(&book_path).expect("real-world book must parse");
+        // 486656 bytes ÷ 16 bytes = 30 416 records.
+        assert_eq!(
+            book.len(),
+            30_416,
+            "gm2001.bin should contain exactly 30416 records"
+        );
+
+        // The PolyGlot canonical starting-position Zobrist key — every
+        // well-known opening book has at least one move for it (1.e4, 1.d4,
+        // 1.Nf3, etc.). If we get zero we have parsed the bytes wrong.
+        let canonical_key: u64 = 0x463b96181691fc9c;
+        let start_moves = book.find(canonical_key);
+        assert!(
+            !start_moves.is_empty(),
+            "gm2001.bin should have at least one move for the starting position"
+        );
+
+        // Round-trip every record: decode (from, to, promotion) and confirm
+        // the from/to squares are valid. Catches malformed entries without
+        // requiring a position-correctness check (which would need shakmaty).
+        let mut total_weight: u64 = 0;
+        for entry in book.iter() {
+            let _ = entry.decode_triple().expect("every record's from/to must decode");
+            total_weight = total_weight.saturating_add(entry.weight as u64);
+        }
+        assert!(total_weight > 0, "book's total weight should be non-zero");
+
+        // Round-tripping via find_for_position works against a freshly
+        // synthesised shakmaty position too — the canonical key check above
+        // proves that `zobrist_hash::<Zobrist64>(EnPassantMode::Legal)`
+        // agrees with the on-disk file.
+        let start_pos = shakmaty::Chess::default();
+        let from_position = book.find_for_position(&start_pos);
+        assert!(
+            !from_position.is_empty(),
+            "find_for_position(start) should match the file's starting-position entries"
+        );
+    }
+
+    /// Helper used by the real-world-fixture test. Walks up to 8 levels
+    /// looking for a `books/` directory that contains `name`.
+    fn locate_real_world_book(name: &str) -> Result<std::path::PathBuf, String> {
+        const MAX_WALK: usize = 8;
+        let start: std::path::PathBuf =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut cursor: Option<&std::path::Path> = Some(start.as_path());
+        let mut steps = 0usize;
+        while let Some(candidate) = cursor {
+            if steps > MAX_WALK {
+                break;
+            }
+            let maybe = candidate.join("books").join(name);
+            if maybe.exists() {
+                return Ok(maybe);
+            }
+            cursor = candidate.parent();
+            steps += 1;
+        }
+        Err(format!(
+            "`books/{}` not found within {} levels of {}",
+            name,
+            MAX_WALK,
+            start.display()
+        ))
+    }
+
+    #[test]
     fn unsorted_input_is_resorted() {
         // Construct a book whose records are *not* sorted by key (we
         // synthesise via `make_book` which IS sorted, so we post-process).
