@@ -1,0 +1,89 @@
+[package]
+name = "siliconboard"
+version = "0.1.0"
+edition = "2021"
+description = "SiliconBoard — A modern, high-performance UCI Chess GUI for Apple Silicon written in Rust"
+authors = ["SiliconBoard Contributors"]
+license = "MIT"
+repository = "https://github.com/kauschke/siliconboard"
+readme = "README.md"
+keywords = ["chess", "uci", "gui", "egui", "shakmaty"]
+categories = ["games", "gui"]
+
+# Use the Apple Silicon Metal backend by default. Per Apple, wgpu picks Metal
+# automatically on macOS; pinning the target here makes the build artifacts
+# reproducible and unambiguous.
+default-run = "siliconboard"
+
+[dependencies]
+# ── GUI framework: immediate-mode UI on top of wgpu (Metal on macOS) ─────────
+eframe = { version = "0.37", features = ["default", "wgpu"] }
+egui = "0.37"
+egui_extras = { version = "0.37", features = ["default", "image"] }
+
+# ── Chess rules, move generation, SAN/FEN utilities ─────────────────────────
+shakmaty = "0.30"
+# shakmaty-syzygy (tablebases) is intentionally deferred — out of scope for
+# the current implementation plan and only available matching version ^0.28.
+
+# PolyGlot binary opening books store their 16-byte records in big-endian
+# format. We use byteorder for explicit, allocation-free decoding rather than
+# the byteorder crate's older "no-std" tricks — a 4-byte init cost is
+# negligible against the ~24 MB of typical opening books.
+byteorder = "1.5"
+
+# ── SVG piece rasterization (cburnett sprites live as .svg in public/piece/)
+# `resvg` is the high-level renderer, `usvg` parses SVG into the tree it
+# consumes, and `tiny-skia` is the underlying 2D graphics backend. All three
+# are pure Rust with no C dependencies, so they build cleanly on Apple
+# Silicon without any extra toolchain install.
+resvg = "0.49"
+usvg = "0.49"
+tiny-skia = "0.12"
+
+# ── Piece sprite / texture decoding (PNG) ───────────────────────────────────
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# ── Asynchronous runtime for UCI engine subprocess supervision ──────────────
+tokio = { version = "1.40", features = [
+    "rt-multi-thread",
+    "process",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+] }
+
+# ── Native macOS file open / save dialogs for engines, PGNs, books ─────────
+# Default features pick Cocoa dialogs on macOS automatically.
+rfd = "0.17"
+
+# Note: macOS clipboard writing is performed through `egui::Context::copy_text`
+# which avoids pulling in a heavyweight native-clipboard dep. `arboard` is kept
+# here as a fallback for read-from-clipboard flows if needed.
+arboard = { version = "3.4", default-features = false }
+
+# ── Configuration persistence (engine options, layout, last PGN) ─────────────
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ── Diagnostic logging ───────────────────────────────────────────────────────
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+
+[dev-dependencies]
+# Tests run alongside `cargo test`; lightweight helpers.
+tempfile = "3.10"
+
+# ── Build profile: tuned for Apple Silicon desktop GUI workloads ────────────
+[profile.dev]
+opt-level = 1
+debug = true
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
