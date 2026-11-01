@@ -344,6 +344,11 @@ mod tests {
 
     /// Returns Some(path) if a test engine binary exists on disk.
     /// `SILICONBOARD_TEST_ENGINE=/path/to/stockfish` overrides the default.
+    ///
+    /// Candidate engines in priority order:
+    ///   1. `SILICONBOARD_TEST_ENGINE` env var (if set and the file exists).
+    ///   2. `/opt/homebrew/bin/stockfish` (Stockfish 19 — homebrew on arm64).
+    ///   3. `Triumviratus/Triumviratus_8.0_macos_arm` in the workspace root.
     fn test_engine_path() -> Option<PathBuf> {
         if let Ok(custom) = std::env::var("SILICONBOARD_TEST_ENGINE") {
             let p = PathBuf::from(custom);
@@ -351,12 +356,22 @@ mod tests {
                 return Some(p);
             }
         }
-        let default = PathBuf::from("/opt/homebrew/bin/stockfish");
-        if default.exists() {
-            Some(default)
-        } else {
-            None
+        let stockfish = PathBuf::from("/opt/homebrew/bin/stockfish");
+        if stockfish.exists() {
+            return Some(stockfish);
         }
+        // Triumviratus (a Stockfish-derived NNUE engine), shipped as part of
+        // the workspace root reference material. Unusual filename because
+        // the distribution doesn't add a .app wrapper.
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let triumviratus = PathBuf::from(manifest)
+            .join("..")
+            .join("Triumviratus")
+            .join("Triumviratus_8.0_macos_arm");
+        if triumviratus.exists() {
+            return Some(triumviratus);
+        }
+        None
     }
 
     /// Wait up to `timeout` for the predicate to become true, draining

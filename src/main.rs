@@ -1,14 +1,17 @@
-//! SiliconBoard — entry point, Phase 1 BIS edition.
+//! SiliconBoard — entry point, Phase 4 edition.
 //!
-//! ## Phase 1 BIS scope
-//! Boots an eframe 0.37 window, loads every asset via the `Assets` bundle
-//! (board PNG from `public/images/board/blue.png` + twelve cburnett SVG
-//! pieces rasterised by `usvg`+`resvg`+`tiny-skia`), and renders a small
-//! "Phase 1 BIS readiness check" panel that displays the board thumbnail
-//! plus each piece in two horizontal rows.
+//!## Phase 4 scope
+//! Boots an eframe 0.37 window with the full Nibbler-style central-panel
+//! board view. Pieces are the cburnett SVG set rasterised at startup
+//! (Phase 1 BIS); the board texture is `public/images/board/blue.png`
+//! (also Phase 1 BIS). The widget supports click-click and drag-and-drop
+//! input, highlights legal destinations, plays them via
+//! `GameState::apply_user_move`, and surfaces the promotion modal
+//! action for the caller to resolve.
 //!
-//! Full UI (drag-and-drop board, eval dashboard, PGN list, menus) lands in
-//! Phase 4 / Phase 5.
+//! Engine integration (Phase 5 / 6) will use the same board widget; the
+//! Phase-1-BIS readiness preview is now a small status block in the
+//! right-hand sidebar (which will host the eval dashboard in Phase 5).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // noop on macOS
 
@@ -20,36 +23,42 @@ mod engine;
 mod gui;
 
 use assets::Assets;
-use chess::{PieceColor, PieceKind};
+use chess::GameState;
+use gui::board_view::{BoardAction, BoardView};
 
 /// Application identifier for the eframe persistence layer.
 const APP_NAME: &str = "SiliconBoard";
 
-/// Initial window size for the Phase 1 BIS preview window.
-const INITIAL_WINDOW_SIZE: [f32; 2] = [760.0, 480.0];
-
-/// Pixel size of each piece in the preview rows.
-const PREVIEW_TILE_SIZE: f32 = 48.0;
-
-/// Side length of the board thumbnail in the readiness panel.
-const BOARD_THUMBNAIL_SIZE: f32 = 128.0;
+/// Initial window size (Phase 4 board + sidebar layout target).
+const INITIAL_WINDOW_SIZE: [f32; 2] = [900.0, 720.0];
 
 /// Top-level eframe application state.
 struct SiliconBoardApp {
-    /// Loaded asset bundle. `None` until the first frame so we can show a
-    /// "loading…" indicator cleanly.
+    /// Loaded asset bundle. `None` until the first frame resolves cleanly
+    /// so we can show a "loading…" indicator.
     assets: Option<Result<Assets, String>>,
+    /// Live game state — the single source of truth for the board.
+    game: GameState,
+    /// Widget-side view state (selection, last-move highlight, orientation).
+    view: BoardView,
+    /// Status line shown in the right-hand sidebar.
+    status: String,
 }
 
 impl Default for SiliconBoardApp {
     fn default() -> Self {
-        Self { assets: None }
+        Self {
+            assets: None,
+            game: GameState::new(),
+            view: BoardView::default(),
+            status: "Welcome — click or drag a piece to make a move.".to_string(),
+        }
     }
 }
 
 impl eframe::App for SiliconBoardApp {
     /// Background frame — kick off asset loading so the visual pass can
-    /// show thumbs once decoding is finished.
+    /// show the board once decoding is finished.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.assets.is_none() {
             match Assets::load(ctx) {
@@ -59,152 +68,109 @@ impl eframe::App for SiliconBoardApp {
         }
     }
 
-    /// Visual frame — assemble the Phase-1-BIS preview UI.
+    /// Visual frame — Phase-4 board layout + sidebar.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Top title strip (replaced by the full menu bar in Phase 5).
+        // ── Top menu placeholder strip ──
         egui::Panel::top("menu_placeholder").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("SiliconBoard");
                 ui.separator();
-                ui.label("Phase 1 BIS — Public Assets (cburnett / blue board)");
+                ui.label("Phase 4 — Board & Interaction");
             });
         });
 
-        // Central content panel.
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::group(ui.style())
-                    .inner_margin(egui::Margin::same(16))
-                    .corner_radius(8.0),
-            )
-            .show(ui, |ui| {
-                ui.heading("Phase 1 BIS readiness check");
-                ui.add_space(8.0);
-                match &self.assets {
-                    None => {
-                        ui.label("Loading assets…");
-                        ui.ctx().request_repaint();
-                    }
-                    Some(Err(err)) => {
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            "Asset load failed:",
-                        );
-                        ui.label(err);
-                        ui.add_space(8.0);
-                        ui.label(
-                            "Tip: ensure `public/` exists at the workspace root \
-                             with `public/images/board/blue.png` and \
-                             `public/piece/cburnett/{wK,wQ,wR,wB,wN,wP,bK,bQ,bR,bB,bN,bP}.svg`.",
-                        );
-                    }
-                    Some(Ok(assets)) => {
-                        // ── Status line ──
-                        ui.colored_label(
-                            egui::Color32::LIGHT_GREEN,
-                            format!(
-                                "✓ Loaded {} piece sprites from {}",
-                                assets.pieces.len(),
-                                assets.pieces_root().display()
-                            ),
-                        );
-                        ui.colored_label(
-                            egui::Color32::LIGHT_GREEN,
-                            format!(
-                                "✓ Loaded board {}x{} from {}",
-                                assets.board.dimensions.0,
-                                assets.board.dimensions.1,
-                                assets.board.source().strip_prefix(
-                                    assets.asset_root.parent().unwrap_or(&assets.asset_root)
-                                ).unwrap_or(assets.board.source()).display()
-                            ),
-                        );
-                        ui.add_space(12.0);
+        // ── Right sidebar (replaced by the eval dashboard in Phase 5) ──
+        egui::Panel::right("side_status").show(ui, |ui| {
+            ui.heading("SiliconBoard");
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(&self.status).weak());
+            ui.add_space(8.0);
+            ui.separator();
+            if ui.button("Flip board").clicked() {
+                self.view.flip();
+            }
+            if ui.button("Reset board view").clicked() {
+                self.view.reset();
+            }
+            ui.add_space(8.0);
+            ui.label("FEN:");
+            ui.monospace(self.game.fen());
+            if ui.button("Copy FEN").clicked() {
+                ui.ctx().copy_text(self.game.fen());
+                self.status = "FEN copied to clipboard.".to_string();
+            }
+            ui.add_space(8.0);
+            ui.label("Move history:");
+            ui.monospace(self.game.history_string());
+        });
 
-                        // ── Two-column layout: board thumb + piece preview ──
-                        ui.horizontal(|ui| {
-                            // Board thumbnail column.
-                            ui.vertical(|ui| {
-                                ui.label("Board (default: blue.png)");
-                                let handle = assets.board.handle();
-                                ui.add(
-                                    egui::Image::new((
-                                        handle.id(),
-                                        egui::vec2(BOARD_THUMBNAIL_SIZE, BOARD_THUMBNAIL_SIZE),
-                                    ))
-                                    .alt_text("chess board")
-                                    .maintain_aspect_ratio(true),
-                                );
-                                ui.label(
-                                    egui::RichText::new(
-                                        format!("{}×{} px", assets.board.dimensions.0, assets.board.dimensions.1),
-                                    )
-                                    .weak(),
-                                );
-                            });
-
-                            ui.add_space(16.0);
-
-                            // Piece preview column — two rows.
-                            ui.vertical(|ui| {
-                                ui.label("Pieces (cburnett → 512×512 RGBA8)");
-                                for color in [PieceColor::White, PieceColor::Black] {
-                                    ui.horizontal(|ui| {
-                                        ui.label(match color {
-                                            PieceColor::White => "White:",
-                                            PieceColor::Black => "Black:",
-                                        });
-                                        for kind in [
-                                            PieceKind::Pawn,
-                                            PieceKind::Knight,
-                                            PieceKind::Bishop,
-                                            PieceKind::Rook,
-                                            PieceKind::Queen,
-                                            PieceKind::King,
-                                        ] {
-                                            let id = assets::PieceId { color, kind };
-                                            if let Some(handle) =
-                                                assets.pieces.get(id)
-                                            {
-                                                ui.add(
-                                                    egui::Image::new((
-                                                        handle.id(),
-                                                        egui::vec2(
-                                                            PREVIEW_TILE_SIZE,
-                                                            PREVIEW_TILE_SIZE,
-                                                        ),
-                                                    ))
-                                                    .alt_text(format!("{:?}", id)),
-                                                );
-                                            } else {
-                                                ui.colored_label(
-                                                    egui::Color32::RED,
-                                                    format!("missing {:?}", id),
-                                                );
-                                            }
-                                        }
-                                    });
-                                }
-                            });
-                        });
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.label(
-                            "Asset root resolved from workspace `public/` directory. \
-                             Override with `SILICONBOARD_PUBLIC_ROOT=/path/to/public`.",
-                        );
-                        ui.label(
-                            "Full board, eval dashboard, PGN viewer and menus land in later phases.",
-                        );
-                    }
+        // ── Central board panel ──
+        egui::CentralPanel::default().show(ui, |central_ui| {
+            match &self.assets {
+                None => {
+                    central_ui.vertical_centered(|ui| {
+                        ui.add_space(24.0);
+                        ui.label("Loading piece + board assets…");
+                    });
                 }
-            });
+                Some(Err(err)) => {
+                    central_ui.vertical_centered(|ui| {
+                        ui.add_space(24.0);
+                        ui.colored_label(egui::Color32::RED, "Asset load failed:");
+                        ui.label(err);
+                    });
+                }
+                Some(Ok(assets)) => {
+                    let board_action = gui::board_view::show(
+                        central_ui,
+                        &self.game,
+                        assets,
+                        &mut self.view,
+                    );
+                    apply_interface(board_action, &mut self.game, &mut self.view, &mut self.status);
+                }
+            }
+            // Request a repaint so the engine's status / drag animation /
+            // future eval updates flow into the GUI smoothly. Phase 5 / 6
+            // replaces this with event-driven repaints when idle.
+            central_ui.ctx().request_repaint();
+        });
+    }
+}
+
+/// Apply a [`BoardAction`] to the mutable state (GameState + view + status).
+fn apply_interface(
+    action: BoardAction,
+    game: &mut GameState,
+    view: &mut BoardView,
+    status: &mut String,
+) {
+    match action {
+        BoardAction::None => {}
+        BoardAction::PieceSelected { from } => {
+            *status = format!("selected square {}", from);
+        }
+        BoardAction::RequestMove { m } => match game.apply_move(m) {
+            Ok(()) => {
+                *status = format!(
+                    "played {} | history: {}",
+                    m.to_string(),
+                    game.history_string()
+                );
+            }
+            Err(e) => {
+                *status = format!("move error: {}", e);
+            }
+        },
+        BoardAction::PromotionChoice { .. } => {
+            // Phase-4 M4 stub — the actual promotion mini-modal is landing
+            // in a single follow-up commit.
+            *status = "promotion pending — Phase-4 M4 modal is being wired".into();
+        }
     }
 }
 
 fn main() -> eframe::Result<()> {
-    // Initialize logging so Phase-1-BIS texture upload messages are visible.
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
