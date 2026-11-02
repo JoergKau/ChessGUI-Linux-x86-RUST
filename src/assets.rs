@@ -73,23 +73,12 @@ impl PieceId {
 #[derive(Clone)]
 pub struct BoardTexture {
     handle: TextureHandle,
-    /// Raw pixel dimensions of the source PNG, retained so the future
-    /// `board_view` can compute preserve-aspect ``rect.0.max_rect()``.
-    pub dimensions: (u32, u32),
-    /// Path that was loaded (relative to the asset root).
-    source: PathBuf,
 }
 
 impl BoardTexture {
     /// Reference to the underlying egui texture handle.
     pub fn handle(&self) -> &TextureHandle {
         &self.handle
-    }
-
-    /// Path to the image, relative to the asset root. Useful for the
-    /// Phase-5 board-picker UI.
-    pub fn source(&self) -> &Path {
-        &self.source
     }
 }
 
@@ -106,16 +95,6 @@ impl PieceTextures {
     pub fn get(&self, id: PieceId) -> Option<&TextureHandle> {
         self.textures.get(&id)
     }
-
-    /// Iterate `(PieceId, &TextureHandle)` pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (PieceId, &TextureHandle)> {
-        self.textures.iter().map(|(k, v)| (*k, v))
-    }
-
-    /// Number of pieces loaded.
-    pub fn len(&self) -> usize {
-        self.textures.len()
-    }
 }
 
 /// Bundle of every asset SiliconBoard needs at startup. Returned by
@@ -127,10 +106,6 @@ pub struct Assets {
     pub board: BoardTexture,
     /// All twelve piece sprites, rasterised from SVG.
     pub pieces: PieceTextures,
-    /// Asset root directory the textures were loaded from. Kept on
-    /// `Assets` so the Phase-5 board-picker can rebuild `BoardTexture`
-    /// from a different filename without re-implementing the resolver.
-    pub asset_root: PathBuf,
 }
 
 impl Assets {
@@ -156,17 +131,7 @@ impl Assets {
         let piece_root = asset_root.join("piece").join("cburnett");
         let pieces = load_pieces(ctx, &piece_root, PIECE_RASTER_SIZE)?;
 
-        Ok(Self {
-            board,
-            pieces,
-            asset_root: asset_root.to_path_buf(),
-        })
-    }
-
-    /// Path to the cburnett piece directory. The Phase-5 theme picker will
-    /// walk sibling directories alongside it.
-    pub fn pieces_root(&self) -> PathBuf {
-        self.asset_root.join("piece").join("cburnett")
+        Ok(Self { board, pieces })
     }
 }
 
@@ -215,11 +180,7 @@ fn load_board(ctx: &Context, path: &Path) -> Result<BoardTexture, AssetError> {
         handle.id(),
     );
 
-    Ok(BoardTexture {
-        handle,
-        dimensions: (width, height),
-        source: path.to_path_buf(),
-    })
+    Ok(BoardTexture { handle })
 }
 
 /// Load all twelve pieces from `piece_root` (a directory containing
@@ -349,8 +310,18 @@ fn load_piece_svg(
 const MAX_PARENT_WALK: usize = 8;
 
 fn resolve_asset_root() -> PathBuf {
+    let env_override = std::env::var("SILICONBOARD_PUBLIC_ROOT").ok();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    resolve_asset_root_from(env_override.as_deref(), exe_dir.as_deref())
+}
+
+/// Pure version of [`resolve_asset_root`]: the env override is tried first,
+/// then the walk up from `exe_dir`, then `./public`.
+fn resolve_asset_root_from(env_override: Option<&str>, exe_dir: Option<&Path>) -> PathBuf {
     // (1) Hard override via environment variable.
-    if let Ok(custom) = std::env::var("SILICONBOARD_PUBLIC_ROOT") {
+    if let Some(custom) = env_override {
         let p = PathBuf::from(custom);
         if looks_like_asset_root(&p) {
             return p;
@@ -361,13 +332,9 @@ fn resolve_asset_root() -> PathBuf {
         );
     }
 
-    // (2) Walk up from `<exe>` looking for the first directory that looks
-    //     like the workspace `public/` tree.
-    if let Some(start) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-    {
-        let mut cursor: Option<&Path> = Some(start.as_path());
+    // (2) Walk up from the executable's folder looking for `public/`.
+    if let Some(start) = exe_dir {
+        let mut cursor: Option<&Path> = Some(start);
         let mut steps = 0usize;
         while let Some(candidate) = cursor {
             if steps > MAX_PARENT_WALK {
@@ -563,19 +530,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_asset_root_prefers_env_override() {
-        // Lexical check: the resolver is supposed to honour the env var
-        // before doing anything else. We don't want to actually clobber the
-        // user's environment, so we only assert the precedence order.
-        let _ = std::env::var("SILICONBOARD_PUBLIC_ROOT");
-        // This is enough to exercise the code path during `cargo test`.
-        assert!(MAX_PARENT_WALK >= 4);
+    /// Build a minimal fake `public/` tree (one file per required folder).
+    fn fake_public_tree(root: &Path) -> PathBuf {
+        let public = root.join("public");
+        std::fs::create_dir_all(public.join("images").join("board")).unwrap();
+        std::fs::create_dir_all(public.join("piece").join("cburnett")).unwrap();
+        std::fs::write(public.join("images").join("board").join("blue.png"), b"x").unwrap();
+        std::fs::write(public.join("piece").join("cburnett").join("wK.svg"), b"x").unwrap();
+        public
     }
 
     #[test]
     fn looks_like_asset_root_rejects_garbage_dirs() {
         assert!(!looks_like_asset_root(Path::new("definitely/not/here")));
         assert!(!looks_like_asset_root(Path::new(".")));
+    }
+
+    #[test]
+    fn env_override_wins_over_the_executable_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let override_root = fake_public_tree(&dir.path().join("override"));
+        let exe_root = fake_public_tree(&dir.path().join("exe-side"));
+        let exe_dir = dir.path().join("exe-side").join("target").join("debug");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+
+        let chosen = resolve_asset_root_from(
+            Some(override_root.to_str().unwrap()),
+            Some(&exe_dir),
+        );
+        assert_eq!(chosen, override_root);
+        assert_ne!(chosen, exe_root);
+    }
+
+    #[test]
+    fn invalid_env_override_falls_back_to_executable_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe_root = fake_public_tree(dir.path());
+        let exe_dir = dir.path().join("target").join("debug");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+
+        let chosen = resolve_asset_root_from(Some("/definitely/not/a/public/tree"), Some(&exe_dir));
+        assert_eq!(chosen, exe_root);
+    }
+
+    #[test]
+    fn resolution_falls_back_to_cwd_public_when_nothing_matches() {
+        let chosen = resolve_asset_root_from(None, None);
+        assert_eq!(chosen, PathBuf::from("public"));
     }
 }

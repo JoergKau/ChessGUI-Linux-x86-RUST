@@ -31,13 +31,11 @@
 //! PGN panel can paint faster than `O(ply)` per click.
 
 use shakmaty::{
-    san::SanPlus, zobrist::Zobrist64, CastlingMode, Chess, Color, EnPassantMode, FromSetup,
+    san::SanPlus, zobrist::Zobrist64, CastlingMode, Chess, Color, EnPassantMode, File, FromSetup,
     Move, Position, Role, Square,
 };
 
-use std::fmt::Write;
-
-pub use crate::assets::PieceId;
+use crate::chess::opening_book::PolyglotBook;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Local colour / kind enums
@@ -103,18 +101,6 @@ pub enum PieceKind {
 }
 
 impl PieceKind {
-    /// Letter used in FEN, SAN, and file names.
-    pub const fn letter(self) -> char {
-        match self {
-            PieceKind::King => 'K',
-            PieceKind::Queen => 'Q',
-            PieceKind::Rook => 'R',
-            PieceKind::Bishop => 'B',
-            PieceKind::Knight => 'N',
-            PieceKind::Pawn => 'P',
-        }
-    }
-
     /// shakmaty [`Role`] for this kind.
     pub const fn role(self) -> Role {
         match self {
@@ -190,19 +176,18 @@ impl GameState {
     /// Standard chess starting position. Equivalent to
     /// `GameState::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")`.
     pub fn new() -> Self {
-        Self::from_position(Chess::default()).expect("default position is always valid")
+        Self::from_position(Chess::default())
     }
 
     /// Wrap an existing shakmaty [`Chess`] as a fresh `GameState` (no
-    /// history). Used in tests and when an engine emits a position we want
-    /// to inspect.
-    pub fn from_position(start: Chess) -> Result<Self, FenError> {
-        Self::validate(&start).map_err(FenError::from_position)?;
-        Ok(Self {
+    /// history). The position may already be finished (checkmate, stalemate)
+    /// so that finished games can be inspected.
+    pub fn from_position(start: Chess) -> Self {
+        Self {
             start,
             history: Vec::new(),
             cur_ply: 0,
-        })
+        }
     }
 
     /// Parse a FEN string and use it as the starting position. Accepts
@@ -214,12 +199,10 @@ impl GameState {
             .map_err(|source| FenError::Parse { source })?;
         let setup = parsed_fen.into_setup();
         let chess = Chess::from_setup(setup, CastlingMode::Standard)
-            .map_err(|source| FenError::Setup { source })?;
-        Ok(Self {
-            start: chess,
-            history: Vec::new(),
-            cur_ply: 0,
-        })
+            .map_err(|source| FenError::Setup {
+                source: Box::new(source),
+            })?;
+        Ok(Self::from_position(chess))
     }
 
     // ── Read-only accessors ─────────────────────────────────────────────
@@ -238,6 +221,11 @@ impl GameState {
         self.cur_ply
     }
 
+    /// The starting position of the game (the position before the first ply).
+    pub fn start_position(&self) -> Chess {
+        self.start.clone()
+    }
+
     /// Total number of plies currently cached in history (those ≤ `cur_ply`
     /// plus any "redo tail").
     pub fn total_plies(&self) -> usize {
@@ -253,6 +241,14 @@ impl GameState {
     /// Whose turn it is.
     pub fn turn(&self) -> PieceColor {
         self.position().turn().into()
+    }
+
+    /// The squares of the move that produced the displayed position, as
+    /// `(from, to)`. For castling the `to` square is the king's destination.
+    /// `None` at the start of the game.
+    pub fn last_move(&self) -> Option<(Square, Square)> {
+        let ply = self.cur_ply.checked_sub(1).map(|i| &self.history[i])?;
+        ply.move_.from().map(|from| (from, target_square(ply.move_)))
     }
 
     /// Current FEN.
@@ -282,15 +278,15 @@ impl GameState {
         self.position().is_game_over()
     }
 
-    /// Outcome of the game, in human-readable form. `"unfinished"` if the
+    /// Outcome of the game, in human-readable form. `"Unfinished"` if the
     /// game is still in progress.
     pub fn outcome(&self) -> String {
         let pos = self.position();
-        if pos.is_checkmate() {
+        if self.is_checkmate() {
             // The *side to move* lost; the other side won.
             let winner: PieceColor = pos.turn().other().into();
             format!("{} wins by checkmate", piece_color_label_local(winner))
-        } else if pos.is_stalemate() {
+        } else if self.is_stalemate() {
             "Draw by stalemate".to_string()
         } else if pos.is_insufficient_material() {
             "Draw by insufficient material".to_string()
@@ -304,13 +300,9 @@ impl GameState {
 
     // ── Move queries ─────────────────────────────────────────────────────
 
-    /// All legal moves from the current position.
-    pub fn legal_moves(&self) -> Vec<Move> {
-        self.position().legal_moves().into_iter().collect()
-    }
-
-    /// All legal moves from `from`. Used by the Phase-4 board widget to
-    /// highlight candidate destinations after a user click on a piece.
+    /// Legal moves from `from` that the user can play by clicking or
+    /// dragging. Used by the board widget to highlight candidate
+    /// destinations after a user click on a piece.
     pub fn legal_moves_from(&self, from: Square) -> Vec<Move> {
         // Cheap O(legal) filter — shakmaty's filter-by-piece is the fastest
         // way to do this without touching `pos.collect()`.
@@ -321,20 +313,13 @@ impl GameState {
             .collect()
     }
 
-    /// `true` iff `m` is legal in the current position.
-    pub fn is_legal(&self, m: Move) -> bool {
-        self.position().is_legal(m)
-    }
-
-    // ── Move application ─────────────────────────────────────────────────
-
     /// Apply a fully-formed [`Move`].
     ///
     /// Returns `Ok(())` and advances `cur_ply` on success, `Err(MoveError)`
-    /// if the move is illegal (or has the wrong promotion role).
+    /// if the move is not legal in the displayed position.
     pub fn apply_move(&mut self, m: Move) -> Result<(), MoveError> {
         let pos = self.position();
-        if !pos.is_legal(m) {
+        if !self.is_legal(m) {
             return Err(MoveError::IllegalMove);
         }
         // `from_move_and_play_unchecked` would mutate `pos`; keep the
@@ -346,93 +331,42 @@ impl GameState {
         Ok(())
     }
 
-    /// Construct a move from `(from, to, promotion)` and apply it. `promotion`
-    /// must be `Some` for promotion moves (a pawn reaching the back rank)
-    /// and `None` otherwise — the player-driven flow will be:
-    ///
-    /// 1. User clicks source square (selected from() populated).
-    /// 2. User clicks destination square.
-    /// 3. `apply_user_move()` checks whether the destination is a
-    ///    promotion square. If yes, the Phase-4 widget pops a small modal
-    ///    and calls `apply_user_move()` a second time with the chosen role.
-    ///
-    /// # Errors
-    /// Returns `MoveError::IllegalMove` when no legal move matches the
-    /// given inputs, and `MoveError::AmbiguousPromotion` when more than one
-    /// promotion role is legal for the same (from, to). The latter is
-    /// handled at the UI layer.
-    pub fn apply_user_move(
+    /// `true` iff `m` is legal in the displayed position.
+    fn is_legal(&self, m: Move) -> bool {
+        self.position().is_legal(m)
+    }
+
+    /// Test helper: play the legal move that goes from `from` to `to`
+    /// (castling by the king's target square). For a promotion, `promotion`
+    /// selects the piece; without it a promotion is illegal here.
+    #[cfg(test)]
+    pub fn play_squares(
         &mut self,
         from: Square,
         to: Square,
         promotion: Option<PieceKind>,
     ) -> Result<(), MoveError> {
-        // Build candidate moves by looking at all SAN candidates with the
-        // given role (if we know it) or by filtering legal moves.
-        let pos = self.position();
-        let from_role = pos.board().piece_at(from).map(|p| p.role);
-        let role = match promotion {
-            // For promotions, we have to inspect pawn-on-back-rank moves
-            // specifically; the role will be the pawn + the chosen promotion
-            // piece goes into `Move::Normal { promotion: … }`.
-            Some(_) => Role::Pawn,
-            None => match from_role {
-                Some(r) => r,
-                None => return Err(MoveError::IllegalMove),
-            },
-        };
-        let candidates: Vec<Move> = pos
-            .san_candidates(role, to)
+        let chosen = self
+            .legal_moves_from(from)
             .into_iter()
-            .filter(|m| m.from() == Some(from))
-            .collect();
-
-        if candidates.is_empty() {
-            return Err(MoveError::IllegalMove);
-        }
-
-        let chosen = if let Some(promo) = promotion {
-            let matched: Vec<Move> = candidates
-                .into_iter()
-                .filter(|m| matches!(m, Move::Normal { promotion: Some(r), .. } if *r == promo.role()))
-                .collect();
-            match matched.len() {
-                0 => return Err(MoveError::IllegalMove),
-                1 => matched[0],
-                _ => return Err(MoveError::AmbiguousPromotion),
-            }
-        } else {
-            match candidates.len() {
-                0 => return Err(MoveError::IllegalMove),
-                1 => candidates[0],
-                _ => return Err(MoveError::AmbiguousPromotion),
-            }
-        };
-
+            .find(|m| target_square(*m) == to && m.promotion() == promotion.map(PieceKind::role))
+            .ok_or(MoveError::IllegalMove)?;
         self.apply_move(chosen)
     }
 
-    /// Returns the move that *would* play pawn-to-back-rank as each of the
-    /// four possible promotion choices. If the destination is not actually
-    /// a promotion square for the current position, returns an empty vec.
-    /// The Phase-4 promotion modal uses this to render choices.
+    /// The promotion pieces that are legal for a pawn move `from` → `to`, in
+    /// Q/R/B/N order. Empty if the move is not a promotion. The board's
+    /// promotion modal renders exactly these choices.
     pub fn promotion_choices(&self, from: Square, to: Square) -> Vec<PieceKind> {
-        let pos = self.position();
-        let mut choices = Vec::new();
-        for kind in [PieceKind::Queen, PieceKind::Rook, PieceKind::Bishop, PieceKind::Knight] {
-            let role = kind.role();
-            if pos
-                .san_candidates(Role::Pawn, to)
-                .into_iter()
-                .any(|m| {
-                    m.from() == Some(from)
-                        && matches!(m, Move::Normal { promotion: Some(r), .. } if r == role)
+        let legal = self.legal_moves_from(from);
+        [PieceKind::Queen, PieceKind::Rook, PieceKind::Bishop, PieceKind::Knight]
+            .into_iter()
+            .filter(|kind| {
+                legal.iter().any(|m| {
+                    target_square(*m) == to && m.promotion() == Some(kind.role())
                 })
-            {
-                choices.push(kind);
-            }
-        }
-        choices
+            })
+            .collect()
     }
 
     // ── Navigation ───────────────────────────────────────────────────────
@@ -497,20 +431,40 @@ impl GameState {
         lines
     }
 
-    /// Serialise the active history as a one-line token stream, e.g.
-    /// `"1. e4 e5 2. Nf3 Nc6 3. Bb5"`. The Phase-5 PGN panel renders this
-    /// inside a single monospace label; the structured [`Self::pgn_lines`]
-    /// is used for clickable navigation.
-    pub fn history_string(&self) -> String {
-        let mut s = String::new();
-        for (i, ply) in self.active_history().iter().enumerate() {
-            if i % 2 == 0 {
-                let move_no = (i / 2) + 1;
-                write!(&mut s, "{}. ", move_no).unwrap();
-            }
-            write!(&mut s, "{} ", ply.san).unwrap();
+    /// Convert a line of UCI moves (e.g. an engine principal variation) into
+    /// SAN, starting from the displayed position. Conversion stops at the
+    /// first move that is not legal, so a malformed line yields a shorter
+    /// result rather than an error.
+    pub fn uci_moves_to_san(&self, uci_moves: &[String]) -> Vec<String> {
+        let mut pos = self.position();
+        let mut san_line = Vec::with_capacity(uci_moves.len());
+        for text in uci_moves {
+            let Ok(uci) = text.parse::<shakmaty::uci::UciMove>() else {
+                break;
+            };
+            let Ok(m) = uci.to_move(&pos) else {
+                break;
+            };
+            san_line.push(SanPlus::from_move_and_play_unchecked(&mut pos, m).to_string());
         }
-        s.trim_end().to_string()
+        san_line
+    }
+
+    /// Opening-book moves for the displayed position as `(SAN, weight)`,
+    /// heaviest first. Empty when the position is not in the book.
+    pub fn book_suggestions(&self, book: &PolyglotBook) -> Vec<(String, u16)> {
+        let pos = self.position();
+        let mut suggestions: Vec<(String, u16)> = book
+            .find(self.zobrist())
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .to_move(&pos)
+                    .map(|m| (SanPlus::from_move(pos.clone(), m).to_string(), entry.weight))
+            })
+            .collect();
+        suggestions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        suggestions
     }
 
     // ── Engine-binding helpers ───────────────────────────────────────────
@@ -530,14 +484,21 @@ impl GameState {
         self.history.push(ply);
         self.cur_ply = self.history.len();
     }
+}
 
-    /// Cheap validity check; returns `Err` if the position is not actually
-    /// a legal chess position.
-    fn validate(start: &Chess) -> Result<(), &'static str> {
-        if start.is_checkmate() || start.is_stalemate() {
-            return Err("starting position is already terminal");
-        }
-        Ok(())
+/// The square a player clicks to play `m`. Equal to [`Move::to`] except for
+/// castling, where shakmaty reports the rook square and the king's
+/// destination (g1/c1 and so on) is returned instead.
+pub fn target_square(m: Move) -> Square {
+    if let Move::Castle { king, rook } = m {
+        let file = if rook.file().to_u32() > king.file().to_u32() {
+            File::G
+        } else {
+            File::C
+        };
+        Square::from_coords(file, king.rank())
+    } else {
+        m.to()
     }
 }
 
@@ -564,24 +525,10 @@ pub enum FenError {
     Parse {
         source: shakmaty::fen::ParseFenError,
     },
-    /// `Chess::from_setup` rejected the FEN-derived setup.
+    /// `Chess::from_setup` rejected the FEN-derived setup (illegal position).
     Setup {
-        source: shakmaty::PositionError<Chess>,
+        source: Box<shakmaty::PositionError<Chess>>,
     },
-    /// A wrapping helper rejected the position (currently only used for
-    /// fully-terminal positions like checkmate as a starter).
-    InvalidStartingPosition,
-}
-
-impl FenError {
-    fn from_position(err: &'static str) -> Self {
-        // We can't actually destructure &'static str into an enum var; small
-        // helper to keep semantics simple.
-        match err {
-            "starting position is already terminal" => FenError::InvalidStartingPosition,
-            _ => FenError::InvalidStartingPosition,
-        }
-    }
 }
 
 impl std::fmt::Display for FenError {
@@ -589,9 +536,6 @@ impl std::fmt::Display for FenError {
         match self {
             FenError::Parse { source } => write!(f, "could not parse FEN: {}", source),
             FenError::Setup { source } => write!(f, "invalid FEN setup: {}", source),
-            FenError::InvalidStartingPosition => {
-                write!(f, "starting position is not a legal in-progress chess game")
-            }
         }
     }
 }
@@ -601,28 +545,21 @@ impl std::error::Error for FenError {
         match self {
             FenError::Parse { source } => Some(source),
             FenError::Setup { source } => Some(source),
-            FenError::InvalidStartingPosition => None,
         }
     }
 }
 
-/// Errors raised when applying a user-supplied or engine-supplied move.
+/// Errors raised when applying a move to the game.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
-    /// No legal move matches the given inputs.
+    /// The move is not legal in the displayed position.
     IllegalMove,
-    /// More than one legal move matches — used to flag that the caller
-    /// needs to disambiguate, e.g. promote to a specific role.
-    AmbiguousPromotion,
 }
 
 impl std::fmt::Display for MoveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MoveError::IllegalMove => f.write_str("illegal move"),
-            MoveError::AmbiguousPromotion => {
-                f.write_str("multiple promotion moves match; pick a role")
-            }
         }
     }
 }
@@ -637,10 +574,14 @@ impl std::error::Error for MoveError {}
 mod tests {
     use super::*;
 
+    fn sq(name: &str) -> Square {
+        Square::from_ascii(name.as_bytes()).unwrap()
+    }
+
     #[test]
     fn starting_position_has_20_legal_moves() {
         let g = GameState::new();
-        assert_eq!(g.legal_moves().len(), 20);
+        assert_eq!(g.position().legal_moves().len(), 20);
         assert!(!g.is_check());
         assert!(!g.is_checkmate());
         assert!(!g.is_stalemate());
@@ -656,7 +597,7 @@ mod tests {
         // White plays e4 (a pawn move, UCI: e2e4).
         let from = Square::from_ascii(b"e2").unwrap();
         let to = Square::from_ascii(b"e4").unwrap();
-        g.apply_user_move(from, to, None).unwrap();
+        g.play_squares(from, to, None).unwrap();
 
         assert_eq!(g.cur_ply(), 1);
         assert_eq!(g.turn(), PieceColor::Black);
@@ -667,7 +608,7 @@ mod tests {
         // Black plays e5.
         let from = Square::from_ascii(b"e7").unwrap();
         let to = Square::from_ascii(b"e5").unwrap();
-        g.apply_user_move(from, to, None).unwrap();
+        g.play_squares(from, to, None).unwrap();
         assert_eq!(g.cur_ply(), 2);
         assert_eq!(g.turn(), PieceColor::White);
     }
@@ -676,7 +617,7 @@ mod tests {
     fn illegal_moves_are_rejected() {
         let mut g = GameState::new();
         // e2 → e5 is illegal for white on move 0.
-        let r = g.apply_user_move(
+        let r = g.play_squares(
             Square::from_ascii(b"e2").unwrap(),
             Square::from_ascii(b"e5").unwrap(),
             None,
@@ -689,8 +630,8 @@ mod tests {
     #[test]
     fn undo_and_redo_round_trip() {
         let mut g = GameState::new();
-        g.apply_user_move(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
-        g.apply_user_move(Square::from_ascii(b"e7").unwrap(), Square::from_ascii(b"e5").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"e7").unwrap(), Square::from_ascii(b"e5").unwrap(), None).unwrap();
         assert_eq!(g.cur_ply(), 2);
 
         assert!(g.undo());
@@ -709,7 +650,7 @@ mod tests {
     #[test]
     fn fen_roundtrips_after_one_move() {
         let mut g = GameState::new();
-        g.apply_user_move(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
 
         let fen = g.fen();
         let mut parsed = GameState::from_fen(&fen).unwrap();
@@ -734,12 +675,12 @@ mod tests {
         // And after we apply e7→e5 on the parsed state, the FEN string should
         // match the one we get by applying both moves on g from the start
         // (the round-trip is loss-less).
-        parsed.apply_user_move(
+        parsed.play_squares(
             Square::from_ascii(b"e7").unwrap(),
             Square::from_ascii(b"e5").unwrap(),
             None,
         ).unwrap();
-        g.apply_user_move(
+        g.play_squares(
             Square::from_ascii(b"e7").unwrap(),
             Square::from_ascii(b"e5").unwrap(),
             None,
@@ -751,10 +692,10 @@ mod tests {
     fn fools_mate_terminates() {
         // Fool's mate: 1.f3 e5 2.g4 Qh4# — four plies, then checkmate.
         let mut g = GameState::new();
-        g.apply_user_move(Square::from_ascii(b"f2").unwrap(), Square::from_ascii(b"f3").unwrap(), None).unwrap();
-        g.apply_user_move(Square::from_ascii(b"e7").unwrap(), Square::from_ascii(b"e5").unwrap(), None).unwrap();
-        g.apply_user_move(Square::from_ascii(b"g2").unwrap(), Square::from_ascii(b"g4").unwrap(), None).unwrap();
-        g.apply_user_move(Square::from_ascii(b"d8").unwrap(), Square::from_ascii(b"h4").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"f2").unwrap(), Square::from_ascii(b"f3").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"e7").unwrap(), Square::from_ascii(b"e5").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"g2").unwrap(), Square::from_ascii(b"g4").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"d8").unwrap(), Square::from_ascii(b"h4").unwrap(), None).unwrap();
         assert!(g.is_checkmate(), "expected checkmate, got FEN {}", g.fen());
         assert_eq!(g.outcome(), "Black wins by checkmate");
     }
@@ -771,15 +712,15 @@ mod tests {
             Square::from_ascii(b"a8").unwrap(),
         );
         assert_eq!(choices.len(), 4);
-        // Without specifying promotion, applying should fail (ambiguous).
-        let r = g.apply_user_move(
+        // Without a promotion piece the promotion move is not playable.
+        let r = g.play_squares(
             Square::from_ascii(b"a7").unwrap(),
             Square::from_ascii(b"a8").unwrap(),
             None,
         );
-        assert!(matches!(r, Err(MoveError::AmbiguousPromotion)));
+        assert!(matches!(r, Err(MoveError::IllegalMove)));
         // With Queen explicit, it succeeds.
-        g.apply_user_move(
+        g.play_squares(
             Square::from_ascii(b"a7").unwrap(),
             Square::from_ascii(b"a8").unwrap(),
             Some(PieceKind::Queen),
@@ -815,12 +756,78 @@ mod tests {
     }
 
     #[test]
-    fn history_string_render() {
+    fn last_move_follows_the_history_cursor() {
         let mut g = GameState::new();
-        g.apply_user_move(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
-        g.apply_user_move(Square::from_ascii(b"e7").unwrap(), Square::from_ascii(b"e5").unwrap(), None).unwrap();
-        g.apply_user_move(Square::from_ascii(b"g1").unwrap(), Square::from_ascii(b"f3").unwrap(), None).unwrap();
-        let s = g.history_string();
-        assert_eq!(s, "1. e4 e5 2. Nf3");
+        assert_eq!(g.last_move(), None);
+        g.play_squares(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
+        g.play_squares(Square::from_ascii(b"e7").unwrap(), Square::from_ascii(b"e5").unwrap(), None).unwrap();
+        assert_eq!(g.last_move(), Some((sq("e7"), sq("e5"))));
+        g.undo();
+        assert_eq!(g.last_move(), Some((sq("e2"), sq("e4"))));
+        g.goto_start();
+        assert_eq!(g.last_move(), None);
+    }
+
+    #[test]
+    fn castling_last_move_reports_king_destination() {
+        let mut g = GameState::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        g.play_squares(sq("e1"), sq("g1"), None).unwrap();
+        assert_eq!(g.last_move(), Some((sq("e1"), sq("g1"))));
+    }
+
+    #[test]
+    fn uci_line_converts_to_san_from_the_current_position() {
+        let g = GameState::new();
+        let pv: Vec<String> = ["e2e4", "e7e5", "g1f3", "b8c6"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(g.uci_moves_to_san(&pv), vec!["e4", "e5", "Nf3", "Nc6"]);
+    }
+
+    #[test]
+    fn uci_line_stops_at_the_first_illegal_move() {
+        let g = GameState::new();
+        let pv: Vec<String> = ["e2e4", "e2e5", "g1f3"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(g.uci_moves_to_san(&pv), vec!["e4"]);
+    }
+
+    #[test]
+    fn target_square_maps_castling_onto_the_king_destination() {
+        let g = GameState::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let castles: Vec<Move> = g
+            .legal_moves_from(sq("e1"))
+            .into_iter()
+            .filter(|m| m.is_castle())
+            .collect();
+        let mut targets: Vec<Square> = castles.iter().map(|m| target_square(*m)).collect();
+        targets.sort();
+        assert_eq!(targets, vec![sq("c1"), sq("g1")]);
+    }
+
+    #[test]
+    fn finished_positions_can_be_loaded_for_inspection() {
+        // Fool's mate final position: loadable, and reported as checkmate.
+        let g = GameState::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3").unwrap();
+        assert!(g.is_checkmate());
+        assert_eq!(g.outcome(), "Black wins by checkmate");
+    }
+
+    #[test]
+    fn book_suggestions_list_real_book_moves_for_the_start() {
+        let book = PolyglotBook::open(std::path::Path::new("../books/gm2001.bin"))
+            .expect("the workspace fixture books/gm2001.bin must be present");
+        let suggestions = GameState::new().book_suggestions(&book);
+        assert!(!suggestions.is_empty(), "start position must have book moves");
+        // Every suggestion must be a legal SAN move of the start position.
+        for (san, _) in &suggestions {
+            assert!(
+                shakmaty::san::San::from_ascii(san.as_bytes()).is_ok(),
+                "book SAN `{}` must parse",
+                san
+            );
+        }
+        let weights: Vec<u16> = suggestions.iter().map(|(_, w)| *w).collect();
+        assert!(weights.windows(2).all(|pair| pair[0] >= pair[1]), "heaviest first");
     }
 }

@@ -58,11 +58,13 @@ pub enum EngineCommand {
     /// `ucinewgame` — drops any cached state (hash tables, repetition
     /// counts) so the engine starts fresh.
     NewGame,
-    /// `setoption name <n> value <v>` (or `value <v>` may be elided for
-    /// `button` options).
+    /// `setoption name <n> value <v>`. `value: None` presses a `button`
+    /// option and sends `setoption name <n>` without a value.
+    // Complete UCI command set: the engine-options dialog (Phase 6) sends this.
+    #[allow(dead_code)]
     SetOption {
         name: String,
-        value: String,
+        value: Option<String>,
     },
     /// `position [startpos | fen <FEN>] moves <u1> <u2> …`.
     SetPosition {
@@ -92,10 +94,11 @@ impl EngineCommand {
             EngineCommand::Initialize => "uci".into(),
             EngineCommand::IsReady => "isready".into(),
             EngineCommand::NewGame => "ucinewgame".into(),
-            EngineCommand::SetOption { name, value } => {
+            EngineCommand::SetOption { name, value } => match value {
+                Some(v) => format!("setoption name {} value {}", name, v),
                 // Per UCI spec, button options omit the value half.
-                format!("setoption name {} value {}", name, value)
-            }
+                None => format!("setoption name {}", name),
+            },
             EngineCommand::SetPosition { fen, moves } => {
                 let prefix = match fen {
                     Some(f) => format!("position fen {}", f),
@@ -116,10 +119,15 @@ impl EngineCommand {
 
 /// Sub-control for the `go` command.
 ///
+/// The full UCI `go` surface is kept on purpose: analysis uses `Infinite`,
+/// the Phase-6 game loop uses `Clock` and `MoveTime`, and the rest are
+/// exercised by the wire-format tests.
+///
 /// Mirrors the UCI spec for `go <X> <Y> …` — fields may be combined, with
 /// `movetime` overriding any clock arguments if both are supplied. We
 /// surface that choice to the caller via an enum so the UI code reflects
 /// intent instead of wrangling a raw flag set.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoControl {
     /// `go infinite` — search until told to stop.
@@ -215,9 +223,11 @@ pub enum EngineEvent {
     ReadyOk,
     /// `info …` line, fully reduced.
     Info(EngineStats),
-    /// `bestmove <m> [ponder <m>]`.
+    /// `bestmove <m> [ponder <m>]`. `best_move` is `None` for
+    /// `bestmove (none)`, which engines send when the side to move has no
+    /// legal move (checkmate or stalemate).
     BestMove {
-        best_move: String,
+        best_move: Option<String>,
         ponder: Option<String>,
     },
     /// Engine process exited cleanly (or our supervisor killed it).
@@ -252,6 +262,30 @@ pub struct EngineStats {
     pub pv: Vec<String>,
 }
 
+impl EngineStats {
+    /// Fold a newer `info` line into the running statistics. Fields the new
+    /// line carries replace the old values; fields it omits are kept, since
+    /// engines spread a search's data over several `info` lines.
+    pub fn merge(&mut self, update: &EngineStats) {
+        self.depth = update.depth.or(self.depth);
+        self.seldepth = update.seldepth.or(self.seldepth);
+        self.time_ms = update.time_ms.or(self.time_ms);
+        self.nodes = update.nodes.or(self.nodes);
+        self.nps = update.nps.or(self.nps);
+        self.hashfull_per_mille = update.hashfull_per_mille.or(self.hashfull_per_mille);
+        self.tbhits = update.tbhits.or(self.tbhits);
+        self.multipv = update.multipv.or(self.multipv);
+        self.currmovenumber = update.currmovenumber.or(self.currmovenumber);
+        self.score = update.score.or(self.score);
+        if let Some(currmove) = &update.currmove {
+            self.currmove = Some(currmove.clone());
+        }
+        if !update.pv.is_empty() {
+            self.pv = update.pv.clone();
+        }
+    }
+}
+
 /// Centipawn- or mate-score reported by the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Score {
@@ -265,12 +299,14 @@ pub enum Score {
 
 impl Score {
     /// Choose the centipawn-equivalent for an evaluation bar (mate in N
-    /// is treated as `±MATE_CP`).
+    /// is treated as `±MATE_CP`). `Mate(0)` means the side to move is
+    /// already checkmated, so it counts as a loss.
     pub fn centipawn_equivalent(&self) -> i32 {
         const MATE_CP: i32 = 30_000;
         match self {
             Score::Cp(cp) => *cp,
-            Score::Mate(n) => MATE_CP * n.signum(),
+            Score::Mate(n) if *n > 0 => MATE_CP,
+            Score::Mate(_) => -MATE_CP,
         }
     }
 }
@@ -313,27 +349,12 @@ pub enum UciOptionKind {
     String { default: String },
 }
 
-impl UciOptionKind {
-    /// Default value as a string, if applicable. Used by the Phase-5
-    /// settings UI to render a "Reset to default" button without dragging
-    /// the full [`UciOptionKind`] into a UI widget.
-    pub fn default_as_string(&self) -> Option<String> {
-        match self {
-            UciOptionKind::Check { default } => Some(default.to_string()),
-            UciOptionKind::Spin { default, .. } => Some(default.to_string()),
-            UciOptionKind::Combo { default, .. } => Some(default.clone()),
-            UciOptionKind::Button => None,
-            UciOptionKind::String { default } => Some(default.clone()),
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Errors raised by the protocol layer (currently only the process
-/// manager constructs these — the parser emits [`crate::engine::uci_parser::UciParseError`]).
+/// Errors raised by the process layer. The line parser reports its own
+/// [`crate::engine::uci_parser::UciParseError`] instead.
 #[derive(Debug)]
 pub enum EngineError {
     /// The process failed to spawn (binary missing, permissions, etc.).
@@ -341,12 +362,9 @@ pub enum EngineError {
         binary: Option<std::path::PathBuf>,
         source: std::io::Error,
     },
-    /// Tried to send a command after the writer task had exited.
+    /// Tried to send a command after the writer task had exited, or the
+    /// command queue is full (for [`crate::engine::EngineProcess::try_send`]).
     ChannelClosed,
-    /// Watchdog aborted the search before the engine replied.
-    WatchdogTimeout {
-        waited_for: std::time::Duration,
-    },
     /// Generic I/O error on the subprocess pipe.
     Io {
         source: std::io::Error,
@@ -357,19 +375,12 @@ impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineError::SpawnFailed { binary, source } => {
-                write!(
-                    f,
-                    "could not spawn engine {}: {}",
-                    binary.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into()),
-                    source
-                )
+                let name = binary
+                    .as_ref()
+                    .map_or_else(|| "?".to_string(), |p| p.display().to_string());
+                write!(f, "could not spawn engine {}: {}", name, source)
             }
             EngineError::ChannelClosed => f.write_str("engine command channel closed"),
-            EngineError::WatchdogTimeout { waited_for } => write!(
-                f,
-                "engine missed a watchdog deadline (waited {:?})",
-                waited_for
-            ),
             EngineError::Io { source } => write!(f, "engine I/O error: {}", source),
         }
     }
@@ -379,7 +390,7 @@ impl std::error::Error for EngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             EngineError::SpawnFailed { source, .. } | EngineError::Io { source } => Some(source),
-            EngineError::ChannelClosed | EngineError::WatchdogTimeout { .. } => None,
+            EngineError::ChannelClosed => None,
         }
     }
 }
@@ -400,7 +411,7 @@ mod tests {
         assert_eq!(
             EngineCommand::SetOption {
                 name: "Hash".into(),
-                value: "256".into(),
+                value: Some("256".into()),
             }
             .to_wire_string(),
             "setoption name Hash value 256"
@@ -464,27 +475,22 @@ mod tests {
     }
 
     #[test]
-    fn uci_option_default_as_string() {
-        assert_eq!(
-            UciOptionKind::Check { default: false }.default_as_string(),
-            Some("false".into())
-        );
-        assert_eq!(
-            UciOptionKind::Spin {
-                default: 16,
-                min: 1,
-                max: 1024
-            }
-            .default_as_string(),
-            Some("16".into())
-        );
-        assert_eq!(
-            UciOptionKind::String {
-                default: "nn-1a298aa575a0.nnue".into()
-            }
-            .default_as_string(),
-            Some("nn-1a298aa575a0.nnue".into())
-        );
-        assert_eq!(UciOptionKind::Button.default_as_string(), None);
+    fn mate_zero_means_side_to_move_is_mated() {
+        // `score mate 0` is a position where the side to move is checkmated.
+        assert_eq!(Score::Mate(0).centipawn_equivalent(), -30_000);
+    }
+
+    #[test]
+    fn set_option_button_has_no_value_on_the_wire() {
+        let button = EngineCommand::SetOption {
+            name: "Clear Hash".into(),
+            value: None,
+        };
+        assert_eq!(button.to_wire_string(), "setoption name Clear Hash");
+        let spin = EngineCommand::SetOption {
+            name: "Hash".into(),
+            value: Some("256".into()),
+        };
+        assert_eq!(spin.to_wire_string(), "setoption name Hash value 256");
     }
 }

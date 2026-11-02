@@ -33,14 +33,10 @@
 //! Zobrist table required.
 
 use byteorder::{BigEndian, ReadBytesExt};
-use shakmaty::{
-    zobrist::Zobrist64, Color, EnPassantMode, Move, Piece, Position, Role, Square,
-};
+use shakmaty::{Move, Position, Role, Square};
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::Cursor;
 use std::path::Path;
-
-use crate::chess::PieceColor;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // On-disk record shape
@@ -55,7 +51,7 @@ pub struct BookEntry {
     /// Zobrist hash of the position this move was recorded for.
     pub key: u64,
     /// PolyGlot-encoded move bits. Use
-    /// [`BookEntry::decode_move`] to translate into a [`shakmaty::Move`].
+    /// [`BookEntry::to_move`] to translate into a [`shakmaty::Move`].
     pub encoded_move: u16,
     /// Lookup weight — higher means the move is statistically more popular
     /// and should be picked more often. Used by the future "best-weight"
@@ -66,95 +62,43 @@ pub struct BookEntry {
 }
 
 impl BookEntry {
-    /// Decode the `encoded_move` field into shakmaty's [`Move`] enum. We
-    /// need a position (for castling & promotion role disambiguation on edge
-    /// cases) only for the higher-level helpers.
-    pub fn from_polyglot_square(idx: u8) -> Option<Square> {
-        if idx >= 64 {
-            return None;
-        }
-        let file = shakmaty::File::new((idx % 8) as u32);
-        let rank = shakmaty::Rank::new((idx / 8) as u32);
-        Some(Square::from_coords(file, rank))
-    }
-
-    /// Translate the 4-bit promotion field into a [`Role`].
-    pub fn decode_promotion(promo: u8) -> Option<Role> {
-        match promo {
-            0 => None,
-            1 => Some(Role::Knight),
-            2 => Some(Role::Bishop),
-            3 => Some(Role::Rook),
-            4 => Some(Role::Queen),
-            _ => None,
-        }
-    }
-
-    /// Decode just the (from, to, promotion) triple from the encoded move.
-    pub fn decode_triple(&self) -> Option<(Square, Square, Option<Role>)> {
-        let from_idx = (self.encoded_move & 0x3F) as u8;
-        let to_idx = ((self.encoded_move >> 6) & 0x3F) as u8;
-        let promo = ((self.encoded_move >> 12) & 0x0F) as u8;
-        let from = Self::from_polyglot_square(from_idx)?;
-        let to = Self::from_polyglot_square(to_idx)?;
-        Some((from, to, Self::decode_promotion(promo)))
-    }
-
-    /// Convert to a fully-qualified [`shakmaty::Move`] given the position
-    /// the move is played from. Returns `None` if the encoded bits do not
-    /// correspond to a legal normal-move (i.e. when the result would only
-    /// be a `Move::EnPassant` or `Move::Castle`, which the simple encoding
-    /// doesn't natively express; we still attempt those via shakmaty's
-    /// `san_candidates` walk).
-    pub fn to_move<P: Position>(&self, pos: &P) -> Option<Move> {
-        let (from, to, promo) = self.decode_triple()?;
-        let role = pos.board().piece_at(from)?.role;
-        let capture = pos.board().piece_at(to).map(|p| p.role);
-
-        // For en passant, shakmaty reports `capture = None` on the board,
-        // but the PolyGlot encoding marks a pawn capture on a square that
-        // is currently empty — these will be silently dropped here.
-        let ep_candidate = role == Role::Pawn && capture.is_none() && to != from;
-
-        // Candidate legal moves are queried via shakmaty's disambiguation
-        // helpers so we can express en passant / castling too.
-        let candidates = pos.san_candidates(role, to);
-        let matched: Vec<Move> = candidates
+    /// The fully-qualified legal [`Move`] this record encodes in `pos`, or
+    /// `None` when no legal move matches (wrong position for this key).
+    ///
+    /// Every legal move is encoded the PolyGlot way and compared with the
+    /// record, which covers castling ("king takes own rook", e.g. e1h1),
+    /// en passant and promotion uniformly.
+    pub fn to_move<P: Position>(self, pos: &P) -> Option<Move> {
+        pos.legal_moves()
             .into_iter()
-            .filter(|m| m.from() == Some(from))
-            .filter(|m| match (m, promo) {
-                (Move::Normal { promotion, .. }, Some(p)) => *promotion == Some(p),
-                (Move::Normal { promotion: None, .. }, None) => true,
-                (_, _) => false,
-            })
-            .collect();
-
-        if let Some(m) = matched.into_iter().next() {
-            return Some(m);
-        }
-
-        // Fallback: synthesize a Normal move (works for the common,
-        // non-en-passant, non-castling case) — useful when shakmaty's
-        // SAN-candidate filter loses to an unsupported promotion role.
-        if !ep_candidate && capture.is_none() {
-            return Some(Move::Normal {
-                role,
-                from,
-                capture: None,
-                to,
-                promotion: promo,
-            });
-        }
-
-        None
+            .find(|m| polyglot_encoding(m) == Some(self.encoded_move))
     }
 }
 
-// The original placeholder BookMove record was redundant once the real
-// PolyGlot code shipped — its single-call site (the future Phase-5 book
-// picker) will use [`BookEntry`] directly. Keep the public alias for
-// source-compatibility with the Phase-1 placeholder.
-pub use BookEntry as BookMove;
+/// PolyGlot 16-bit encoding of a move (the inverse of
+/// [`BookEntry::to_move`]). Castling is encoded as the king moving onto
+/// its own rook; `None` for moves without an origin square (crazyhouse drops).
+fn polyglot_encoding(m: &Move) -> Option<u16> {
+    let from = m.from()?;
+    let to = match m {
+        Move::Castle { rook, .. } => *rook,
+        _ => m.to(),
+    };
+    let promo: u16 = match m.promotion() {
+        None => 0,
+        Some(Role::Knight) => 1,
+        Some(Role::Bishop) => 2,
+        Some(Role::Rook) => 3,
+        Some(Role::Queen) => 4,
+        Some(_) => return None,
+    };
+    Some(polyglot_index(to) | (polyglot_index(from) << 6) | (promo << 12))
+}
+
+/// PolyGlot square index: a1 = 0, b1 = 1, …, h8 = 63.
+fn polyglot_index(sq: Square) -> u16 {
+    (sq.rank().to_u32() * 8 + sq.file().to_u32()) as u16
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Book container
@@ -180,7 +124,7 @@ impl PolyglotBook {
     /// Decode a `.bin` Polglot stream from raw bytes. Useful for tests and
     /// for embedded books (e.g. ones shipped via `include_bytes!`).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BookError> {
-        if bytes.len() % 16 != 0 {
+        if !bytes.len().is_multiple_of(16) {
             return Err(BookError::InvalidSize {
                 byte_len: bytes.len(),
             });
@@ -215,66 +159,24 @@ impl PolyglotBook {
         self.entries.len()
     }
 
-    /// Binary search for all entries with a given Zobrist key. Returns an
-    /// empty `Vec` if the book has no move for this position.
+    /// `true` if the book holds no records.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// All entries recorded for `key`, in book order. Empty when the book
+    /// has no move for this position. Uses a lower-bound search and then
+    /// walks the run of equal keys, so collisions are never missed.
     pub fn find(&self, key: u64) -> Vec<BookEntry> {
-        if self.entries.is_empty() {
-            return Vec::new();
-        }
-        // Locate the first entry whose key is exactly `key`. We do this
-        // in two halves: an upper-bound-style lower-bound search to find
-        // *any* equal-position, then walk backwards to the start of the
-        // run. `binary_search_by_key` may return any matching index, so
-        // we cannot rely on its result alone.
-        let probe = match self.entries.binary_search_by_key(&key, |e| e.key) {
-            Ok(i) => i,
-            Err(i) => {
-                if i == 0 || self.entries[i - 1].key != key {
-                    return Vec::new();
-                }
-                i - 1
-            }
-        };
-        let start = self.lower_bound(key);
-        let mut out = Vec::new();
-        let mut i = start;
-        while i < self.entries.len() && self.entries[i].key == key {
-            out.push(self.entries[i]);
-            i += 1;
-        }
-        // `probe` is touched only to keep the call site semantically
-        // obvious — it isn't structurally needed because `lower_bound`
-        // already returns the first match.
-        let _ = probe;
-        out
+        let start = self.entries.partition_point(|e| e.key < key);
+        self.entries[start..]
+            .iter()
+            .take_while(|e| e.key == key)
+            .copied()
+            .collect()
     }
 
-    /// Index of the first entry whose `key` is `>= query`. Standard
-    /// lower-bound search, exposed for callers that want to iterate a
-    /// position's moves manually.
-    fn lower_bound(&self, query: u64) -> usize {
-        // `partition_point` is exactly this operation, in stable Rust.
-        self.entries.partition_point(|e| e.key < query)
-    }
 
-    /// Convenience wrapper for the common case — compute the PolyGlot
-    /// Zobrist hash of the supplied position and return matching records.
-    pub fn find_for_position<P: Position>(&self, pos: &P) -> Vec<BookEntry> {
-        let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0;
-        self.find(key)
-    }
-
-    /// Total weight of all entries for a given key. Useful for probability
-    /// normalisation in a future Phase-5 book-picker UI.
-    pub fn total_weight_for(&self, key: u64) -> u32 {
-        self.find(key).iter().map(|e| e.weight as u32).sum()
-    }
-
-    /// Iterator-style view over the whole book. Rarely needed at runtime;
-    /// useful for debugging and tests.
-    pub fn iter(&self) -> std::slice::Iter<'_, BookEntry> {
-        self.entries.iter()
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,30 +223,6 @@ impl std::error::Error for BookError {
     }
 }
 
-// A reference to `Piece` is reserved so the unused-import warnings stay
-// silent on configurations where `Color` is used but `Piece` is not.
-#[allow(dead_code)]
-fn _touch(_p: Piece) {}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: convert our PieceColor into shakmaty::Color for callers that
-// still want to pass our abbreviation around.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Convert the chess-domain [`PieceColor`] into shakmaty's [`Color`].
-pub fn to_shakmaty_color(c: PieceColor) -> Color {
-    c.into()
-}
-
-// One tiny shim so lints don't drift against future changes.
-#[allow(dead_code)]
-fn _alt_seek_check(bytes: &[u8]) -> std::io::Result<()> {
-    let mut cur = std::io::Cursor::new(bytes);
-    cur.seek(SeekFrom::Start(0))?;
-    let _ = cur.read(&mut [0u8; 16])?;
-    Ok(())
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -352,6 +230,7 @@ fn _alt_seek_check(bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chess::GameState;
 
     /// Build an in-memory mini-book from key/move/weight/learn records —
     /// useful for asserting the binary-search behaviour without a real
@@ -378,11 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_partial_record() {
-        let err = PolyglotBook::from_bytes(&[0u8; 16]); // zero length is valid
-        assert!(err.is_ok());
-        let err = PolyglotBook::from_bytes(&[0u8; 15]);
-        assert!(err.is_err());
+    fn accepts_whole_records_and_rejects_partial_ones() {
+        assert!(PolyglotBook::from_bytes(&[0u8; 16]).is_ok());
+        assert!(PolyglotBook::from_bytes(&[0u8; 15]).is_err());
     }
 
     #[test]
@@ -407,45 +284,29 @@ mod tests {
         assert_eq!(book.find(91).len(), 0);
 
         // Weights line up with insertion order.
-        assert_eq!(book.total_weight_for(10), 3);
-        assert_eq!(book.total_weight_for(20), 12);
-        assert_eq!(book.total_weight_for(99), 6);
-        assert_eq!(book.total_weight_for(7), 0);
+        assert_eq!(weight_of(&book, 10), 3);
+        assert_eq!(weight_of(&book, 20), 12);
+        assert_eq!(weight_of(&book, 99), 6);
+        assert_eq!(weight_of(&book, 7), 0);
+    }
+
+    /// Sum of the weights recorded for `key`.
+    fn weight_of(book: &PolyglotBook, key: u64) -> u32 {
+        book.find(key).iter().map(|e| u32::from(e.weight)).sum()
     }
 
     #[test]
-    fn decode_triple_picks_apart_polyglot_bits() {
-        // PolyGlot square numbering: a1=0, b1=1, c1=2, ..., h1=7,
-        // a2=8, b2=9, c2=10 → so PolyGlot square 10 == c2.
-        // 20 = file 4 (e) + rank 2 → e3.
-        // Bundle: from=c2 (10), to=e3 (20), promotion=queen (4).
-        let entry = BookEntry {
-            key: 42,
-            encoded_move: 0x0A | (20u16 << 6) | (4u16 << 12),
-            weight: 1,
-            learn: 0,
+    fn encoding_puts_to_square_low_and_promotion_high() {
+        // c7-c8=Q: to = c8 (58) in bits 0–5, from = c7 (50) in bits 6–11,
+        // promotion = queen (4) in bits 12–14.
+        let promo = Move::Normal {
+            role: Role::Pawn,
+            from: Square::from_ascii(b"c7").unwrap(),
+            capture: None,
+            to: Square::from_ascii(b"c8").unwrap(),
+            promotion: Some(Role::Queen),
         };
-        let (from, to, promo) = entry.decode_triple().unwrap();
-        assert_eq!(from, Square::from_ascii(b"c2").unwrap());
-        assert_eq!(to, Square::from_ascii(b"e3").unwrap());
-        assert_eq!(promo, Some(Role::Queen));
-    }
-
-    #[test]
-    fn decode_promotion_table() {
-        assert_eq!(BookEntry::decode_promotion(0), None);
-        assert_eq!(BookEntry::decode_promotion(1), Some(Role::Knight));
-        assert_eq!(BookEntry::decode_promotion(2), Some(Role::Bishop));
-        assert_eq!(BookEntry::decode_promotion(3), Some(Role::Rook));
-        assert_eq!(BookEntry::decode_promotion(4), Some(Role::Queen));
-        assert_eq!(BookEntry::decode_promotion(5), None);
-    }
-
-    #[test]
-    fn decode_square_rejects_out_of_range() {
-        assert!(BookEntry::from_polyglot_square(64).is_none());
-        assert!(BookEntry::from_polyglot_square(0).is_some());
-        assert!(BookEntry::from_polyglot_square(63).is_some());
+        assert_eq!(polyglot_encoding(&promo), Some(58 | (50 << 6) | (4 << 12)));
     }
 
     #[test]
@@ -461,17 +322,8 @@ mod tests {
         // is a Polyglot opening book. Locate it relative to the workspace
         // root by walking up from CARGO_MANIFEST_DIR until we find a
         // `books/` directory.
-        let book_path = match locate_real_world_book("gm2001.bin") {
-            Ok(p) => p,
-            Err(err) => {
-                eprintln!(
-                    "skipping real-world PolyGlot test — {} \
-                     (CI may set SILICONBOARD_TEST_BOOK or similar)",
-                    err
-                );
-                return;
-            }
-        };
+        let book_path = locate_real_world_book("gm2001.bin")
+            .expect("the workspace fixture books/gm2001.bin must be present");
 
         let book = PolyglotBook::open(&book_path).expect("real-world book must parse");
         // 486656 bytes ÷ 16 bytes = 30 416 records.
@@ -491,26 +343,34 @@ mod tests {
             "gm2001.bin should have at least one move for the starting position"
         );
 
-        // Round-trip every record: decode (from, to, promotion) and confirm
-        // the from/to squares are valid. Catches malformed entries without
-        // requiring a position-correctness check (which would need shakmaty).
+        // Every record must describe a real move: from and to differ. Catches
+        // malformed entries without needing a position for each record.
         let mut total_weight: u64 = 0;
-        for entry in book.iter() {
-            let _ = entry.decode_triple().expect("every record's from/to must decode");
-            total_weight = total_weight.saturating_add(entry.weight as u64);
+        for entry in &book.entries {
+            let from = (entry.encoded_move >> 6) & 0x3F;
+            let to = entry.encoded_move & 0x3F;
+            assert_ne!(from, to, "record {:#06x} is a null move", entry.encoded_move);
+            total_weight = total_weight.saturating_add(u64::from(entry.weight));
         }
         assert!(total_weight > 0, "book's total weight should be non-zero");
 
-        // Round-tripping via find_for_position works against a freshly
-        // synthesised shakmaty position too — the canonical key check above
-        // proves that `zobrist_hash::<Zobrist64>(EnPassantMode::Legal)`
-        // agrees with the on-disk file.
+        // The key the app really probes with (`GameState::zobrist`) must
+        // find the start-position records. The canonical key check above
+        // proves that this key agrees with the on-disk file.
         let start_pos = shakmaty::Chess::default();
-        let from_position = book.find_for_position(&start_pos);
+        let from_position = book.find(crate::chess::GameState::new().zobrist());
         assert!(
             !from_position.is_empty(),
-            "find_for_position(start) should match the file's starting-position entries"
+            "GameState::zobrist() of the start should match the file's starting-position entries"
         );
+        // Every recorded start-position move must decode onto a real legal move.
+        for entry in &from_position {
+            assert!(
+                entry.to_move(&start_pos).is_some(),
+                "book move {:#06x} does not map onto a legal start-position move",
+                entry.encoded_move
+            );
+        }
     }
 
     /// Helper used by the real-world-fixture test. Walks up to 8 levels
@@ -538,6 +398,87 @@ mod tests {
             MAX_WALK,
             start.display()
         ))
+    }
+
+    /// PolyGlot square index (a1 = 0 … h8 = 63) for a square name.
+    fn pg(name: &str) -> u16 {
+        let sq = Square::from_ascii(name.as_bytes()).unwrap();
+        (sq.rank().to_u32() * 8 + sq.file().to_u32()) as u16
+    }
+
+    /// Encode a move the PolyGlot way: to-square in bits 0–5, from-square in
+    /// bits 6–11, promotion code in bits 12–14.
+    fn encode(from: &str, to: &str, promo: u16) -> u16 {
+        pg(to) | (pg(from) << 6) | (promo << 12)
+    }
+
+    #[test]
+    fn real_start_position_record_is_e2e4() {
+        // 0x031c is the first-move record for e2e4 in the gm2001 book (checked
+        // against the file in `real_world_gm2001_book_opens_and_probes_starting_position`).
+        let entry = BookEntry { key: 0, encoded_move: 0x031c, weight: 1, learn: 0 };
+        assert_eq!(
+            entry.to_move(&shakmaty::Chess::default()),
+            Some(Move::Normal {
+                role: Role::Pawn,
+                from: Square::from_ascii(b"e2").unwrap(),
+                capture: None,
+                to: Square::from_ascii(b"e4").unwrap(),
+                promotion: None,
+            })
+        );
+    }
+
+    #[test]
+    fn book_castling_move_decodes_to_castle() {
+        // PolyGlot encodes castling as "king takes own rook" (e1h1 for O-O).
+        let game = GameState::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        let encoded = encode("e1", "h1", 0);
+        let book = make_book(&[(0, encoded, 1, 0)]);
+        let entry = book.entries[0];
+        let m = entry.to_move(&game.position());
+        assert_eq!(
+            m,
+            Some(Move::Castle {
+                king: Square::from_ascii(b"e1").unwrap(),
+                rook: Square::from_ascii(b"h1").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn book_en_passant_move_decodes_to_en_passant() {
+        // White pawn on e5, black just played d7-d5: e5xd6 e.p.
+        let game = GameState::from_fen("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3").unwrap();
+        let encoded = encode("e5", "d6", 0);
+        let book = make_book(&[(0, encoded, 1, 0)]);
+        let entry = book.entries[0];
+        assert_eq!(
+            entry.to_move(&game.position()),
+            Some(Move::EnPassant {
+                from: Square::from_ascii(b"e5").unwrap(),
+                to: Square::from_ascii(b"d6").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn book_promotion_move_decodes_with_role() {
+        // a7-a8=N : the PolyGlot promotion code for knight is 1.
+        let game = GameState::from_fen("7k/P7/8/8/8/8/8/7K w - - 0 1").unwrap();
+        let encoded = encode("a7", "a8", 1);
+        let book = make_book(&[(0, encoded, 1, 0)]);
+        let entry = book.entries[0];
+        assert_eq!(
+            entry.to_move(&game.position()),
+            Some(Move::Normal {
+                role: Role::Pawn,
+                from: Square::from_ascii(b"a7").unwrap(),
+                capture: None,
+                to: Square::from_ascii(b"a8").unwrap(),
+                promotion: Some(Role::Knight),
+            })
+        );
     }
 
     #[test]

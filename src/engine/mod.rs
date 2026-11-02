@@ -24,22 +24,25 @@
 //! demonstrates that the three-task layout is just as performant and far
 //! easier to reason about. We follow that pattern here.
 
+pub mod analysis;
+pub mod host;
 pub mod protocol;
 pub mod uci_parser;
 
-pub use protocol::{
-    EngineCommand, EngineError, EngineEvent, EngineStats, GoControl, Score, UciOption,
-    UciOptionKind,
-};
-pub use uci_parser::{parse_line, HandshakeAccumulator, UciParseError};
+pub use analysis::AnalysisStatus;
+pub use host::{EngineHost, EngineView};
+pub use protocol::{EngineCommand, EngineError, EngineEvent, Score};
+
+use uci_parser::{parse_line, HandshakeAccumulator, UciParseError};
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EngineProcess
@@ -50,9 +53,9 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 /// lines at depth 30+, and a missed bestmove would be catastrophic).
 const BROADCAST_BUFFER: usize = 10_000;
 
-/// Capacity for the command mpsc. Four slots is enough to absorb UI bursts
-/// without back-pressuring the user.
-const COMMAND_BUFFER: usize = 4;
+/// Capacity for the command mpsc. Sized for a UI frame's worth of commands
+/// (stop + position + go, for several engines) without dropping any.
+const COMMAND_BUFFER: usize = 64;
 
 /// Handle for sending commands to a running engine.
 ///
@@ -67,11 +70,11 @@ pub struct EngineProcess {
     kill_tx: mpsc::Sender<()>,
     /// Broadcast channel for engine stdout lines (one line per message).
     pub events: broadcast::Sender<ParsedUciLine>,
-    /// `true` while the supervisor task is still alive. UI can poll this
-    /// without blocking.
-    pub is_alive: Arc<Mutex<bool>>,
-    /// Path of the spawned binary, kept for logging / settings.
-    pub binary: PathBuf,
+    /// Path of the spawned binary, kept for logging and display.
+    binary: PathBuf,
+    /// Sticky flag set once the engine's output ends. Unlike a broadcast
+    /// event it is still visible to a subscriber that attaches late.
+    exited: Arc<AtomicBool>,
 }
 
 /// One event from the engine, already trimmed and reduced.
@@ -89,17 +92,6 @@ pub enum ParsedUciLine {
     },
     /// Unknown / engine-specific line (treated as info, not an error).
     Unknown(String),
-}
-
-impl ParsedUciLine {
-    /// Returns the raw engine-side line, regardless of category.
-    pub fn raw_line(&self) -> &str {
-        match self {
-            ParsedUciLine::Event(_) => "",
-            ParsedUciLine::ParseError { line, .. } => line,
-            ParsedUciLine::Unknown(line) => line,
-        }
-    }
 }
 
 impl EngineProcess {
@@ -132,43 +124,41 @@ impl EngineProcess {
         let (cmd_tx, stdin_rx) = mpsc::channel::<EngineCommand>(COMMAND_BUFFER);
         let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
         let (events, _) = broadcast::channel::<ParsedUciLine>(BROADCAST_BUFFER);
-
-        let is_alive = Arc::new(Mutex::new(true));
+        let exited = Arc::new(AtomicBool::new(false));
 
         // ── Writer task ──
-        let writer_is_alive = Arc::clone(&is_alive);
         tokio::spawn(async move {
-            run_writer(stdin, stdin_rx, writer_is_alive).await;
+            run_writer(stdin, stdin_rx).await;
         });
 
         // ── Reader task ──
         let events_for_reader = events.clone();
-        let reader_is_alive = Arc::clone(&is_alive);
+        let reader_exited = Arc::clone(&exited);
         tokio::spawn(async move {
-            run_reader(stdout, events_for_reader, reader_is_alive).await;
+            run_reader(stdout, events_for_reader, reader_exited).await;
         });
 
         // ── Supervisor task ──
-        let sup_is_alive = Arc::clone(&is_alive);
+        let supervisor_exited = Arc::clone(&exited);
         tokio::spawn(async move {
-            run_supervisor(child, &mut kill_rx, sup_is_alive).await;
+            run_supervisor(child, &mut kill_rx, supervisor_exited).await;
         });
 
         Ok(Self {
             cmd_tx,
             kill_tx,
             events,
-            is_alive,
             binary: binary.to_path_buf(),
+            exited,
         })
     }
 
-    /// Send one command. Awaits a slot in the bounded channel. Returns
-    /// `EngineError::ChannelClosed` if the writer task has shut down.
-    pub async fn send(&self, cmd: EngineCommand) -> Result<(), EngineError> {
+    /// Non-blocking send for the UI thread. Fails immediately when the
+    /// command queue is full or the engine has exited, so the caller never
+    /// waits on an engine.
+    pub fn try_send(&self, cmd: EngineCommand) -> Result<(), EngineError> {
         self.cmd_tx
-            .send(cmd)
-            .await
+            .try_send(cmd)
             .map_err(|_| EngineError::ChannelClosed)
     }
 
@@ -193,26 +183,14 @@ impl EngineProcess {
         Ok(())
     }
 
-    /// Immediate hard kill — no polite quit. Used by the Phase-5 game-loop
-    /// arbiter when the engine becomes unresponsive.
-    pub fn kill(&self) -> Result<(), EngineError> {
-        self.kill_tx
-            .try_send(())
-            .map_err(|_| EngineError::ChannelClosed)?;
-        Ok(())
+    /// `true` once the engine's output has ended (the process exited or was
+    /// killed). Safe to poll at any time, including after the `Terminated`
+    /// event was already sent.
+    pub fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
     }
 
-    /// Poll-driven non-blocking view of `is_alive`. Cheap because we use
-    /// `try_lock` on a `Mutex<bool>` — the writer/reader/supervisor tasks
-    /// set it once on exit and never touch it again.
-    pub fn is_alive(&self) -> bool {
-        self.is_alive
-            .try_lock()
-            .map(|guard| *guard)
-            .unwrap_or(true)
-    }
-
-    /// Path of the spawned binary, kept for logging / settings dialog.
+    /// Path of the spawned binary, kept for logging and display.
     pub fn binary(&self) -> &Path {
         &self.binary
     }
@@ -224,21 +202,15 @@ impl EngineProcess {
 
 /// Writer task: pulls commands off `cmd_rx` and writes each one as a
 /// single line ("{cmd}\n") into stdin via a `BufWriter`.
-async fn run_writer(
-    stdin: tokio::process::ChildStdin,
-    mut cmd_rx: mpsc::Receiver<EngineCommand>,
-    is_alive: Arc<Mutex<bool>>,
-) {
+async fn run_writer(stdin: tokio::process::ChildStdin, mut cmd_rx: mpsc::Receiver<EngineCommand>) {
     let mut writer = BufWriter::new(stdin);
     while let Some(cmd) = cmd_rx.recv().await {
         let line = cmd.to_wire_string();
         if writer.write_all(line.as_bytes()).await.is_err() {
             break;
         }
-        if !line.ends_with('\n') {
-            if writer.write_all(b"\n").await.is_err() {
-                break;
-            }
+        if !line.ends_with('\n') && writer.write_all(b"\n").await.is_err() {
+            break;
         }
         if writer.flush().await.is_err() {
             break;
@@ -246,8 +218,6 @@ async fn run_writer(
     }
     // Shutdown: flush any buffered data and let the pipe close.
     let _ = writer.shutdown().await;
-    // Mark dead so the UI sees the engine as offline.
-    *is_alive.lock().await = false;
 }
 
 /// Reader task: pulls lines from stdout via `BufReader::read_line` and
@@ -264,33 +234,31 @@ async fn run_writer(
 async fn run_reader(
     stdout: tokio::process::ChildStdout,
     events: broadcast::Sender<ParsedUciLine>,
-    is_alive: Arc<Mutex<bool>>,
+    exited: Arc<AtomicBool>,
 ) {
     let mut reader = BufReader::new(stdout);
-    let mut line_buf = String::new();
+    let mut raw: Vec<u8> = Vec::new();
     let mut acc = HandshakeAccumulator::new();
     loop {
-        line_buf.clear();
-        match reader.read_line(&mut line_buf).await {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw).await {
             Ok(0) => break, // EOF — engine closed stdout.
             Ok(_) => {
-                let trimmed = line_buf.trim_end_matches(['\r', '\n']);
+                // Engines occasionally print non-UTF-8 bytes; keep reading
+                // rather than treating the whole engine as dead.
+                let text = String::from_utf8_lossy(&raw);
+                let trimmed = text.trim_end_matches(['\r', '\n']);
                 if trimmed.is_empty() {
                     continue;
                 }
                 log::trace!("engine → {}", trimmed);
-                let event = parse_line(trimmed);
-                let message = match event {
-                    Ok(ev) => acc
-                        .fold(ev)
-                        .map(ParsedUciLine::Event)
-                        .unwrap_or_else(|| {
-                            // Mid-handshake line — emit silently at trace
-                            // level only; the consolidated UciOk will
-                            // arrive shortly.
-                            log::trace!("engine handshake: {}", trimmed);
-                            ParsedUciLine::Unknown(trimmed.to_string())
-                        }),
+                let message = match parse_line(trimmed) {
+                    Ok(ev) => acc.fold(ev).map(ParsedUciLine::Event).unwrap_or_else(|| {
+                        // Mid-handshake line — the consolidated UciOk
+                        // arrives at `uciok`.
+                        log::trace!("engine handshake: {}", trimmed);
+                        ParsedUciLine::Unknown(trimmed.to_string())
+                    }),
                     Err(UciParseError::UnknownLine { line }) => {
                         log::debug!("engine noise: {}", line);
                         ParsedUciLine::Unknown(line)
@@ -313,7 +281,9 @@ async fn run_reader(
             }
         }
     }
-    *is_alive.lock().await = false;
+    // Tell subscribers the engine is gone so the UI can show it as offline.
+    exited.store(true, Ordering::Release);
+    let _ = events.send(ParsedUciLine::Event(EngineEvent::Terminated));
 }
 
 /// Supervisor task: waits on either `kill_rx` (UI-driven termination) or
@@ -322,7 +292,7 @@ async fn run_reader(
 async fn run_supervisor(
     mut child: tokio::process::Child,
     kill_rx: &mut mpsc::Receiver<()>,
-    is_alive: Arc<Mutex<bool>>,
+    exited: Arc<AtomicBool>,
 ) {
     tokio::select! {
         _ = kill_rx.recv() => {
@@ -330,49 +300,51 @@ async fn run_supervisor(
         }
         _ = child.wait() => {}
     }
-    *is_alive.lock().await = false;
+    exited.store(true, Ordering::Release);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests — real-world Stockfish
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The UCI engine used by the real-engine tests. Search order:
+/// `SILICONBOARD_TEST_ENGINE`, Homebrew Stockfish, then the workspace
+/// Triumviratus build. Panics when none exists: a silently skipped test
+/// would pass without testing anything.
+#[cfg(test)]
+pub(crate) fn test_engine_path() -> PathBuf {
+    let mut tried = Vec::new();
+    if let Ok(custom) = std::env::var("SILICONBOARD_TEST_ENGINE") {
+        let p = PathBuf::from(custom);
+        if p.exists() {
+            return p;
+        }
+        tried.push(p);
+    }
+    let stockfish = PathBuf::from("/opt/homebrew/bin/stockfish");
+    if stockfish.exists() {
+        return stockfish;
+    }
+    tried.push(stockfish);
+    let triumviratus = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("Triumviratus")
+        .join("Triumviratus_8.0_macos_arm");
+    if triumviratus.exists() {
+        return triumviratus;
+    }
+    tried.push(triumviratus);
+    panic!(
+        "no test engine found; install Stockfish or set SILICONBOARD_TEST_ENGINE (tried {:?})",
+        tried
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use super::protocol::{GoControl, UciOptionKind};
     use super::*;
     use std::time::{Duration, Instant};
-
-    /// Returns Some(path) if a test engine binary exists on disk.
-    /// `SILICONBOARD_TEST_ENGINE=/path/to/stockfish` overrides the default.
-    ///
-    /// Candidate engines in priority order:
-    ///   1. `SILICONBOARD_TEST_ENGINE` env var (if set and the file exists).
-    ///   2. `/opt/homebrew/bin/stockfish` (Stockfish 19 — homebrew on arm64).
-    ///   3. `Triumviratus/Triumviratus_8.0_macos_arm` in the workspace root.
-    fn test_engine_path() -> Option<PathBuf> {
-        if let Ok(custom) = std::env::var("SILICONBOARD_TEST_ENGINE") {
-            let p = PathBuf::from(custom);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-        let stockfish = PathBuf::from("/opt/homebrew/bin/stockfish");
-        if stockfish.exists() {
-            return Some(stockfish);
-        }
-        // Triumviratus (a Stockfish-derived NNUE engine), shipped as part of
-        // the workspace root reference material. Unusual filename because
-        // the distribution doesn't add a .app wrapper.
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let triumviratus = PathBuf::from(manifest)
-            .join("..")
-            .join("Triumviratus")
-            .join("Triumviratus_8.0_macos_arm");
-        if triumviratus.exists() {
-            return Some(triumviratus);
-        }
-        None
-    }
 
     /// Wait up to `timeout` for the predicate to become true, draining
     /// broadcasts meanwhile so the broadcast buffer does not fill up.
@@ -400,16 +372,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_exit_publishes_terminated_event() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A stand-in "engine" that stays alive briefly and then exits on its own.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("short-lived-engine.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 0.3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let engine = EngineProcess::spawn(&script).await.unwrap();
+        let rx = engine.subscribe();
+        let drained = wait_until(rx, Duration::from_secs(5), |line| {
+            matches!(line, ParsedUciLine::Event(EngineEvent::Terminated))
+        })
+        .await;
+        assert!(
+            drained
+                .iter()
+                .any(|line| matches!(line, ParsedUciLine::Event(EngineEvent::Terminated))),
+            "engine exit must be announced to subscribers"
+        );
+        assert!(engine.has_exited(), "the sticky exit flag must be set too");
+    }
+
+    #[tokio::test]
     async fn stockfish_handshake_emits_uciok_with_options() {
-        let Some(binary) = test_engine_path() else {
-            eprintln!("skipping handshake test — no engine binary");
-            return;
-        };
+        let binary = test_engine_path();
 
         let engine = EngineProcess::spawn(&binary).await.unwrap();
-        let mut rx = engine.subscribe();
+        let rx = engine.subscribe();
 
-        engine.send(EngineCommand::Initialize).await.unwrap();
+        engine.try_send(EngineCommand::Initialize).unwrap();
 
         let drained = wait_until(rx, Duration::from_secs(5), |line| {
             matches!(
@@ -471,16 +465,13 @@ mod tests {
 
     #[tokio::test]
     async fn stockfish_depth_4_search_returns_bestmove() {
-        let Some(binary) = test_engine_path() else {
-            eprintln!("skipping go/bestmove test — no engine binary");
-            return;
-        };
+        let binary = test_engine_path();
 
         let engine = EngineProcess::spawn(&binary).await.unwrap();
         let mut rx = engine.subscribe();
 
-        engine.send(EngineCommand::Initialize).await.unwrap();
-        engine.send(EngineCommand::IsReady).await.unwrap();
+        engine.try_send(EngineCommand::Initialize).unwrap();
+        engine.try_send(EngineCommand::IsReady).unwrap();
 
         // Wait for ReadyOk so we know the handshake is fully past.
         let _ = wait_until(rx.resubscribe(), Duration::from_secs(5), |line| {
@@ -488,17 +479,15 @@ mod tests {
         })
         .await;
 
-        engine.send(EngineCommand::NewGame).await.unwrap();
+        engine.try_send(EngineCommand::NewGame).unwrap();
         engine
-            .send(EngineCommand::SetPosition {
+            .try_send(EngineCommand::SetPosition {
                 fen: None,
                 moves: Vec::new(),
             })
-            .await
             .unwrap();
         engine
-            .send(EngineCommand::Go(GoControl::Depth(4)))
-            .await
+            .try_send(EngineCommand::Go(GoControl::Depth(4)))
             .unwrap();
 
         // Search for bestmove + at least one info line.
@@ -512,7 +501,7 @@ mod tests {
                 Ok(Ok(line)) => match line {
                     ParsedUciLine::Event(EngineEvent::Info(_)) => saw_info = true,
                     ParsedUciLine::Event(EngineEvent::BestMove { best_move, .. }) => {
-                        bestmove = Some(best_move);
+                        bestmove = best_move;
                         break;
                     }
                     _ => {}

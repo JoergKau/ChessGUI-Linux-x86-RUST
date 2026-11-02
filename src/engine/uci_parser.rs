@@ -19,9 +19,7 @@
 //! so we know the parser handles the engine output the project will see in
 //! production.
 
-use crate::engine::protocol::{
-    EngineEvent, EngineStats, GoControl, Score, UciOption, UciOptionKind,
-};
+use crate::engine::protocol::{EngineEvent, EngineStats, Score, UciOption, UciOptionKind};
 
 use std::num::ParseIntError;
 
@@ -312,9 +310,9 @@ fn parse_info<'a, I: Iterator<Item = &'a str>>(
                 break;
             }
             "string" => {
-                stats.string = val.map(str::to_string);
-                i += 2;
-                continue;
+                // Free text: everything after the keyword belongs to the message.
+                stats.string = Some(buf[i + 1..].join(" "));
+                break;
             }
             "refutation" => {
                 stats.refutation = Some(buf[i + 1..].iter().map(|s| s.to_string()).collect());
@@ -360,15 +358,15 @@ where
 }
 
 fn parse_score_sublist(rest: &[&str]) -> Result<Score, UciParseError> {
-    let kind = rest.first().copied().ok_or(UciParseError::Info {
-        reason: "score: missing kind".to_string().into(),
+    let kind = rest.first().copied().ok_or_else(|| UciParseError::Info {
+        reason: "score: missing kind".to_string(),
     })?;
     let n: i32 = rest
         .get(1)
         .copied()
         .and_then(|s| s.parse::<i32>().ok())
-        .ok_or(UciParseError::Info {
-            reason: "score: missing value".to_string().into(),
+        .ok_or_else(|| UciParseError::Info {
+            reason: "score: missing value".to_string(),
         })?;
     match kind {
         "cp" => Ok(Score::Cp(n)),
@@ -384,25 +382,20 @@ fn parse_bestmove<'a, I: Iterator<Item = &'a str>>(
     tokens: &mut I,
 ) -> Result<EngineEvent, UciParseError> {
     let buf: Vec<&str> = tokens.collect();
-    let best = buf.first().copied().ok_or(UciParseError::BestMove {
-        reason: "missing move".to_string().into(),
-    });
-    let best = best?.to_string();
-    let mut i = 1;
-    let mut ponder = None;
-    while i < buf.len() {
-        if buf[i] == "ponder" {
-            if let Some(p) = buf.get(i + 1).copied() {
-                ponder = Some(p.to_string());
-            }
-            break;
-        }
-        i += 1;
-    }
-    Ok(EngineEvent::BestMove {
-        best_move: best,
-        ponder,
-    })
+    let first = buf.first().copied().ok_or_else(|| UciParseError::BestMove {
+        reason: "missing move".to_string(),
+    })?;
+    // `(none)` is the engine's way of saying there is no legal move.
+    let best_move = if first == "(none)" {
+        None
+    } else {
+        Some(first.to_string())
+    };
+    let ponder = buf
+        .iter()
+        .position(|tok| *tok == "ponder")
+        .and_then(|i| buf.get(i + 1).map(|p| p.to_string()));
+    Ok(EngineEvent::BestMove { best_move, ponder })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -414,12 +407,16 @@ fn parse_bestmove<'a, I: Iterator<Item = &'a str>>(
 /// [`EngineEvent::UciOk`] event at the end of the handshake.
 #[derive(Debug, Default, Clone)]
 pub struct HandshakeAccumulator {
-    pub name: String,
-    pub author: String,
-    pub options: Vec<UciOption>,
+    /// Engine name from `id name …`, kept until the handshake flushes.
+    name: String,
+    /// Engine author from `id author …`.
+    author: String,
+    /// Options collected from every `option …` line so far.
+    options: Vec<UciOption>,
 }
 
 impl HandshakeAccumulator {
+    /// An empty accumulator, ready for the first `id` / `option` line.
     pub fn new() -> Self {
         Self::default()
     }
@@ -508,6 +505,7 @@ impl std::error::Error for UciParseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::protocol::GoControl;
 
     // ── Sanity: each piece ──
 
@@ -598,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_combo_option() {
+    fn parses_check_option_with_true_default() {
         let ev = parse_line(
             "option name Syzygy50MoveRule type check default true",
         )
@@ -609,6 +607,51 @@ mod tests {
                 UciOptionKind::Check { default: true }
             );
         } else { panic!() }
+    }
+
+    #[test]
+    fn parses_combo_option_with_vars() {
+        let ev = parse_line(
+            "option name Style type combo default Normal var Solid var Normal var Risky",
+        )
+        .unwrap();
+        if let EngineEvent::UciOk { options, .. } = ev {
+            assert_eq!(
+                options[0].kind,
+                UciOptionKind::Combo {
+                    default: "Normal".into(),
+                    values: vec!["Solid".into(), "Normal".into(), "Risky".into()],
+                }
+            );
+        } else {
+            panic!("expected UciOk carrying the combo option");
+        }
+    }
+
+    #[test]
+    fn info_string_swallows_the_rest_of_the_line() {
+        // Free text must not be re-read as `info` keys such as `depth`.
+        match parse_line("info string Hash depth 5 score cp 9").unwrap() {
+            EngineEvent::Info(stats) => {
+                assert_eq!(stats.depth, None);
+                assert_eq!(stats.score, None);
+                assert_eq!(stats.string.as_deref(), Some("Hash depth 5 score cp 9"));
+            }
+            other => panic!("expected Info, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bestmove_none_means_no_legal_move() {
+        // Stockfish answers `bestmove (none)` when the side to move is mated
+        // or stalemated; it must not be reported as a move string.
+        match parse_line("bestmove (none)").unwrap() {
+            EngineEvent::BestMove { best_move, ponder } => {
+                assert_eq!(best_move, None);
+                assert_eq!(ponder, None);
+            }
+            other => panic!("expected BestMove, got {:?}", other),
+        }
     }
 
     // ── `info …` lines (typical Stockfish payload) ──
@@ -667,7 +710,7 @@ mod tests {
     fn parses_bestmove_only() {
         match parse_line("bestmove e2e4").unwrap() {
             EngineEvent::BestMove { best_move, ponder } => {
-                assert_eq!(best_move, "e2e4");
+                assert_eq!(best_move.as_deref(), Some("e2e4"));
                 assert_eq!(ponder, None);
             }
             _ => panic!(),
@@ -678,7 +721,7 @@ mod tests {
     fn parses_bestmove_with_ponder() {
         match parse_line("bestmove e2e4 ponder e7e5").unwrap() {
             EngineEvent::BestMove { best_move, ponder } => {
-                assert_eq!(best_move, "e2e4");
+                assert_eq!(best_move.as_deref(), Some("e2e4"));
                 assert_eq!(ponder.as_deref(), Some("e7e5"));
             }
             _ => panic!(),
