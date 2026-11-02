@@ -188,7 +188,7 @@ fn speed_pill(ui: &mut Ui, view: &EngineView) {
                 .corner_radius(4.0)
                 .inner_margin(3.0)
                 .show(ui, |ui| {
-                    ui.label(RichText::new(nps).monospace().small().color(theme::TEXT));
+                    ui.label(RichText::new(nps).monospace().small().color(theme::NEON_GREEN));
                 });
         }
         AnalysisStatus::Starting => {
