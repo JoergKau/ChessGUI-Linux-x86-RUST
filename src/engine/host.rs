@@ -116,6 +116,12 @@ impl EngineHost {
         changed
     }
 
+    /// `true` once the engine's output has ended, whether or not its
+    /// `Terminated` event has been seen yet.
+    pub fn has_exited(&self) -> bool {
+        self.process.has_exited()
+    }
+
     /// Mark the engine offline and return its process so the caller can
     /// quit it. The host stays in its slot, so the card shows `Offline`.
     pub fn shutdown(&mut self) -> EngineProcess {
@@ -203,6 +209,29 @@ mod tests {
         );
 
         host.set_analysis(false, &fen);
+        host.shutdown().terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abort_stops_the_search_but_the_engine_stays_loaded_and_can_restart() {
+        let binary = crate::engine::test_engine_path();
+        let process = EngineProcess::spawn(&binary).await.unwrap();
+        let mut host = EngineHost::attach(process);
+        let fen = GameState::new().fen();
+        host.set_analysis(true, &fen);
+        assert!(pump_until(&mut host, Duration::from_secs(20), |v| v.stats.depth.is_some()));
+
+        // Abort: stop thinking, keep the engine.
+        host.set_analysis(false, &fen);
+        assert!(
+            pump_until(&mut host, Duration::from_secs(20), |v| v.status == AnalysisStatus::Ready),
+            "after Abort the engine must be Ready, not Thinking"
+        );
+        assert_ne!(host.view().status, AnalysisStatus::Offline, "Abort must not unload the engine");
+
+        // Start again: a fresh search runs.
+        host.set_analysis(true, &fen);
+        assert!(pump_until(&mut host, Duration::from_secs(20), |v| v.status == AnalysisStatus::Thinking));
         host.shutdown().terminate().await.unwrap();
     }
 

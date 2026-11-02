@@ -412,21 +412,36 @@ impl GameState {
     /// `(move_number, white_san, black_san)` triples. White moves are
     /// always `Some`; black moves are `Some` only when the game has
     /// progressed past that half-move.
-    pub fn pgn_lines(&self) -> Vec<(u32, Option<String>, Option<String>)> {
-        let plies = self.active_history();
-        let mut lines: Vec<(u32, Option<String>, Option<String>)> = Vec::new();
-        let mut move_no: u32 = 1;
-        let mut i = 0;
-        while i < plies.len() {
-            let white = plies[i].san.to_string();
-            let black = if i + 1 < plies.len() {
-                Some(plies[i + 1].san.to_string())
-            } else {
-                None
+    pub fn pgn_lines(&self) -> Vec<MoveLine> {
+        let start = self.start_position();
+        let first_is_black = start.turn() == Color::Black;
+        let first_number = start.fullmoves().get();
+        let mut lines: Vec<MoveLine> = Vec::new();
+        for (i, ply) in self.active_history().iter().enumerate() {
+            let entry = MoveEntry {
+                ply: i + 1,
+                san: ply.san.to_string(),
             };
-            lines.push((move_no, Some(white), black));
-            move_no += 1;
-            i += 2;
+            let number = first_number + ((i + usize::from(first_is_black)) / 2) as u32;
+            let is_white = (i % 2 == 0) != first_is_black;
+            if is_white {
+                lines.push(MoveLine {
+                    number,
+                    white: Some(entry),
+                    black: None,
+                });
+            } else {
+                match lines.last_mut() {
+                    Some(line) if line.number == number && line.black.is_none() => {
+                        line.black = Some(entry);
+                    }
+                    _ => lines.push(MoveLine {
+                        number,
+                        white: None,
+                        black: Some(entry),
+                    }),
+                }
+            }
         }
         lines
     }
@@ -484,6 +499,27 @@ impl GameState {
         self.history.push(ply);
         self.cur_ply = self.history.len();
     }
+}
+
+/// One played move in the move list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveEntry {
+    /// Cursor value that shows this move as played (1-based half-move count).
+    pub ply: usize,
+    /// The move in SAN, with its check or mate suffix.
+    pub san: String,
+}
+
+/// One line of the move list: a move number with its White and Black moves.
+/// A game that starts with Black to move begins with a line that has no White move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveLine {
+    /// Full-move number as printed in the game (starts from the FEN's number).
+    pub number: u32,
+    /// White's move, if this line has one.
+    pub white: Option<MoveEntry>,
+    /// Black's move, if this line has one.
+    pub black: Option<MoveEntry>,
 }
 
 /// The square a player clicks to play `m`. Equal to [`Move::to`] except for
@@ -829,5 +865,34 @@ mod tests {
         }
         let weights: Vec<u16> = suggestions.iter().map(|(_, w)| *w).collect();
         assert!(weights.windows(2).all(|pair| pair[0] >= pair[1]), "heaviest first");
+    }
+
+    #[test]
+    fn move_list_lines_follow_the_start_position() {
+        let mut g = GameState::new();
+        g.play_squares(sq("e2"), sq("e4"), None).unwrap();
+        g.play_squares(sq("e7"), sq("e5"), None).unwrap();
+        let lines = g.pgn_lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].number, 1);
+        assert_eq!(lines[0].white.as_ref().map(|m| (m.ply, m.san.as_str())), Some((1, "e4")));
+        assert_eq!(lines[0].black.as_ref().map(|m| (m.ply, m.san.as_str())), Some((2, "e5")));
+    }
+
+    #[test]
+    fn move_list_starting_with_black_to_move_numbers_from_the_fen() {
+        // Black to move at move 12: the first line has no White move, and
+        // the numbering continues from the FEN.
+        let mut g = GameState::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 12").unwrap();
+        g.play_squares(sq("c7"), sq("c5"), None).unwrap();
+        g.play_squares(sq("g1"), sq("f3"), None).unwrap();
+        let lines = g.pgn_lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].number, 12);
+        assert!(lines[0].white.is_none());
+        assert_eq!(lines[0].black.as_ref().map(|m| (m.ply, m.san.as_str())), Some((1, "c5")));
+        assert_eq!(lines[1].number, 13);
+        assert_eq!(lines[1].white.as_ref().map(|m| (m.ply, m.san.as_str())), Some((2, "Nf3")));
+        assert!(lines[1].black.is_none());
     }
 }

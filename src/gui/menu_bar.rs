@@ -1,13 +1,15 @@
-//! Top menu bar (Game, File, Engine, Abort) and the FEN bar under it.
+//! Top bar, one row: Game / File / Engine menus, Start and Abort buttons, and
+//! the FEN field with Load and Copy.
 //!
-//! The menu only reports what the user chose as a [`MenuAction`]; the app
-//! performs it. Enabled/checked state comes from [`MenuState`].
+//! The bar only reports what the user chose as a [`MenuAction`]; the app
+//! performs it. Start and Abort switch analysis on and off; they never quit an
+//! engine. The FEN text is owned by the app, so this module only edits it.
 
-use eframe::egui::{self, RichText, Ui};
+use eframe::egui::{self, Color32, FontId, RichText, Ui};
 
 use crate::gui::theme;
 
-/// Something the user asked for in the menu bar or FEN bar.
+/// Something the user asked for in the top bar.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MenuAction {
     /// Game → New game.
@@ -20,7 +22,7 @@ pub enum MenuAction {
     SavePgn,
     /// File → Copy PGN.
     CopyPgn,
-    /// File → Copy FEN (also the FEN bar's Copy button).
+    /// File → Copy FEN (also the FEN field's Copy button).
     CopyFen,
     /// File → Save FEN…
     SaveFen,
@@ -30,8 +32,12 @@ pub enum MenuAction {
     ToggleAnalysis,
     /// Engine → Load PolyGlot book…
     LoadBook,
-    /// Abort: stop and quit every running engine.
-    AbortAll,
+    /// Start: analyse the displayed position with every loaded engine.
+    StartAnalysis,
+    /// Abort: stop all searches. Engines stay loaded and can be started again.
+    StopAnalysis,
+    /// FEN field's Load button (or Enter): set the board to the FEN text.
+    LoadFen,
 }
 
 /// Read-only facts the menu needs to draw its checkmarks and labels.
@@ -43,14 +49,14 @@ pub struct MenuState<'a> {
     pub engine_loaded: [bool; 2],
     /// File name of the loaded opening book, if any.
     pub book_name: Option<&'a str>,
-    /// FEN of the displayed position.
-    pub fen: &'a str,
     /// Number of moves played, shown in the Game menu.
     pub ply_count: usize,
 }
 
-/// Draw the menu bar and the FEN bar. Returns the action chosen this frame.
-pub fn show(ui: &mut Ui, state: &MenuState) -> Option<MenuAction> {
+/// Draw the top bar. `fen_input` is the FEN text shown in the field; the user
+/// may edit it, and Enter loads it into the board. Cut, copy and paste work
+/// in the field as in any text box. Returns the action chosen this frame.
+pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<MenuAction> {
     let mut action = None;
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("Game", |ui| {
@@ -116,24 +122,32 @@ pub fn show(ui: &mut Ui, state: &MenuState) -> Option<MenuAction> {
                 ui.close();
             }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let abort = egui::Button::new(RichText::new("Abort").color(egui::Color32::WHITE))
-                .fill(theme::DANGER_RED);
-            if ui
-                .add(abort)
-                .on_hover_text("Stop and quit all engines now")
-                .clicked()
-            {
-                action = Some(MenuAction::AbortAll);
-            }
-        });
-    });
 
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("FEN").color(theme::MUTED).monospace());
-        ui.add(egui::Label::new(RichText::new(state.fen).monospace()).truncate());
-        if ui.button("Copy").on_hover_text("Copy FEN to the clipboard").clicked() {
-            action = Some(MenuAction::CopyFen);
+        ui.separator();
+        let start = egui::Button::new(RichText::new("Start").color(Color32::BLACK).strong())
+            .fill(theme::NEON_GREEN);
+        if ui.add(start).on_hover_text("Analyse the position with every loaded engine").clicked() {
+            action = Some(MenuAction::StartAnalysis);
+        }
+        let abort = egui::Button::new(RichText::new("Abort").color(Color32::WHITE).strong())
+            .fill(theme::DANGER_RED);
+        if ui.add(abort).on_hover_text("Stop all searches (engines stay loaded)").clicked() {
+            action = Some(MenuAction::StopAnalysis);
+        }
+
+        ui.separator();
+        ui.label(RichText::new("FEN").color(theme::MUTED));
+        let field = ui
+            .add(
+                egui::TextEdit::singleline(fen_input)
+                    .font(FontId::monospace(15.0))
+                    .desired_width(ui.available_width().max(200.0))
+                    .hint_text("paste a FEN and press Enter"),
+            )
+            .on_hover_text("Enter loads this position");
+        // A single-line field gives up focus when Enter is pressed.
+        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            action = Some(MenuAction::LoadFen);
         }
     });
     action

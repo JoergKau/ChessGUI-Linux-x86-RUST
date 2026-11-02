@@ -8,7 +8,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Key};
 use tokio::sync::mpsc;
@@ -24,6 +24,10 @@ use crate::gui::{pgn_panel, theme};
 
 /// How long engines get to quit on their own at app exit before they are killed.
 const EXIT_GRACE: Duration = Duration::from_millis(600);
+
+/// How long a started engine may take to answer `uci` before it is declared
+/// not to be a UCI engine.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Results of background work, delivered to the UI thread. `None` means the
 /// user cancelled a file dialog, which leaves the state unchanged.
@@ -114,6 +118,10 @@ pub struct SiliconBoardApp {
     status: String,
     /// Last engine status seen per slot, to report start-up outcomes once.
     engine_status: [Option<AnalysisStatus>; 2],
+    /// When each slot's engine was spawned, for the handshake timeout.
+    engine_started: [Option<Instant>; 2],
+    /// The FEN text in the top bar. Follows the position unless the user edits it.
+    fen_input: String,
 }
 
 impl SiliconBoardApp {
@@ -136,6 +144,8 @@ impl SiliconBoardApp {
             last_ply: 0,
             status: "Welcome — click or drag a piece to make a move.".to_string(),
             engine_status: [None, None],
+            engine_started: [None, None],
+            fen_input: GameState::new().fen(),
         }
     }
 
@@ -164,12 +174,38 @@ impl SiliconBoardApp {
         self.handle_navigation_keys(ctx);
     }
 
-    /// Tell the user how a freshly loaded engine ended up: ready, or failed
-    /// before its handshake finished. Later changes (Abort, exit) are silent.
+    /// Follow each engine from spawn to ready. An engine that exits, or stays
+    /// silent past `HANDSHAKE_TIMEOUT`, before answering `uci` is not a UCI
+    /// engine: it is shut down and the status line says so. Later changes
+    /// (Abort, exit) do not touch the status line.
     fn report_engine_start_up(&mut self) {
         for slot in 0..2 {
+            let letter = slot_letter(slot);
+            let timed_out = self.engine_started[slot].is_some_and(|t| t.elapsed() > HANDSHAKE_TIMEOUT);
+            let failure = match self.engines[slot].as_mut() {
+                Some(host) if host.view().status == AnalysisStatus::Starting => {
+                    let reason = if host.has_exited() {
+                        Some("it exited before answering `uci`")
+                    } else if timed_out {
+                        Some("it did not answer `uci` within 10 seconds")
+                    } else {
+                        None
+                    };
+                    reason.map(|reason| (host.shutdown(), host.view().binary_name, reason))
+                }
+                _ => None,
+            };
+            if let Some((process, binary, reason)) = failure {
+                self.quit_processes(vec![process]);
+                self.engine_status[slot] = Some(AnalysisStatus::Offline);
+                self.engine_started[slot] = None;
+                self.status = format!("Engine {} is not a UCI engine: {} ({}).", letter, binary, reason);
+                continue;
+            }
+
             let Some(host) = &self.engines[slot] else {
                 self.engine_status[slot] = None;
+                self.engine_started[slot] = None;
                 continue;
             };
             let now = host.view();
@@ -177,24 +213,14 @@ impl SiliconBoardApp {
             if before == Some(now.status) {
                 continue;
             }
-            if before == Some(AnalysisStatus::Starting) {
-                match now.status {
-                    AnalysisStatus::Offline => {
-                        self.status = format!(
-                            "Engine {} did not start: {}",
-                            slot_letter(slot),
-                            now.binary_name
-                        );
-                    }
-                    AnalysisStatus::Ready | AnalysisStatus::Thinking => {
-                        self.status = format!(
-                            "Engine {} ready: {}",
-                            slot_letter(slot),
-                            now.name.as_deref().unwrap_or(&now.binary_name)
-                        );
-                    }
-                    AnalysisStatus::Starting => {}
-                }
+            if before == Some(AnalysisStatus::Starting)
+                && matches!(now.status, AnalysisStatus::Ready | AnalysisStatus::Thinking)
+            {
+                self.status = format!(
+                    "Engine {} ready: {}",
+                    letter,
+                    now.name.as_deref().unwrap_or(&now.binary_name)
+                );
             }
             self.engine_status[slot] = Some(now.status);
         }
@@ -220,6 +246,7 @@ impl SiliconBoardApp {
                             host.set_analysis(self.analysis_enabled, &self.game.fen());
                             self.engines[slot] = Some(host);
                             self.engine_status[slot] = None;
+                            self.engine_started[slot] = Some(Instant::now());
                             self.status = format!("Loading engine {}: {}…", slot_letter(slot), binary);
                         }
                         Some(Err(err)) => {
@@ -286,6 +313,7 @@ impl SiliconBoardApp {
             Some((_, book)) => self.game.book_suggestions(book),
             None => Vec::new(),
         };
+        self.fen_input = fen.clone();
         self.synced_fen = fen;
     }
 
@@ -348,21 +376,18 @@ impl SiliconBoardApp {
                 self.save_text("FEN", text, "position.fen", "FEN", &["fen"]);
             }
             MenuAction::LoadEngine(slot) => self.load_engine(slot),
-            MenuAction::ToggleAnalysis => {
-                self.analysis_enabled = !self.analysis_enabled;
-                let enabled = self.analysis_enabled;
-                let fen = self.game.fen();
-                for host in self.engines.iter_mut().flatten() {
-                    host.set_analysis(enabled, &fen);
+            MenuAction::ToggleAnalysis => self.set_analysis(!self.analysis_enabled),
+            MenuAction::StartAnalysis => self.set_analysis(true),
+            MenuAction::StopAnalysis => self.set_analysis(false),
+            MenuAction::LoadFen => match GameState::from_fen(self.fen_input.trim()) {
+                Ok(game) => {
+                    self.game = game;
+                    self.view.clear_selection();
+                    self.status = "Position loaded from FEN.".to_string();
                 }
-                self.status = match (enabled, self.engines.iter().any(Option::is_some)) {
-                    (true, false) => "Analysis on — load an engine to start it.".to_string(),
-                    (true, true) => "Analysis on.".to_string(),
-                    (false, _) => "Analysis off.".to_string(),
-                };
-            }
+                Err(err) => self.status = format!("Invalid FEN: {}", err),
+            },
             MenuAction::LoadBook => self.load_book(),
-            MenuAction::AbortAll => self.abort_engines(),
         }
     }
 
@@ -497,23 +522,22 @@ impl SiliconBoardApp {
         });
     }
 
-    /// Stop and quit every engine now (the Abort button). Each card switches
-    /// to `Offline` at once and keeps its "Load engine…" button; the processes
-    /// exit in the background.
-    fn abort_engines(&mut self) {
-        let mut processes = Vec::new();
-        let mut stopped = 0usize;
+    /// Switch analysis on (Start) or off (Abort) for every running engine.
+    /// Engines stay loaded either way; nothing here quits a process.
+    fn set_analysis(&mut self, enabled: bool) {
+        self.analysis_enabled = enabled;
+        let fen = self.game.fen();
+        let mut running = 0usize;
         for host in self.engines.iter_mut().flatten() {
             if host.view().status != AnalysisStatus::Offline {
-                stopped += 1;
+                running += 1;
+                host.set_analysis(enabled, &fen);
             }
-            processes.push(host.shutdown());
         }
-        self.quit_processes(processes);
-        self.status = match stopped {
-            0 => "No engines were running.".to_string(),
-            1 => "Stopped 1 engine.".to_string(),
-            n => format!("Stopped {} engines.", n),
+        self.status = match (enabled, running) {
+            (true, 0) => "Load an engine first.".to_string(),
+            (true, _) => "Analysis started.".to_string(),
+            (false, _) => "Analysis stopped.".to_string(),
         };
     }
 
@@ -588,18 +612,17 @@ impl eframe::App for SiliconBoardApp {
     /// right, move list at the bottom, board in the centre.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let fen = self.game.fen();
         let menu_state = MenuState {
             analysis_enabled: self.analysis_enabled,
             engine_loaded: [self.engines[0].is_some(), self.engines[1].is_some()],
             book_name: self.book.as_ref().map(|(name, _)| name.as_str()),
-            fen: &fen,
             ply_count: self.game.total_plies(),
         };
         let mut requested: Option<MenuAction> = None;
+        let fen_input = &mut self.fen_input;
 
         egui::Panel::top("top_bar").show(ui, |ui| {
-            if let Some(action) = menu_bar::show(ui, &menu_state) {
+            if let Some(action) = menu_bar::show(ui, &menu_state, fen_input) {
                 requested = Some(action);
             }
         });
