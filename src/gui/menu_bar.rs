@@ -1,9 +1,10 @@
 //! Top bar, one row: Game / File / Engine menus, Start and Abort buttons, and
-//! the FEN field with Load and Copy.
+//! the FEN field.
 //!
 //! The bar only reports what the user chose as a [`MenuAction`]; the app
-//! performs it. Start and Abort switch analysis on and off; they never quit an
-//! engine. The FEN text is owned by the app, so this module only edits it.
+//! performs it. Start and Abort switch analysis on and off for every engine;
+//! they never quit an engine. Each engine card has its own toggle. The FEN
+//! text is owned by the app, so this module only edits it.
 
 use eframe::egui::{self, Color32, FontId, RichText, Ui};
 
@@ -22,29 +23,27 @@ pub enum MenuAction {
     SavePgn,
     /// File → Copy PGN.
     CopyPgn,
-    /// File → Copy FEN (also the FEN field's Copy button).
+    /// File → Copy FEN.
     CopyFen,
     /// File → Save FEN…
     SaveFen,
     /// Engine → Load engine A… / B… (`0` = A, `1` = B).
     LoadEngine(usize),
-    /// Engine → Analysis (checkbox).
-    ToggleAnalysis,
+    /// An engine card's play/pause toggle (`0` = A, `1` = B).
+    ToggleEngine(usize),
     /// Engine → Load PolyGlot book…
     LoadBook,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
     /// Abort: stop all searches. Engines stay loaded and can be started again.
     StopAnalysis,
-    /// FEN field's Load button (or Enter): set the board to the FEN text.
+    /// Enter in the FEN field: set the board to the FEN text.
     LoadFen,
 }
 
-/// Read-only facts the menu needs to draw its checkmarks and labels.
+/// Read-only facts the menu needs to draw its labels.
 #[derive(Clone, Debug)]
 pub struct MenuState<'a> {
-    /// Whether analysis is switched on.
-    pub analysis_enabled: bool,
     /// Whether each engine slot holds a running (or starting) engine.
     pub engine_loaded: [bool; 2],
     /// File name of the loaded opening book, if any.
@@ -108,11 +107,6 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 }
             }
             ui.separator();
-            let mut analysis = state.analysis_enabled;
-            if ui.checkbox(&mut analysis, "Analysis").changed() {
-                action = Some(MenuAction::ToggleAnalysis);
-                ui.close();
-            }
             let book_label = match state.book_name {
                 Some(name) => format!("Opening book: {} (replace…)", name),
                 None => "Load opening book…".to_string(),

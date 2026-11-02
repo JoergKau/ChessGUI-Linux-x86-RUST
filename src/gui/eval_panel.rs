@@ -1,21 +1,22 @@
-//! Right-hand dashboard: one card per engine, a live evaluation bar, the
-//! opening-book suggestions and the outcome of the game.
+//! Right-hand dashboard: one card per engine, the opening-book suggestions and
+//! the outcome of the game.
 //!
 //! The panel only draws what it is given ([`EvalSummary`]); the app builds the
-//! summary from the engine hosts and the game state. Score and number
+//! summary from the engine hosts and the game state. Score, number and move
 //! formatting are pure functions with unit tests.
 
-use eframe::egui::{self, Align, Layout, RichText, Sense, Ui, Vec2};
+use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
 
+use crate::app::StatusLevel;
 use crate::engine::{AnalysisStatus, EngineView, Score};
 use crate::gui::menu_bar::MenuAction;
 use crate::gui::theme;
 
-/// Largest evaluation shown on the bar, in centipawns (±10 pawns).
-const BAR_CP_LIMIT: i32 = 1000;
+/// Height of the principal-variation box: about three lines of text.
+const PV_MAX_HEIGHT: f32 = 72.0;
 
-/// How many PV moves a card shows before it truncates.
-const PV_DISPLAY_LIMIT: usize = 12;
+/// Width of one header metric (EVAL, DEPTH, NODES), so the labels never wrap.
+const METRIC_WIDTH: f32 = 64.0;
 
 /// One engine card: the slot it fills plus its live view, if an engine is loaded.
 #[derive(Clone, Debug)]
@@ -26,6 +27,17 @@ pub struct EvalCard {
     pub view: Option<EngineView>,
     /// Principal variation in SAN, relative to the displayed position.
     pub pv_san: Vec<String>,
+    /// Whether analysis is switched on for this slot (the card's toggle).
+    pub running: bool,
+}
+
+impl EvalCard {
+    /// A loaded engine that has not exited.
+    fn is_live(&self) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|v| v.status != AnalysisStatus::Offline)
+    }
 }
 
 /// Everything the evaluation panel draws in one frame.
@@ -35,6 +47,8 @@ pub struct EvalSummary {
     pub cards: [EvalCard; 2],
     /// Side to move in the displayed position (scores are relative to it).
     pub white_to_move: bool,
+    /// Full-move number of the displayed position.
+    pub fullmove: u32,
     /// Outcome text, e.g. `"Unfinished"` or `"Black wins by checkmate"`.
     pub outcome: String,
     /// Opening-book moves as `(SAN, weight)`, heaviest first.
@@ -43,9 +57,11 @@ pub struct EvalSummary {
     pub book_name: Option<String>,
     /// Last status message of the application.
     pub status: String,
+    /// Severity of the status message.
+    pub status_level: StatusLevel,
 }
 
-/// Draw the dashboard. Returns the menu action requested by a card's
+/// Draw the dashboard. Returns the menu action requested by a card's toggle or
 /// "Load engine" button, if one was clicked.
 pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     let mut requested = None;
@@ -54,15 +70,8 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     ui.label(RichText::new(&summary.outcome).color(theme::MUTED));
     ui.add_space(6.0);
 
-    let primary = summary
-        .cards
-        .iter()
-        .find_map(|card| card.view.as_ref().and_then(|v| v.stats.score));
-    evaluation_bar(ui, primary, summary.white_to_move);
-    ui.add_space(8.0);
-
     for card in &summary.cards {
-        if let Some(action) = engine_card(ui, card, summary.white_to_move) {
+        if let Some(action) = engine_card(ui, card, summary.white_to_move, summary.fullmove) {
             requested = Some(action);
         }
         ui.add_space(6.0);
@@ -71,116 +80,201 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     book_box(ui, summary);
 
     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-        ui.label(RichText::new(&summary.status).small().color(theme::MUTED));
+        let color = match summary.status_level {
+            StatusLevel::Info => theme::MUTED,
+            StatusLevel::Warning => theme::ALERT_YELLOW,
+            StatusLevel::Error => theme::DANGER_RED,
+        };
+        let text = RichText::new(&summary.status).small().color(color);
+        let text = if summary.status_level == StatusLevel::Info { text } else { text.strong() };
+        ui.label(text);
     });
     requested
 }
 
-/// Horizontal evaluation bar: White's share of the bar grows with the score.
-fn evaluation_bar(ui: &mut Ui, score: Option<Score>, white_to_move: bool) {
-    let cp = score.map(|s| white_point_of_view(s, white_to_move).centipawn_equivalent());
-    let white_share = eval_bar_white_share(cp);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 14.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, theme::BAR_BLACK);
-    let mut white_rect = rect;
-    white_rect.set_width(rect.width() * white_share);
-    painter.rect_filled(white_rect, 2.0, theme::BAR_WHITE);
-    let label = match score {
-        Some(s) => format_score_white(white_point_of_view(s, white_to_move)),
-        None => "--".to_string(),
-    };
-    ui.label(RichText::new(format!("Eval (White): {}", label)).color(theme::NEON_GREEN).strong());
-}
-
-/// One engine card. Returns a menu action when its "Load engine" button is pressed.
-fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool) -> Option<MenuAction> {
+/// One engine card: a header row (toggle, name, speed, metrics), a blue rule,
+/// and the score badge with the principal variation. Returns a menu action
+/// when the toggle or the "Load engine" button is pressed.
+fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32) -> Option<MenuAction> {
     let mut action = None;
-    let title = format!("Engine {}", slot_letter(card.slot));
+    let live = card.is_live();
+    let letter = slot_letter(card.slot);
     egui::Frame::new()
         .fill(theme::CARD_BG)
         .corner_radius(4.0)
         .inner_margin(8.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            match &card.view {
-                None => {
-                    ui.label(RichText::new(format!("{}: no engine loaded", title)).color(theme::MUTED));
-                    if ui.button("Load engine…").clicked() {
-                        action = Some(MenuAction::LoadEngine(card.slot));
-                    }
+            ui.horizontal(|ui| {
+                if toggle_button(ui, card.running, live) {
+                    action = Some(MenuAction::ToggleEngine(card.slot));
                 }
-                Some(view) => {
-                    ui.horizontal(|ui| {
-                        let name = view
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| view.binary_name.clone());
-                        ui.label(RichText::new(format!("{} · {}", title, name)).color(theme::NEON_CYAN).strong());
-                        badge(ui, view.status);
-                    });
-                    let score_text = view
-                        .stats
-                        .score
-                        .map(|s| format_score_white(white_point_of_view(s, white_to_move)))
-                        .unwrap_or_else(|| "--".to_string());
-                    ui.label(RichText::new(score_text).size(20.0).color(theme::NEON_GREEN).strong());
-                    ui.horizontal_wrapped(|ui| {
-                        let depth = match (view.stats.depth, view.stats.seldepth) {
-                            (Some(d), Some(s)) => format!("depth {}/{}", d, s),
-                            (Some(d), None) => format!("depth {}", d),
-                            _ => "depth --".to_string(),
+                match card.view.as_ref().filter(|_| live) {
+                    Some(view) => {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(letter.to_string()).small().color(theme::MUTED));
+                                ui.add(egui::Label::new(RichText::new(engine_name(view)).strong().color(theme::TEXT)).truncate());
+                            });
+                            speed_pill(ui, view);
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
+                            let depth = view
+                                .stats
+                                .depth
+                                .map_or_else(|| "--".to_string(), |d| d.to_string());
+                            let nodes = format_count(view.stats.nodes.unwrap_or(0));
+                            let eval = white_score.map_or_else(|| "--".to_string(), format_eval_one_digit);
+                            metric(ui, "NODES", &nodes, theme::NEON_CYAN);
+                            ui.add_space(8.0);
+                            metric(ui, "DEPTH", &depth, theme::NEON_CYAN);
+                            ui.add_space(8.0);
+                            metric(ui, "EVAL", &eval, theme::NEON_GREEN);
+                        });
+                    }
+                    None => {
+                        let text = match &card.view {
+                            None => format!("Engine {}: no engine loaded", letter),
+                            Some(_) => format!("Engine {}: offline", letter),
                         };
-                        metric(ui, &depth);
-                        metric(ui, &format!("{} N/s", format_count(view.stats.nps.unwrap_or(0))));
-                        metric(ui, &format!("{} nodes", format_count(view.stats.nodes.unwrap_or(0))));
-                    });
-                    if view.status == AnalysisStatus::Ready {
-                        ui.label(RichText::new("Idle — press Start to analyse").color(theme::MUTED));
-                    }
-                    pv_line(ui, &card.pv_san);
-                    if view.status == AnalysisStatus::Offline && ui.button("Load engine…").clicked() {
-                        action = Some(MenuAction::LoadEngine(card.slot));
+                        ui.label(RichText::new(text).color(theme::MUTED));
                     }
                 }
+            });
+
+            if !live {
+                if ui.button("Load engine…").clicked() {
+                    action = Some(MenuAction::LoadEngine(card.slot));
+                }
+                return;
             }
+            let Some(view) = card.view.as_ref() else {
+                return;
+            };
+
+            ui.add_space(6.0);
+            let (rule, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), Sense::hover());
+            ui.painter().rect_filled(rule, 1.0, theme::BLUE);
+            ui.add_space(6.0);
+
+            let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
+            let badge = white_score.map_or_else(|| "--".to_string(), format_score_white);
+            let tokens = number_pv(fullmove, white_to_move, &card.pv_san);
+            ui.horizontal_top(|ui| {
+                score_badge(ui, &badge);
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .id_salt(("pv", card.slot))
+                    .max_height(PV_MAX_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| pv_flow(ui, &tokens));
+            });
         });
     action
 }
 
-/// Status badge: colour + word.
-fn badge(ui: &mut Ui, status: AnalysisStatus) {
-    let (text, color) = match status {
-        AnalysisStatus::Starting => ("Starting", theme::MUTED),
-        AnalysisStatus::Ready => ("Ready", theme::NEON_CYAN),
-        AnalysisStatus::Thinking => ("Thinking", theme::ALERT_YELLOW),
-        AnalysisStatus::Offline => ("Offline", theme::DANGER_RED),
+/// The engine's name, or its file name when it did not give one.
+fn engine_name(view: &EngineView) -> String {
+    view.name.clone().unwrap_or_else(|| view.binary_name.clone())
+}
+
+/// Second line of the header: the speed as a dark pill while the engine
+/// searches, otherwise a word for its state.
+fn speed_pill(ui: &mut Ui, view: &EngineView) {
+    match view.status {
+        AnalysisStatus::Thinking => {
+            let nps = format_nps(view.stats.nps.unwrap_or(0));
+            egui::Frame::new()
+                .fill(theme::BAR_BLACK)
+                .corner_radius(4.0)
+                .inner_margin(3.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new(nps).monospace().small().color(theme::TEXT));
+                });
+        }
+        AnalysisStatus::Starting => {
+            ui.label(RichText::new("starting…").small().color(theme::MUTED));
+        }
+        AnalysisStatus::Ready => {
+            ui.label(RichText::new("idle").small().color(theme::MUTED));
+        }
+        AnalysisStatus::Offline => {}
+    }
+}
+
+/// Round play/pause button drawn with the painter. Pause while the engine is
+/// running, play while it is stopped. Returns `true` when clicked; a disabled
+/// button (no live engine) never reports a click.
+fn toggle_button(ui: &mut Ui, running: bool, enabled: bool) -> bool {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), sense);
+    let (fill, ink) = match (enabled, running) {
+        (false, _) => (theme::BAR_BLACK, theme::MUTED),
+        (true, true) => (theme::BLUE, Color32::WHITE),
+        (true, false) => (theme::BAR_BLACK, theme::NEON_GREEN),
     };
-    ui.label(RichText::new(format!("[{}]", text)).color(color).small());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, fill);
+    let c = rect.center();
+    if running {
+        for x in [c.x - 5.0, c.x + 1.0] {
+            let bar = Rect::from_min_size(Pos2::new(x, c.y - 7.0), Vec2::new(4.0, 14.0));
+            painter.rect_filled(bar, 1.0, ink);
+        }
+    } else {
+        let points = vec![
+            Pos2::new(c.x - 4.0, c.y - 7.0),
+            Pos2::new(c.x - 4.0, c.y + 7.0),
+            Pos2::new(c.x + 7.0, c.y),
+        ];
+        painter.add(Shape::convex_polygon(points, ink, Stroke::NONE));
+    }
+    let hover = if !enabled {
+        "Load an engine first"
+    } else if running {
+        "Stop this engine's analysis"
+    } else {
+        "Start this engine's analysis"
+    };
+    response.on_hover_text(hover).clicked()
 }
 
-/// A search metric shown in neon cyan.
-fn metric(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::NEON_CYAN).monospace().small());
+/// A labelled value, centred over its label, in a fixed-width column.
+fn metric(ui: &mut Ui, label: &str, value: &str, color: Color32) {
+    ui.allocate_ui_with_layout(Vec2::new(METRIC_WIDTH, 0.0), Layout::top_down(Align::Center), |ui| {
+        ui.label(RichText::new(label).small().color(theme::MUTED));
+        ui.label(RichText::new(value).strong().color(color));
+    });
 }
 
-/// The principal variation, first few moves in SAN.
-fn pv_line(ui: &mut Ui, pv_san: &[String]) {
-    if pv_san.is_empty() {
+/// The evaluation from White's point of view, on a white badge.
+fn score_badge(ui: &mut Ui, text: &str) {
+    egui::Frame::new()
+        .fill(Color32::WHITE)
+        .corner_radius(4.0)
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).monospace().strong().color(Color32::BLACK));
+        });
+}
+
+/// The principal variation as a wrapping flow. Move numbers are muted, moves bold.
+fn pv_flow(ui: &mut Ui, tokens: &[String]) {
+    if tokens.is_empty() {
         ui.label(RichText::new("PV: --").color(theme::MUTED).small());
         return;
     }
-    let mut text = String::new();
-    for (i, san) in pv_san.iter().take(PV_DISPLAY_LIMIT).enumerate() {
-        if i > 0 {
-            text.push(' ');
+    ui.horizontal_wrapped(|ui| {
+        for token in tokens {
+            let text = if token.ends_with('.') {
+                RichText::new(token).color(theme::MUTED)
+            } else {
+                RichText::new(token).strong()
+            };
+            ui.label(text);
         }
-        text.push_str(san);
-    }
-    if pv_san.len() > PV_DISPLAY_LIMIT {
-        text.push_str(" …");
-    }
-    ui.add(egui::Label::new(RichText::new(text).monospace().small()).wrap());
+    });
 }
 
 /// Opening-book box: the heaviest book moves with their share of the weight.
@@ -236,11 +330,21 @@ pub fn format_score_white(score: Score) -> String {
     }
 }
 
-/// Share of the evaluation bar that belongs to White, in `0.0..=1.0`. Scores
-/// are clamped to ±10 pawns; a missing score is an even bar.
-pub fn eval_bar_white_share(cp_white: Option<i32>) -> f32 {
-    let cp = cp_white.unwrap_or(0).clamp(-BAR_CP_LIMIT, BAR_CP_LIMIT);
-    (cp + BAR_CP_LIMIT) as f32 / (2 * BAR_CP_LIMIT) as f32
+/// The header's evaluation, one decimal: `+0.2`, `-1.2`, `#3`.
+pub fn format_eval_one_digit(score: Score) -> String {
+    match score {
+        Score::Cp(cp) => format!("{:+.1}", f64::from(cp) / 100.0),
+        Score::Mate(_) => format_score_white(score),
+    }
+}
+
+/// Search speed: `598.7kn/s` below a million nodes per second, `1.25Mn/s` above.
+pub fn format_nps(nps: u64) -> String {
+    if nps < 1_000_000 {
+        format!("{:.1}kn/s", nps as f64 / 1e3)
+    } else {
+        format!("{:.2}Mn/s", nps as f64 / 1e6)
+    }
 }
 
 /// Compact count: `512`, `1.2k`, `980k`, `2.45M`, `1.20G`.
@@ -251,6 +355,26 @@ pub fn format_count(n: u64) -> String {
         1_000_000..=999_999_999 => format!("{:.2}M", n as f64 / 1e6),
         _ => format!("{:.2}G", n as f64 / 1e9),
     }
+}
+
+/// The principal variation with move numbers: `3... Nf6 4. O-O Nxe4`. A
+/// number is written before each White move, and before the first move when
+/// that move is Black's. `first_number` is the displayed full-move number.
+pub fn number_pv(first_number: u32, white_to_move: bool, sans: &[String]) -> Vec<String> {
+    let black_first = u32::from(!white_to_move);
+    let mut out = Vec::with_capacity(sans.len() * 2);
+    for (i, san) in sans.iter().enumerate() {
+        let i = i as u32;
+        let number = first_number + (i + black_first) / 2;
+        let is_white = i.is_multiple_of(2) == white_to_move;
+        if is_white {
+            out.push(format!("{}.", number));
+        } else if i == 0 {
+            out.push(format!("{}...", number));
+        }
+        out.push(san.clone());
+    }
+    out
 }
 
 /// Letter used in card titles.
@@ -265,6 +389,10 @@ fn slot_letter(slot: usize) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sans(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
 
     #[test]
     fn score_is_shown_from_whites_point_of_view() {
@@ -292,12 +420,20 @@ mod tests {
     }
 
     #[test]
-    fn eval_bar_is_even_without_a_score_and_clamped_at_ten_pawns() {
-        assert!((eval_bar_white_share(None) - 0.5).abs() < f32::EPSILON);
-        assert!((eval_bar_white_share(Some(0)) - 0.5).abs() < f32::EPSILON);
-        assert!((eval_bar_white_share(Some(1_000)) - 1.0).abs() < f32::EPSILON);
-        assert!((eval_bar_white_share(Some(-30_000)) - 0.0).abs() < f32::EPSILON);
-        assert!(eval_bar_white_share(Some(300)) > 0.5);
+    fn card_eval_has_one_decimal() {
+        assert_eq!(format_eval_one_digit(Score::Cp(17)), "+0.2");
+        assert_eq!(format_eval_one_digit(Score::Cp(14)), "+0.1");
+        assert_eq!(format_eval_one_digit(Score::Cp(-120)), "-1.2");
+        assert_eq!(format_eval_one_digit(Score::Cp(0)), "+0.0");
+        assert_eq!(format_eval_one_digit(Score::Mate(3)), "#3");
+        assert_eq!(format_eval_one_digit(Score::Mate(-2)), "-#2");
+    }
+
+    #[test]
+    fn speed_uses_kilo_or_mega_nodes_per_second() {
+        assert_eq!(format_nps(598_700), "598.7kn/s");
+        assert_eq!(format_nps(1_250_000), "1.25Mn/s");
+        assert_eq!(format_nps(0), "0.0kn/s");
     }
 
     #[test]
@@ -307,6 +443,22 @@ mod tests {
         assert_eq!(format_count(980_000), "980.0k");
         assert_eq!(format_count(2_450_000), "2.45M");
         assert_eq!(format_count(1_200_000_000), "1.20G");
+    }
+
+    #[test]
+    fn pv_numbers_start_with_white_when_white_is_to_move() {
+        assert_eq!(
+            number_pv(1, true, &sans(&["e4", "e5", "Nf3"])),
+            sans(&["1.", "e4", "e5", "2.", "Nf3"])
+        );
+    }
+
+    #[test]
+    fn pv_numbers_a_black_first_line_with_dots() {
+        assert_eq!(
+            number_pv(3, false, &sans(&["Nf6", "O-O", "Nxe4", "d4"])),
+            sans(&["3...", "Nf6", "4.", "O-O", "Nxe4", "5.", "d4"])
+        );
     }
 
     #[test]

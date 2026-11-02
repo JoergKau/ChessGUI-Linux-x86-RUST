@@ -29,6 +29,18 @@ const EXIT_GRACE: Duration = Duration::from_millis(600);
 /// not to be a UCI engine.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How serious the message in the status line is. Warnings and errors are
+/// drawn in colour so they cannot be missed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StatusLevel {
+    /// Something that happened as expected.
+    Info,
+    /// Something the user should know, such as ignored PGN content.
+    Warning,
+    /// A failed action: it did not happen.
+    Error,
+}
+
 /// Results of background work, delivered to the UI thread. `None` means the
 /// user cancelled a file dialog, which leaves the state unchanged.
 enum AppEvent {
@@ -104,8 +116,8 @@ pub struct SiliconBoardApp {
     engines: [Option<EngineHost>; 2],
     /// `true` while a file dialog or spawn for a slot is in flight.
     engine_loading: [bool; 2],
-    /// Analysis switch from the Engine menu.
-    analysis_enabled: bool,
+    /// Whether analysis is switched on for each slot (Start, Abort or the card's toggle).
+    analysis_on: [bool; 2],
     /// The loaded opening book and its file name.
     book: Option<(String, PolyglotBook)>,
     /// Book moves for the displayed position, heaviest first.
@@ -116,6 +128,8 @@ pub struct SiliconBoardApp {
     last_ply: usize,
     /// Status line shown in the evaluation panel.
     status: String,
+    /// Severity of the status line.
+    status_level: StatusLevel,
     /// Last engine status seen per slot, to report start-up outcomes once.
     engine_status: [Option<AnalysisStatus>; 2],
     /// When each slot's engine was spawned, for the handshake timeout.
@@ -137,12 +151,13 @@ impl SiliconBoardApp {
             view: BoardView::default(),
             engines: [None, None],
             engine_loading: [false, false],
-            analysis_enabled: false,
+            analysis_on: [false, false],
             book: None,
             book_moves: Vec::new(),
             synced_fen: String::new(),
             last_ply: 0,
             status: "Welcome — click or drag a piece to make a move.".to_string(),
+            status_level: StatusLevel::Info,
             engine_status: [None, None],
             engine_started: [None, None],
             fen_input: GameState::new().fen(),
@@ -199,7 +214,8 @@ impl SiliconBoardApp {
                 self.quit_processes(vec![process]);
                 self.engine_status[slot] = Some(AnalysisStatus::Offline);
                 self.engine_started[slot] = None;
-                self.status = format!("Engine {} is not a UCI engine: {} ({}).", letter, binary, reason);
+                self.analysis_on[slot] = false;
+                self.set_status(StatusLevel::Error, format!("Engine {} is not a UCI engine: {} ({}).", letter, binary, reason));
                 continue;
             }
 
@@ -216,10 +232,13 @@ impl SiliconBoardApp {
             if before == Some(AnalysisStatus::Starting)
                 && matches!(now.status, AnalysisStatus::Ready | AnalysisStatus::Thinking)
             {
-                self.status = format!(
-                    "Engine {} ready: {}",
-                    letter,
-                    now.name.as_deref().unwrap_or(&now.binary_name)
+                self.set_status(
+                    StatusLevel::Info,
+                    format!(
+                        "Engine {} ready: {}",
+                        letter,
+                        now.name.as_deref().unwrap_or(&now.binary_name)
+                    ),
                 );
             }
             self.engine_status[slot] = Some(now.status);
@@ -235,61 +254,63 @@ impl SiliconBoardApp {
                 AppEvent::EngineSpawned { slot, outcome } => {
                     self.engine_loading[slot] = false;
                     match outcome {
-                        None => self.status = "Engine selection cancelled.".to_string(),
+                        None => self.set_status(StatusLevel::Info, "Engine selection cancelled.".to_string()),
                         Some(Ok(process)) => {
                             let binary = process.binary().display().to_string();
                             if let Some(mut old) = self.engines[slot].take() {
                                 let stale = old.shutdown();
                                 self.quit_processes(vec![stale]);
                             }
-                            let mut host = EngineHost::attach(process);
-                            host.set_analysis(self.analysis_enabled, &self.game.fen());
-                            self.engines[slot] = Some(host);
+                            self.engines[slot] = Some(EngineHost::attach(process));
+                            self.analysis_on[slot] = false;
                             self.engine_status[slot] = None;
                             self.engine_started[slot] = Some(Instant::now());
-                            self.status = format!("Loading engine {}: {}…", slot_letter(slot), binary);
+                            self.set_status(StatusLevel::Info, format!("Loading engine {}: {}…", slot_letter(slot), binary));
                         }
                         Some(Err(err)) => {
                             log::error!("engine spawn failed: {}", err);
-                            self.status = format!("Could not start engine {}: {}", slot_letter(slot), err);
+                            self.set_status(StatusLevel::Error, format!("Could not start engine {}: {}", slot_letter(slot), err));
                         }
                     }
                 }
                 AppEvent::BookLoaded { outcome } => match outcome {
-                    None => self.status = "Book selection cancelled.".to_string(),
+                    None => self.set_status(StatusLevel::Info, "Book selection cancelled.".to_string()),
                     Some((name, Ok(book))) if book.is_empty() => {
-                        self.status = format!("Opening book {} has no records.", name);
+                        self.set_status(StatusLevel::Warning, format!("Opening book {} has no records.", name));
                     }
                     Some((name, Ok(book))) => {
-                        self.status = format!("Opening book loaded: {} ({} records)", name, book.len());
+                        self.set_status(StatusLevel::Info, format!("Opening book loaded: {} ({} records)", name, book.len()));
                         self.book = Some((name, book));
                         self.sync_position(true);
                     }
                     Some((name, Err(err))) => {
-                        self.status = format!("Could not load book {}: {}", name, err);
+                        self.set_status(StatusLevel::Error, format!("Could not load book {}: {}", name, err));
                     }
                 },
                 AppEvent::PgnOpened { outcome } => match outcome {
-                    None => self.status = "Open cancelled.".to_string(),
+                    None => self.set_status(StatusLevel::Info, "Open cancelled.".to_string()),
                     Some(Ok((name, import))) => {
                         self.game = import.game;
                         self.view.clear_selection();
-                        self.status = match import.ignored.summary() {
-                            Some(note) => format!("Opened {} ({})", name, note),
-                            None => format!("Opened {}", name),
-                        };
+                        match import.ignored.summary() {
+                            Some(note) => self.set_status(
+                                StatusLevel::Warning,
+                                format!("Opened {} ({})", name, note),
+                            ),
+                            None => self.set_status(StatusLevel::Info, format!("Opened {}", name)),
+                        }
                     }
                     Some(Err(err)) => {
                         log::error!("PGN open failed: {}", err);
-                        self.status = err.to_string();
+                        self.set_status(StatusLevel::Error, err.to_string());
                     }
                 },
                 AppEvent::FileSaved { what, outcome } => match outcome {
-                    None => self.status = format!("{} save cancelled.", what),
-                    Some(Ok(path)) => self.status = format!("Saved {} to {}", what, path.display()),
+                    None => self.set_status(StatusLevel::Info, format!("{} save cancelled.", what)),
+                    Some(Ok(path)) => self.set_status(StatusLevel::Info, format!("Saved {} to {}", what, path.display())),
                     Some(Err(err)) => {
                         log::error!("saving {} failed: {}", what, err);
-                        self.status = format!("Could not save {}: {}", what, err);
+                        self.set_status(StatusLevel::Error, format!("Could not save {}: {}", what, err));
                     }
                 },
             }
@@ -355,7 +376,7 @@ impl SiliconBoardApp {
                 for host in self.engines.iter_mut().flatten() {
                     host.new_game();
                 }
-                self.status = "New game.".to_string();
+                self.set_status(StatusLevel::Info, "New game.".to_string());
             }
             MenuAction::FlipBoard => self.view.flip(),
             MenuAction::OpenPgn => self.open_pgn(),
@@ -365,27 +386,27 @@ impl SiliconBoardApp {
             }
             MenuAction::CopyPgn => {
                 ctx.copy_text(pgn::to_pgn(&self.game));
-                self.status = "PGN copied to the clipboard.".to_string();
+                self.set_status(StatusLevel::Info, "PGN copied to the clipboard.".to_string());
             }
             MenuAction::CopyFen => {
                 ctx.copy_text(self.game.fen());
-                self.status = "FEN copied to the clipboard.".to_string();
+                self.set_status(StatusLevel::Info, "FEN copied to the clipboard.".to_string());
             }
             MenuAction::SaveFen => {
                 let text = format!("{}\n", self.game.fen());
                 self.save_text("FEN", text, "position.fen", "FEN", &["fen"]);
             }
             MenuAction::LoadEngine(slot) => self.load_engine(slot),
-            MenuAction::ToggleAnalysis => self.set_analysis(!self.analysis_enabled),
+            MenuAction::ToggleEngine(slot) => self.toggle_engine(slot),
             MenuAction::StartAnalysis => self.set_analysis(true),
             MenuAction::StopAnalysis => self.set_analysis(false),
             MenuAction::LoadFen => match GameState::from_fen(self.fen_input.trim()) {
                 Ok(game) => {
                     self.game = game;
                     self.view.clear_selection();
-                    self.status = "Position loaded from FEN.".to_string();
+                    self.set_status(StatusLevel::Info, "Position loaded from FEN.".to_string());
                 }
-                Err(err) => self.status = format!("Invalid FEN: {}", err),
+                Err(err) => self.set_status(StatusLevel::Error, format!("Invalid FEN: {}", err)),
             },
             MenuAction::LoadBook => self.load_book(),
         }
@@ -396,7 +417,7 @@ impl SiliconBoardApp {
         match action {
             BoardAction::None => {}
             BoardAction::PieceSelected { from } => {
-                self.status = format!("Selected {}.", from);
+                self.set_status(StatusLevel::Info, format!("Selected {}.", from));
             }
             BoardAction::RequestMove { m } => match self.game.apply_move(m) {
                 Ok(()) => {
@@ -406,16 +427,17 @@ impl SiliconBoardApp {
                         .last()
                         .map(|ply| ply.san.to_string())
                         .unwrap_or_default();
-                    self.status = if self.game.is_game_over() {
+                    let text = if self.game.is_game_over() {
                         format!("Played {}. {}.", played, self.game.outcome())
                     } else {
                         format!("Played {}.", played)
                     };
+                    self.set_status(StatusLevel::Info, text);
                 }
-                Err(err) => self.status = format!("Move rejected: {}", err),
+                Err(err) => self.set_status(StatusLevel::Error, format!("Move rejected: {}", err)),
             },
             BoardAction::PromotionChoice { .. } => {
-                self.status = "Promotion: pick Q / R / B / N on the board (Esc cancels).".to_string();
+                self.set_status(StatusLevel::Info, "Promotion: pick Q / R / B / N on the board (Esc cancels).".to_string());
             }
         }
     }
@@ -426,7 +448,7 @@ impl SiliconBoardApp {
             return;
         }
         self.engine_loading[slot] = true;
-        self.status = format!("Choose an engine for slot {}…", slot_letter(slot));
+        self.set_status(StatusLevel::Info, format!("Choose an engine for slot {}…", slot_letter(slot)));
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
@@ -446,7 +468,7 @@ impl SiliconBoardApp {
 
     /// Show the file picker for a PolyGlot book and read it off the UI thread.
     fn load_book(&mut self) {
-        self.status = "Choose a PolyGlot book…".to_string();
+        self.set_status(StatusLevel::Info, "Choose a PolyGlot book…".to_string());
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
@@ -476,7 +498,7 @@ impl SiliconBoardApp {
 
     /// Show the file picker for a PGN file, then read and parse it.
     fn open_pgn(&mut self) {
-        self.status = "Choose a PGN file…".to_string();
+        self.set_status(StatusLevel::Info, "Choose a PGN file…".to_string());
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
@@ -503,7 +525,7 @@ impl SiliconBoardApp {
         filter: &'static str,
         extensions: &'static [&'static str],
     ) {
-        self.status = format!("Choose where to save the {}…", what);
+        self.set_status(StatusLevel::Info, format!("Choose where to save the {}…", what));
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
@@ -522,23 +544,58 @@ impl SiliconBoardApp {
         });
     }
 
-    /// Switch analysis on (Start) or off (Abort) for every running engine.
-    /// Engines stay loaded either way; nothing here quits a process.
-    fn set_analysis(&mut self, enabled: bool) {
-        self.analysis_enabled = enabled;
+    /// Whether the slot holds an engine that has not exited.
+    fn engine_live(&self, slot: usize) -> bool {
+        self.engines[slot]
+            .as_ref()
+            .is_some_and(|host| host.view().status != AnalysisStatus::Offline)
+    }
+
+    /// Switch analysis on or off for one slot and point it at the displayed
+    /// position. The engine stays loaded either way.
+    fn set_engine_analysis(&mut self, slot: usize, enabled: bool, fen: &str) {
+        self.analysis_on[slot] = enabled;
+        if let Some(host) = self.engines[slot].as_mut() {
+            host.set_analysis(enabled, fen);
+        }
+    }
+
+    /// A card's play/pause toggle: switch analysis for that engine only.
+    fn toggle_engine(&mut self, slot: usize) {
+        let letter = slot_letter(slot);
+        if !self.engine_live(slot) {
+            self.set_status(StatusLevel::Warning, format!("Engine {} is not loaded.", letter));
+            return;
+        }
+        let enabled = !self.analysis_on[slot];
         let fen = self.game.fen();
-        let mut running = 0usize;
-        for host in self.engines.iter_mut().flatten() {
-            if host.view().status != AnalysisStatus::Offline {
-                running += 1;
-                host.set_analysis(enabled, &fen);
+        self.set_engine_analysis(slot, enabled, &fen);
+        let text = if enabled {
+            format!("Analysis started for engine {}.", letter)
+        } else {
+            format!("Analysis stopped for engine {}.", letter)
+        };
+        self.set_status(StatusLevel::Info, text);
+    }
+
+    /// Start (`true`) or Abort (`false`) for every loaded engine. Engines stay
+    /// loaded either way; nothing here quits a process.
+    fn set_analysis(&mut self, enabled: bool) {
+        let fen = self.game.fen();
+        let mut live = 0usize;
+        for slot in 0..2 {
+            if self.engine_live(slot) {
+                live += 1;
+                self.set_engine_analysis(slot, enabled, &fen);
+            } else {
+                self.analysis_on[slot] = false;
             }
         }
-        self.status = match (enabled, running) {
-            (true, 0) => "Load an engine first.".to_string(),
-            (true, _) => "Analysis started.".to_string(),
-            (false, _) => "Analysis stopped.".to_string(),
-        };
+        match (enabled, live) {
+            (true, 0) => self.set_status(StatusLevel::Warning, "Load an engine first.".to_string()),
+            (true, _) => self.set_status(StatusLevel::Info, "Analysis started.".to_string()),
+            (false, _) => self.set_status(StatusLevel::Info, "Analysis stopped.".to_string()),
+        }
     }
 
     /// Ask engines to quit, escalating to a kill, without blocking the UI.
@@ -550,6 +607,12 @@ impl SiliconBoardApp {
                 }
             });
         }
+    }
+
+    /// Replace the status line.
+    fn set_status(&mut self, level: StatusLevel, text: String) {
+        self.status = text;
+        self.status_level = level;
     }
 
     /// Run a future on the Tokio runtime, detached.
@@ -589,15 +652,23 @@ impl SiliconBoardApp {
                 .as_ref()
                 .map(|v| self.game.uci_moves_to_san(&v.stats.pv))
                 .unwrap_or_default();
-            EvalCard { slot, view, pv_san }
+            let running = self.analysis_on[slot] && self.engine_live(slot);
+            EvalCard {
+                slot,
+                view,
+                pv_san,
+                running,
+            }
         });
         EvalSummary {
             cards,
             white_to_move: self.game.turn() == PieceColor::White,
+            fullmove: self.game.fullmove_number(),
             outcome: self.game.outcome(),
             book_moves: self.book_moves.clone(),
             book_name: self.book.as_ref().map(|(name, _)| name.clone()),
             status: self.status.clone(),
+            status_level: self.status_level,
         }
     }
 }
@@ -613,7 +684,6 @@ impl eframe::App for SiliconBoardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let menu_state = MenuState {
-            analysis_enabled: self.analysis_enabled,
             engine_loaded: [self.engines[0].is_some(), self.engines[1].is_some()],
             book_name: self.book.as_ref().map(|(name, _)| name.as_str()),
             ply_count: self.game.total_plies(),
@@ -637,8 +707,8 @@ impl eframe::App for SiliconBoardApp {
         let summary = self.eval_summary();
         egui::Panel::right("evaluation")
             .resizable(true)
-            .default_size(340.0)
-            .min_size(280.0)
+            .default_size(400.0)
+            .min_size(340.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])

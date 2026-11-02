@@ -233,14 +233,32 @@ impl GameState {
     }
 
     /// Slice of recorded plies that are currently considered played,
-    /// i.e. `[0..cur_ply]`. Suitable for direct rendering by the PGN panel.
+    /// i.e. `[0..cur_ply]`. Used for the position shown on the board.
     pub fn active_history(&self) -> &[Ply] {
         &self.history[..self.cur_ply]
+    }
+
+    /// The whole recorded game, including plies after the cursor. Used for the
+    /// move list and for saving, so browsing never shortens the game.
+    pub fn history(&self) -> &[Ply] {
+        &self.history
+    }
+
+    /// The position at the end of the recorded game (not the cursor).
+    pub fn final_position(&self) -> Chess {
+        self.history
+            .last()
+            .map_or_else(|| self.start.clone(), |ply| ply.after.clone())
     }
 
     /// Whose turn it is.
     pub fn turn(&self) -> PieceColor {
         self.position().turn().into()
+    }
+
+    /// The full-move number of the displayed position (from the FEN, starting at 1).
+    pub fn fullmove_number(&self) -> u32 {
+        self.position().fullmoves().get()
     }
 
     /// The squares of the move that produced the displayed position, as
@@ -417,7 +435,7 @@ impl GameState {
         let first_is_black = start.turn() == Color::Black;
         let first_number = start.fullmoves().get();
         let mut lines: Vec<MoveLine> = Vec::new();
-        for (i, ply) in self.active_history().iter().enumerate() {
+        for (i, ply) in self.history().iter().enumerate() {
             let entry = MoveEntry {
                 ply: i + 1,
                 san: ply.san.to_string(),
@@ -894,5 +912,18 @@ mod tests {
         assert_eq!(lines[1].number, 13);
         assert_eq!(lines[1].white.as_ref().map(|m| (m.ply, m.san.as_str())), Some((2, "Nf3")));
         assert!(lines[1].black.is_none());
+    }
+
+    #[test]
+    fn move_list_keeps_moves_after_the_cursor() {
+        let mut g = GameState::new();
+        for (from, to) in [("e2", "e4"), ("e7", "e5"), ("g1", "f3"), ("b8", "c6"), ("f1", "b5")] {
+            g.play_squares(sq(from), sq(to), None).unwrap();
+        }
+        g.goto_ply(2);
+        let lines = g.pgn_lines();
+        assert_eq!(lines.len(), 3, "every move stays listed while browsing");
+        assert_eq!(lines[2].white.as_ref().map(|m| m.ply), Some(5));
+        assert_eq!(g.cur_ply(), 2, "listing must not move the cursor");
     }
 }
