@@ -39,42 +39,28 @@ pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            egui::Grid::new("pgn_moves")
-                .num_columns(3)
-                .spacing([14.0, 2.0])
-                .striped(true)
-                .show(ui, |ui| {
-                    for (index, (number, white, black)) in lines.iter().enumerate() {
-                        ui.label(RichText::new(format!("{}.", number)).color(theme::MUTED).monospace());
-
-                        let white_ply = white_ply_for_line(index);
-                        if let Some(san) = white {
-                            let response = ui.selectable_label(current == white_ply, san);
-                            if response.clicked() {
-                                target = Some(white_ply);
-                            }
-                            if follow && current == white_ply {
-                                response.scroll_to_me(Some(Align::Center));
-                            }
-                        } else {
-                            ui.label("");
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+            ui.horizontal_wrapped(|ui| {
+                for line in &lines {
+                    // A line that starts with Black's move is numbered `N...`.
+                    let number = if line.white.is_some() {
+                        format!("{}.", line.number)
+                    } else {
+                        format!("{}...", line.number)
+                    };
+                    ui.label(RichText::new(number).color(theme::MUTED).monospace());
+                    for entry in [&line.white, &line.black].into_iter().flatten() {
+                        let response = ui.selectable_label(current == entry.ply, &entry.san);
+                        if response.clicked() {
+                            target = Some(entry.ply);
                         }
-
-                        let black_ply = white_ply + 1;
-                        if let Some(san) = black {
-                            let response = ui.selectable_label(current == black_ply, san);
-                            if response.clicked() {
-                                target = Some(black_ply);
-                            }
-                            if follow && current == black_ply {
-                                response.scroll_to_me(Some(Align::Center));
-                            }
-                        } else {
-                            ui.label("");
+                        if follow && current == entry.ply {
+                            response.scroll_to_me(Some(Align::Center));
                         }
-                        ui.end_row();
                     }
-                });
+                    ui.add_space(10.0);
+                }
+            });
             if lines.is_empty() {
                 ui.label(RichText::new("No moves yet — play one on the board.").color(theme::MUTED));
             }
@@ -85,21 +71,12 @@ pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
     }
 }
 
-/// Plies are counted from 1 in the move list (`cur_ply` = number of moves
-/// played), so white's move `index` is ply `2 * index + 1`.
-pub fn white_ply_for_line(index: usize) -> usize {
-    2 * index + 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn move_list_plies_follow_the_cursor_convention() {
-        // After 1. e4 e5 the cursor is at ply 2; line 1 holds plies 1 and 2.
-        assert_eq!(white_ply_for_line(0), 1);
-        assert_eq!(white_ply_for_line(1), 3);
+    fn clicking_a_move_in_the_list_moves_the_cursor_to_it() {
         let mut game = GameState::new();
         game.play_squares(
             shakmaty::Square::from_ascii(b"e2").unwrap(),
@@ -113,7 +90,8 @@ mod tests {
             None,
         )
         .unwrap();
-        game.goto_ply(white_ply_for_line(0));
+        let white = game.pgn_lines()[0].white.clone().unwrap();
+        game.goto_ply(white.ply);
         assert_eq!(game.cur_ply(), 1);
         assert_eq!(game.last_move().map(|(from, _)| from.to_string()), Some("e2".into()));
     }

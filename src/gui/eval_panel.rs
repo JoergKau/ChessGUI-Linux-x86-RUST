@@ -135,6 +135,9 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool) -> Option<Menu
                         metric(ui, &format!("{} N/s", format_count(view.stats.nps.unwrap_or(0))));
                         metric(ui, &format!("{} nodes", format_count(view.stats.nodes.unwrap_or(0))));
                     });
+                    if view.status == AnalysisStatus::Ready {
+                        ui.label(RichText::new("Idle — press Start to analyse").color(theme::MUTED));
+                    }
                     pv_line(ui, &card.pv_san);
                     if view.status == AnalysisStatus::Offline && ui.button("Load engine…").clicked() {
                         action = Some(MenuAction::LoadEngine(card.slot));

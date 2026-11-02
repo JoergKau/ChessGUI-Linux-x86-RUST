@@ -1,7 +1,7 @@
 //! Dark, high-contrast palette in the spirit of Nibbler: near-black panels,
 //! neon green for evaluations, neon cyan for search metrics.
 
-use eframe::egui::{self, Color32};
+use eframe::egui::{self, Color32, FontId, TextStyle};
 
 /// Panel and window background (`#16161a`).
 pub const PANEL_BG: Color32 = Color32::from_rgb(0x16, 0x16, 0x1a);
@@ -33,8 +33,23 @@ pub const BAR_WHITE: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xec);
 /// Evaluation bar side for Black.
 pub const BAR_BLACK: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x33);
 
-/// Apply the SiliconBoard dark theme to the whole egui context.
+/// Text sizes. egui's defaults (Small = 9 pt) are too small for a desktop
+/// analysis window, so every style is set explicitly.
+fn text_styles() -> [(TextStyle, FontId); 5] {
+    [
+        (TextStyle::Heading, FontId::proportional(24.0)),
+        (TextStyle::Body, FontId::proportional(17.0)),
+        (TextStyle::Button, FontId::proportional(17.0)),
+        (TextStyle::Small, FontId::proportional(15.0)),
+        (TextStyle::Monospace, FontId::monospace(16.0)),
+    ]
+}
+
+/// Apply the SiliconBoard dark theme and text sizes to the whole egui context.
 pub fn apply(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        style.text_styles = text_styles().into_iter().collect();
+    });
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = PANEL_BG;
     visuals.window_fill = CARD_BG;

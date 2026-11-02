@@ -1,14 +1,14 @@
-//! Chess board rendering and interaction — Phase 4 (complete).
+//! Chess board rendering and interaction (Phase 4, extended in Phase 5).
 //!
 //! The board widget is egui-native and refreshes per frame. It paints:
 //!
 //! 1. the blue-board texture from `public/images/board/blue.png` (v0.1
-//!    hardcoded; Phase 5 wires a board-picker),
-//! 2. the `a-h` / `1-8` square coordinates along the bottom / left edge,
-//! 3. overlays — the currently selected square, legal destinations (with
+//!    hardcoded; the board picker is a backlog feature, F-11),
+//! 2. overlays — the currently selected square, legal destinations (with
 //!    different treatment for quiet vs. capture moves), the last played
-//!    move's from/to, and a red highlight for a checked king,
-//! 4. every piece sprite from the cburnett SVG set rasterised at startup
+//!    move's from/to, and a red highlight for a checked king. Square
+//!    coordinates are not drawn: they were misplaced and are removed for now,
+//! 3. every piece sprite from the cburnett SVG set rasterised at startup
 //!    (`crate::assets::Assets::pieces`),
 //! 5. a lifted copy of a piece being dragged at the cursor's square,
 //! 6. a promotion modal (Q / R / B / N over the destination square) when a
@@ -43,7 +43,7 @@
 //! all behave correctly.
 
 use eframe::egui::{
-    self, Align2, Color32, FontId, Key, Painter, Pos2, Rect, Sense, TextureId, Ui, Vec2,
+    self, Color32, Key, Painter, Pos2, Rect, Sense, TextureId, Ui, Vec2,
     load::SizedTexture,
 };
 use shakmaty::{Board, File, Move, Piece, Position, Rank, Square};
@@ -70,12 +70,6 @@ const QUIET_MOVE_DOT: Color32 = Color32::from_rgba_unmultiplied_const(0x20, 0x20
 
 /// Perimeter ring colour for a capture.
 const CAPTURE_RING: Color32 = Color32::from_rgba_unmultiplied_const(0xc0, 0x40, 0x40, 0x60);
-
-/// Colour of the coordinate labels (`a-h` / `1-8`).
-const COORDINATE_TEXT: Color32 = Color32::from_rgba_unmultiplied_const(0xff, 0xff, 0xff, 0xc0);
-
-/// Fraction of the square's height the coordinate glyphs occupy.
-const COORDINATE_FONT_SCALE: f32 = 0.35;
 
 /// Radius of the quiet-move dot, as a fraction of the square's width.
 const QUIET_DOT_RADIUS: f32 = 0.15;
@@ -240,7 +234,6 @@ pub fn show(
     }
 
     paint_board_texture(ui, board_rect, assets.board.handle());
-    paint_coordinates(ui.painter(), view.white_on_bottom, square, board_rect);
     paint_overlays(ui, game_state, view, square, board_rect, &board);
 
     let mut action = BoardAction::None;
@@ -370,13 +363,6 @@ fn cursor_to_square(
     Some(coords_to_square(white_on_bottom, row, col))
 }
 
-/// Text of the rank label drawn on a row: `8`…`1` from top to bottom when
-/// White is at the bottom, `1`…`8` when Black is.
-fn rank_label(white_on_bottom: bool, row: u8) -> char {
-    let rank_index = if white_on_bottom { 7 - row } else { row };
-    char::from(b'1' + rank_index)
-}
-
 /// `true` when `sq` holds a piece of `side_to_move`, i.e. one the user may
 /// pick up. Opponent pieces can be looked at but not moved.
 fn is_selectable(board: &Board, sq: Square, side_to_move: PieceColor) -> bool {
@@ -403,54 +389,6 @@ fn paint_board_texture(ui: &Ui, board_rect: Rect, handle: &egui::TextureHandle) 
     let options = egui::ImageOptions::default();
     let sized = SizedTexture::new(handle.id(), Vec2::splat(1.0));
     egui::paint_texture_at(ui.painter(), board_rect, &options, &sized);
-}
-
-/// Draw `a-h` along the bottom and `1-8` along the left.
-fn paint_coordinates(
-    painter: &Painter,
-    white_on_bottom: bool,
-    square: f32,
-    board_rect: Rect,
-) {
-    let font_size = square * COORDINATE_FONT_SCALE;
-
-    for col in 0..8u8 {
-        let file_idx = if white_on_bottom { col } else { 7 - col };
-        let file_ch = char::from(b'a' + file_idx);
-        let rect = Rect::from_min_size(
-            Pos2::new(
-                board_rect.min.x + col as f32 * square,
-                board_rect.min.y + board_rect.height() - square,
-            ),
-            Vec2::new(square, square),
-        );
-        painter.text(
-            // Draw inside the bottom-right corner of the bottom row so the
-            // labels do not collide with the a1 / h8 corner piece.
-            Pos2::new(rect.right() - font_size * 0.9, rect.bottom() - font_size * 0.4),
-            Align2::RIGHT_BOTTOM,
-            file_ch.to_string(),
-            FontId::proportional(font_size),
-            COORDINATE_TEXT,
-        );
-    }
-
-    for row in 0..8u8 {
-        let rect = Rect::from_min_size(
-            Pos2::new(
-                board_rect.min.x,
-                board_rect.min.y + row as f32 * square,
-            ),
-            Vec2::new(square, square),
-        );
-        painter.text(
-            Pos2::new(rect.left() + font_size * 0.35, rect.top() + font_size * 0.5),
-            Align2::LEFT_TOP,
-            rank_label(white_on_bottom, row).to_string(),
-            FontId::proportional(font_size),
-            COORDINATE_TEXT,
-        );
-    }
 }
 
 /// Paint the selected square, the last move, the checked king, and legal
@@ -900,16 +838,6 @@ mod tests {
     #[test]
     fn default_board_view_shows_white_at_the_bottom() {
         assert!(BoardView::default().white_on_bottom);
-    }
-
-    #[test]
-    fn rank_labels_follow_orientation() {
-        // White at the bottom: the top row is rank 8, the bottom row rank 1.
-        assert_eq!(rank_label(true, 0), '8');
-        assert_eq!(rank_label(true, 7), '1');
-        // Black at the bottom: the top row is rank 1.
-        assert_eq!(rank_label(false, 0), '1');
-        assert_eq!(rank_label(false, 7), '8');
     }
 
     #[test]

@@ -100,6 +100,7 @@ impl EngineProcess {
     /// handle — the spawned tasks automatically close when stdin/stdout
     /// close (engine exit) or when [`Self::terminate`] is called.
     pub async fn spawn(binary: &Path) -> Result<Self, EngineError> {
+        check_executable(binary)?;
         let mut cmd = Command::new(binary);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -194,6 +195,29 @@ impl EngineProcess {
     pub fn binary(&self) -> &Path {
         &self.binary
     }
+}
+
+/// Reject anything that is not a regular file with an execute bit set, with a
+/// message that says why. Scripts and wrapper programs pass this check;
+/// whether the file really speaks UCI is decided by the handshake.
+fn check_executable(binary: &Path) -> Result<(), EngineError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fail = |reason: &str| EngineError::SpawnFailed {
+        binary: Some(binary.to_path_buf()),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, reason.to_string()),
+    };
+    let metadata = std::fs::metadata(binary).map_err(|source| EngineError::SpawnFailed {
+        binary: Some(binary.to_path_buf()),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(fail("not a regular file"));
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(fail("file is not marked executable"));
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +393,30 @@ mod tests {
             }
         }
         drained
+    }
+
+    #[test]
+    fn executable_check_names_the_problem() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+
+        let plain = dir.path().join("notes.md");
+        std::fs::write(&plain, "not a program").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = check_executable(&plain).unwrap_err();
+        assert!(err.to_string().contains("not marked executable"), "{}", err);
+
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let err = check_executable(&folder).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{}", err);
+
+        // A script with the execute bit passes; only the handshake can tell
+        // whether it is a UCI engine.
+        let script = dir.path().join("wrapper.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(check_executable(&script).is_ok());
     }
 
     #[tokio::test]

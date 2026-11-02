@@ -13,7 +13,7 @@
 
 use std::fmt::Write;
 
-use shakmaty::{fen::Fen, san::San, Color, EnPassantMode, Position};
+use shakmaty::{fen::Fen, san::SanPlus, Color, EnPassantMode, Position};
 
 use crate::chess::game_state::{FenError, GameState};
 
@@ -128,13 +128,14 @@ pub fn parse_pgn_with_report(text: &str) -> Result<PgnImport, PgnError> {
     let (tokens, variations, comments) = movetext_tokens(&movetext);
     for (index, token) in tokens.into_iter().enumerate() {
         let position = game.position();
-        let san = San::from_ascii(normalise_castling(&token).as_bytes()).map_err(|_| {
+        // `SanPlus` accepts the check and mate suffixes (`Qb6+`, `Qh4#`).
+        let parsed = SanPlus::from_ascii(normalise_castling(&token).as_bytes()).map_err(|_| {
             PgnError::IllegalMove {
                 ply: index + 1,
                 san: token.clone(),
             }
         })?;
-        let m = san.to_move(&position).map_err(|_| PgnError::IllegalMove {
+        let m = parsed.san.to_move(&position).map_err(|_| PgnError::IllegalMove {
             ply: index + 1,
             san: token.clone(),
         })?;
@@ -232,8 +233,14 @@ fn split_tags_and_movetext(text: &str) -> (Vec<(String, String)>, String, usize)
 fn parse_tag(line: &str) -> Option<(String, String)> {
     let inner = line.strip_prefix('[')?.strip_suffix(']')?;
     let (name, rest) = inner.split_once(' ')?;
-    let value = rest.trim().strip_prefix('"')?.strip_suffix('"')?;
-    Some((name.to_string(), value.replace("\\\"", "\"").replace("\\\\", "\\")))
+    let rest = rest.trim();
+    // Quoted values unescape `\"` and `\\`. Unquoted values are taken as written:
+    // some exporters leave the quotes off, e.g. `[FEN rnbq… w KQkq - 0 1]`.
+    let value = match rest.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        Some(quoted) => quoted.replace("\\\"", "\"").replace("\\\\", "\\"),
+        None => rest.to_string(),
+    };
+    Some((name.to_string(), value))
 }
 
 /// Movetext → SAN move tokens, plus the number of variations and comments
@@ -253,7 +260,9 @@ fn movetext_tokens(movetext: &str) -> (Vec<String>, usize, usize) {
             return;
         }
         if depth == 0 && !is_move_number(current) && !is_result(current) && !current.starts_with('$') {
-            let cleaned = current.trim_end_matches(['!', '?']).to_string();
+            let cleaned = strip_move_number(current)
+                .trim_end_matches(['!', '?'])
+                .to_string();
             if !cleaned.is_empty() {
                 tokens.push(cleaned);
             }
@@ -298,6 +307,16 @@ fn movetext_tokens(movetext: &str) -> (Vec<String>, usize, usize) {
     }
     flush(&mut current, &mut tokens, variation_depth);
     (tokens, variations, comments)
+}
+
+/// Remove a move number glued to the move: `1.e4` → `e4`, `12...Nc6` → `Nc6`.
+fn strip_move_number(token: &str) -> &str {
+    let digits = token.trim_start_matches(|c: char| c.is_ascii_digit());
+    if digits.len() < token.len() && digits.starts_with('.') {
+        digits.trim_start_matches('.')
+    } else {
+        token
+    }
 }
 
 /// `12.`, `12...` and similar move-number tokens.
@@ -487,10 +506,56 @@ mod tests {
     }
 
     #[test]
+    fn move_numbers_glued_to_moves_and_check_suffixes_are_read() {
+        let game = parse_pgn("1.e4 e5 2.Nf3 Nc6 3.Bb5+ a6 4.Ba4 Nf6 5.O-O\n").unwrap();
+        assert_eq!(
+            sans(&game),
+            vec!["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6", "O-O"]
+        );
+    }
+
+    #[test]
+    fn mate_suffix_is_read_and_the_result_is_derived_from_the_position() {
+        // Scholar's mate: 4.Qxf7# ends the game with White winning.
+        let game = parse_pgn("1.e4 e5 2.Bc4 Nc6 3.Qh5 Nf6 4.Qxf7#\n").unwrap();
+        assert_eq!(sans(&game).last().map(String::as_str), Some("Qxf7#"));
+        assert!(game.is_checkmate());
+        assert_eq!(result_token(&game), "1-0");
+    }
+
+    /// Path of a PGN file in the workspace `PGN/` folder.
+    fn workspace_pgn(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("PGN")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("fixture {} must be readable: {}", path.display(), err))
+    }
+
+    #[test]
+    fn real_world_game_with_crlf_glued_numbers_and_suffixes_loads_fully() {
+        // The owner's PGN/Abdusattorov.pgn: CRLF endings, `1.e4` style numbers,
+        // `Qb6+`, `O-O`, and a result token directly after the last move.
+        let import = parse_pgn_with_report(&workspace_pgn("Abdusattorov.pgn")).unwrap();
+        assert_eq!(import.game.total_plies(), 81, "41 white moves and 40 black moves");
+        assert_eq!(import.game.active_history().last().map(|p| p.san.to_string()).as_deref(), Some("c7"));
+        assert_eq!(import.ignored, IgnoredContent::default());
+    }
+
+    #[test]
     fn only_the_first_game_of_a_file_is_read() {
         let text = "[Event \"One\"]\n\n1. e4 *\n\n[Event \"Two\"]\n\n1. d4 *\n";
         let game = parse_pgn(text).unwrap();
         assert_eq!(sans(&game), vec!["e4"]);
+    }
+
+    #[test]
+    fn unquoted_tag_values_are_accepted() {
+        // Missing quotes around the FEN must not drop the starting position.
+        let text = "[FEN rnbqkb1r/ppp1pppp/5n2/3p4/3P1B2/5N2/PPP1PPPP/RN1QKB1R b KQkq - 3 3]\n\n3... c5 *\n";
+        let game = parse_pgn(text).unwrap();
+        assert_eq!(sans(&game), vec!["c5"]);
     }
 
     #[test]
