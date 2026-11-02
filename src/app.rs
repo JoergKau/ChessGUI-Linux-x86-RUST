@@ -290,7 +290,9 @@ impl SiliconBoardApp {
                 AppEvent::PgnOpened { outcome } => match outcome {
                     None => self.set_status(StatusLevel::Info, "Open cancelled.".to_string()),
                     Some(Ok((name, import))) => {
-                        self.game = import.game;
+                        let mut game = import.game;
+                        game.goto_start();
+                        self.game = game;
                         self.view.clear_selection();
                         match import.ignored.summary() {
                             Some(note) => self.set_status(
@@ -707,8 +709,8 @@ impl eframe::App for SiliconBoardApp {
         let summary = self.eval_summary();
         egui::Panel::right("evaluation")
             .resizable(true)
-            .default_size(400.0)
-            .min_size(340.0)
+            .default_size(eval_panel::MIN_WIDTH)
+            .min_size(eval_panel::MIN_WIDTH)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
