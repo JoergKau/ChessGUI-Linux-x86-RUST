@@ -17,7 +17,12 @@ const PV_MAX_HEIGHT: f32 = 72.0;
 
 /// Narrowest the right panel may be. At this width one header line still fits:
 /// toggle, engine name, speed pill, and the EVAL, DEPTH and NODES block.
-pub const MIN_WIDTH: f32 = 500.0;
+pub const MIN_WIDTH: f32 = 520.0;
+
+/// Room kept for the engine letter and the speed pill in the header. The name
+/// gets what is left, and is cut short with "…" when it does not fit.
+const LETTER_SLOT_WIDTH: f32 = 14.0;
+const PILL_SLOT_WIDTH: f32 = 80.0;
 
 /// Size of the EVAL / DEPTH / NODES block: each column is `METRIC_WIDTH` wide
 /// with `METRIC_GAP` between columns, and the block is `METRIC_HEIGHT` tall.
@@ -118,8 +123,24 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32)
                 }
                 match card.view.as_ref().filter(|_| live) {
                     Some(view) => {
+                        let spacing = ui.spacing().item_spacing.x;
+                        let name_width = (ui.available_width()
+                            - LETTER_SLOT_WIDTH
+                            - PILL_SLOT_WIDTH
+                            - metrics_width()
+                            - 4.0 * spacing)
+                            .max(0.0);
                         ui.label(RichText::new(letter.to_string()).small().color(theme::MUTED));
-                        ui.label(RichText::new(engine_name(view)).strong().color(theme::TEXT));
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(name_width, METRIC_HEIGHT),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(engine_name(view)).strong().color(theme::TEXT))
+                                        .truncate(),
+                                );
+                            },
+                        );
                         speed_pill(ui, view);
                         let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
                         let depth = view
