@@ -21,16 +21,16 @@ pub const NEON_GREEN: Color32 = Color32::from_rgb(0x00, 0xff, 0x88);
 /// Search metrics: depth, NPS, nodes (`#8be9fd`).
 pub const NEON_CYAN: Color32 = Color32::from_rgb(0x8b, 0xe9, 0xfd);
 
+/// Accent blue: the running-engine toggle and the rule under each card header.
+pub const BLUE: Color32 = Color32::from_rgb(0x3a, 0x74, 0xd6);
+
 /// Engine is searching.
 pub const ALERT_YELLOW: Color32 = Color32::from_rgb(0xf1, 0xfa, 0x8c);
 
 /// Engine offline or an error.
 pub const DANGER_RED: Color32 = Color32::from_rgb(0xff, 0x55, 0x55);
 
-/// Evaluation bar side for White.
-pub const BAR_WHITE: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xec);
-
-/// Evaluation bar side for Black.
+/// Dark fill for pills and buttons on cards.
 pub const BAR_BLACK: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x33);
 
 /// Text sizes. egui's defaults (Small = 9 pt) are too small for a desktop

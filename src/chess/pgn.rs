@@ -26,7 +26,7 @@ const STANDARD_START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w 
 /// Result token for the game's current state: `1-0`, `0-1`, `1/2-1/2`, or `*`
 /// while the game is still running.
 pub fn result_token(game: &GameState) -> &'static str {
-    let pos = game.position();
+    let pos = game.final_position();
     if pos.is_checkmate() {
         // The side to move is mated.
         match pos.turn() {
@@ -40,7 +40,8 @@ pub fn result_token(game: &GameState) -> &'static str {
     }
 }
 
-/// Render the played part of `game` as a PGN game.
+/// Render the whole recorded game as PGN, including moves after the cursor.
+/// The result tag comes from the final position.
 pub fn to_pgn(game: &GameState) -> String {
     let start = game.start_position();
     let mut out = String::new();
@@ -61,7 +62,7 @@ pub fn to_pgn(game: &GameState) -> String {
     let mut tokens: Vec<String> = Vec::new();
     let first_turn = start.turn();
     let first_number = start.fullmoves().get();
-    for (i, ply) in game.active_history().iter().enumerate() {
+    for (i, ply) in game.history().iter().enumerate() {
         let side = if i % 2 == 0 {
             first_turn
         } else {
@@ -562,5 +563,17 @@ mod tests {
     fn quoted_tag_values_survive_escaping() {
         let (tags, _, _) = split_tags_and_movetext("[Event \"A \\\"quoted\\\" name\"]\n\n*\n");
         assert_eq!(tags, vec![("Event".to_string(), "A \"quoted\" name".to_string())]);
+    }
+
+    #[test]
+    fn saving_keeps_every_move_even_when_browsing_back() {
+        let mut game = GameState::new();
+        for (from, to) in [("e2", "e4"), ("e7", "e5"), ("g1", "f3"), ("b8", "c6")] {
+            game.play_squares(sq(from), sq(to), None).unwrap();
+        }
+        game.goto_start();
+        let text = to_pgn(&game);
+        assert!(text.contains("1. e4 e5 2. Nf3 Nc6 *"), "saved text: {}", text);
+        assert_eq!(game.cur_ply(), 0, "saving must not move the cursor");
     }
 }

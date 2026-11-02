@@ -297,20 +297,6 @@ pub enum Score {
     Mate(i32),
 }
 
-impl Score {
-    /// Choose the centipawn-equivalent for an evaluation bar (mate in N
-    /// is treated as `±MATE_CP`). `Mate(0)` means the side to move is
-    /// already checkmated, so it counts as a loss.
-    pub fn centipawn_equivalent(&self) -> i32 {
-        const MATE_CP: i32 = 30_000;
-        match self {
-            Score::Cp(cp) => *cp,
-            Score::Mate(n) if *n > 0 => MATE_CP,
-            Score::Mate(_) => -MATE_CP,
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // UCI options (parsed `option …` line)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,20 +450,6 @@ mod tests {
             .to_wire_string(),
             "go wtime 60000 btime 60000 winc 0 binc 0 movetime 1000"
         );
-    }
-
-    #[test]
-    fn score_centipawn_equivalent() {
-        assert_eq!(Score::Cp(45).centipawn_equivalent(), 45);
-        assert_eq!(Score::Cp(-45).centipawn_equivalent(), -45);
-        assert_eq!(Score::Mate(3).centipawn_equivalent(), 30_000);
-        assert_eq!(Score::Mate(-3).centipawn_equivalent(), -30_000);
-    }
-
-    #[test]
-    fn mate_zero_means_side_to_move_is_mated() {
-        // `score mate 0` is a position where the side to move is checkmated.
-        assert_eq!(Score::Mate(0).centipawn_equivalent(), -30_000);
     }
 
     #[test]
