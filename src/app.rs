@@ -29,6 +29,11 @@ const EXIT_GRACE: Duration = Duration::from_millis(600);
 /// not to be a UCI engine.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// While an engine analyses, the window is redrawn this often. Engine output is
+/// only read during a frame, so without this the numbers stop when the window
+/// is not focused and gets no input.
+const ANALYSIS_REFRESH: Duration = Duration::from_millis(100);
+
 /// How serious the message in the status line is. Warnings and errors are
 /// drawn in colour so they cannot be missed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -183,6 +188,9 @@ impl SiliconBoardApp {
         }
         if engines_changed {
             ctx.request_repaint();
+        }
+        if self.analysis_on.iter().any(|&on| on) {
+            ctx.request_repaint_after(ANALYSIS_REFRESH);
         }
         self.report_engine_start_up();
         self.sync_position(false);
