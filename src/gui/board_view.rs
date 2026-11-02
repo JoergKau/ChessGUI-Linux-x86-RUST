@@ -1,4 +1,4 @@
-//! Chess board rendering and interaction — Phase 4.
+//! Chess board rendering and interaction — Phase 4 (complete).
 //!
 //! The board widget is egui-native and refreshes per frame. It paints:
 //!
@@ -9,37 +9,42 @@
 //!    different treatment for quiet vs. capture moves), the last played
 //!    move's from/to, and a red highlight for a checked king,
 //! 4. every piece sprite from the cburnett SVG set rasterised at startup
-//!    (`crate::assets::PieceTextures`),
-//! 5. a floating copy of a piece being dragged at the cursor's square,
-//! 6. a promotion modal when a pawn-to-back-rank move is pending.
+//!    (`crate::assets::Assets::pieces`),
+//! 5. a lifted copy of a piece being dragged at the cursor's square,
+//! 6. a promotion modal (Q / R / B / N over the destination square) when a
+//!    pawn-to-back-rank move is pending; ESC or a click outside cancels.
 //!
-//! Interaction state machine (a single, linear-ish flow):
+//! Interaction state machine:
 //!
 //! ```text
-//!                ┌─────────────── own piece ────────────┐
-//!                ↓                                      │
-//! ┌──────────────────────────┐  click on dest ▓  ┌─────────│────┐
-//! │        Idle              │────────►        │ Selected │────│► RequestMove
-//! └─────┘                    │                            │    │
-//!     │ click+drag on piece  │  click elsewhere ─► Idle   │    │
-//!     ↓                       │                            │    │
-//! ┌──────────────────────────┐                  ┌─────────▼──┐ │
-//! │       Dragging           │ drag stop on ────► Playing  │ │
-//! └──────────────────────────┘  dest            └────────────┘ │
-//!                                                              │
-//!          └──── click on promotion dest ──► Promotion modal ──┘
+//!  click own piece ─────┐          click dest ┌─────────────┐
+//!              ┌────────▼───────┐   play     │  modal ↔    │
+//!   Idle ─────►│ Selected{from} │──────► RequestMove      │
+//!              └──────┬─────────┘                          │
+//!    drag start       │ click own piece ──► re-select      │
+//!              ┌──────▼─────────┐                          │
+//!              │ Dragging{from, │  drag-stopped on         │
+//!              │        cursor} │  dest ───► RequestMove   │
+//!              └────────────────┘                          │
+//!                     click promotion dest ──► Promoting ──┘
 //! ```
 //!
 //! The widget itself never mutates [`GameState`]; it returns a
 //! [`BoardAction`] snapshot and the caller decides what to do.
+//!
+//! # Castling input note
+//! shakmaty's `Move::Castle { king, rook }.to()` returns the **rook** square
+//! (e.g. `h1` for O-O), but a human clicks the *king's* destination (`g1`).
+//! [`move_target_square`] maps a castle move onto the king's destination so
+//! click-click, drag-drop, and the legal-move overlays all behave correctly.
 
 use eframe::egui::{
-    self, Align2, Color32, FontId, Image, Painter, Pos2, Rect, Sense, TextureId, Ui, Vec2,
+    self, Align2, Color32, FontId, Image, Key, Painter, Pos2, Rect, Sense, TextureId, Ui, Vec2,
     load::SizedTexture,
 };
 use shakmaty::{Board, File, Move, Position, Rank, Square};
 
-use crate::assets::{Assets, PieceId, PieceTextures};
+use crate::assets::{Assets, PieceId};
 use crate::chess::{GameState, PieceColor, PieceKind};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +78,16 @@ const QUIET_DOT_RADIUS: f32 = 0.15;
 /// Ring stroke width for a capture destination.
 const CAPTURE_RING_THICKNESS: f32 = 0.03;
 
+/// Backdrop behind each promotion-modal icon (semi-opaque dark so the
+/// piece strokes read on any board theme).
+const PROMO_BACKDROP: Color32 = Color32::from_rgba_unmultiplied_const(0x26, 0x26, 0x26, 0xd8);
+
+/// Hover tint on a promotion-modal icon (drawn over [`PROMO_BACKDROP`]).
+const PROMO_HOVER: Color32 = Color32::from_rgba_unmultiplied_const(0xff, 0xd5, 0x40, 0x40);
+
+/// Tint for the square the dragged piece currently hovers over.
+const DRAG_HOVER_FILL: Color32 = Color32::from_rgba_unmultiplied_const(0xdd, 0xdd, 0xdd, 0x28);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Interaction state machine
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,11 +101,12 @@ pub enum Interaction {
     /// A piece is selected. A click on a legal destination plays; on
     /// another own piece it re-selects; anywhere else it deselects.
     Selected { from: Square },
-    /// The user is dragging a piece. `from` keeps the origin square; the
-    /// piece is drawn at the *cursor's* square while dragging.
-    Dragging { from: Square },
+    /// The user is dragging a piece. `from` keeps the origin; `cursor` is
+    /// the square the pointer is currently over (a board-level resolver
+    /// updates it each frame — see BUG-4-03).
+    Dragging { from: Square, cursor: Square },
     /// A promotion modal is pending; the user must pick a promotion piece
-    /// before the widget returns `RequestMove`.
+    /// before the widget returns `RequestMove`. ESC / click-outside cancels.
     Promoting { from: Square, to: Square },
 }
 
@@ -100,8 +116,16 @@ impl Interaction {
     pub fn from_square(self) -> Option<Square> {
         match self {
             Interaction::Idle => None,
-            Interaction::Selected { from } | Interaction::Dragging { from } => Some(from),
+            Interaction::Selected { from } | Interaction::Dragging { from, .. } => Some(from),
             Interaction::Promoting { from, .. } => Some(from),
+        }
+    }
+
+    /// The square the dragged piece currently floats over (dragging only).
+    pub fn drag_cursor(self) -> Option<Square> {
+        match self {
+            Interaction::Dragging { cursor, .. } => Some(cursor),
+            _ => None,
         }
     }
 }
@@ -148,8 +172,9 @@ pub enum BoardAction {
     PieceSelected { from: Square },
     /// User completed a click/drag combination identifying a legal move.
     RequestMove { m: Move },
-    /// A promotion is pending; the caller should render a modal and call
-    /// `interaction = Interaction::Idle` after resolution.
+    /// A promotion just became pending; the modal is drawn by the widget on
+    /// the *next* frame and resolves to [`BoardAction::RequestMove`] when
+    /// the user picks Q/R/B/N.
     PromotionChoice {
         from: Square,
         to: Square,
@@ -169,7 +194,7 @@ pub fn show(
     view: &mut BoardView,
 ) -> BoardAction {
     let avail_rect = ui.available_rect_before_wrap();
-    let square = (avail_rect.width().min(avail_rect.height()) / 8.0).floor();
+    let square = (avail_rect.width().min(avail_rect.height()) / 8.0).floor().max(1.0);
     let board_px = square * 8.0;
 
     let board_min = Pos2::new(
@@ -184,6 +209,22 @@ pub fn show(
     let board = game_state.position().board().clone();
     let textures = &assets.pieces;
 
+    // ── Drag-cursor tracking (BUG-4-03: board-level pointer resolver) ──
+    // While the user drags a piece, map the *pointer* position (not the
+    // origin square's rect!) onto a board square every frame. This keeps
+    // `Interaction::Dragging { cursor }` fresh so the piece paints under
+    // the cursor and the drop landing zone highlights correctly.
+    if let Interaction::Dragging { from, .. } = view.interaction {
+        if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+            let cursor = cursor_to_square(&board_rect, pointer, view.white_on_bottom)
+                .unwrap_or(from);
+            view.interaction = Interaction::Dragging {
+                from,
+                cursor,
+            };
+        }
+    }
+
     paint_board_texture(ui, board_rect, assets.board.handle());
     paint_coordinates(ui.painter(), view.white_on_bottom, square, board_rect);
     paint_overlays(ui, game_state, view, square, board_rect, &board);
@@ -195,27 +236,63 @@ pub fn show(
             let sq_rect = square_rect(board_rect, square, row, col);
             let response = ui.allocate_rect(sq_rect, Sense::click().union(Sense::drag()));
 
+            // Piece painting: hide the origin while dragging; draw a lifted
+            // copy at the cursor square instead.
             if let Some(piece) = board.piece_at(sq) {
                 let color: PieceColor = piece.color.into();
                 let kind = PieceKind::from_role(piece.role);
                 let id = PieceId { color, kind };
                 if let Some(tex) = textures.get(id) {
-                    // Hidden origin piece during a drag — the cursor-side
-                    // mirror in Interaction::Dragging takes over.
-                    let hide_origin = matches!(
+                    dragging_painter(
+                        ui.painter(),
                         view.interaction,
-                        Interaction::Dragging { from: s } if s == sq
+                        sq,
+                        sq_rect,
+                        tex.id(),
+                        square,
                     );
-                    if !hide_origin {
-                        draw_piece(ui.painter(), sq_rect.center(), tex.id(), square);
-                    }
                 }
             }
 
-            if let Some(a) = handle_interaction(&response, sq, game_state, view, &board) {
+            if let Some(a) = handle_interaction(
+                &response,
+                sq,
+                game_state,
+                view,
+                &board,
+                &board_rect,
+            ) {
                 action = a;
             }
         }
+    }
+
+    // ── Promotion modal (BUG-4-01) ──
+    // Painted *after* the square loop so its four icon rects win pointer
+    // priority over the squares underneath — a click on an icon therefore
+    // does NOT land on the square's `clicked()`, which is what drives the
+    // "click outside cancels" rule.
+    if let (Interaction::Promoting { from, to }, resolution) = (
+        view.interaction,
+        show_promotion_modal(
+            ui,
+            game_state,
+            textures,
+            view.white_on_bottom,
+            square,
+            board_rect,
+            view,
+        ),
+    ) {
+        let _ = (from, to);
+        action = resolution;
+    }
+
+    // ESC cancels the pending promotion, mirroring lichess behaviour.
+    if matches!(view.interaction, Interaction::Promoting { .. })
+        && ui.input(|i| i.key_pressed(Key::Escape))
+    {
+        view.interaction = Interaction::Idle;
     }
 
     action
@@ -244,10 +321,7 @@ fn coords_to_square(white_on_bottom: bool, row: u8, col: u8) -> Square {
     } else {
         (row, 7 - col)
     };
-    Square::from_coords(
-        File::new(file_idx as u32),
-        Rank::new(rank_idx as u32),
-    )
+    Square::from_coords(File::new(file_idx as u32), Rank::new(rank_idx as u32))
 }
 
 fn square_rect(board_rect: Rect, square: f32, row: u8, col: u8) -> Rect {
@@ -258,6 +332,44 @@ fn square_rect(board_rect: Rect, square: f32, row: u8, col: u8) -> Rect {
         ),
         Vec2::splat(square),
     )
+}
+
+/// Map a pointer position onto a shakmaty [`Square`] via the *board* rect.
+/// Row / col are clamped so a pointer one pixel past the edge still maps to
+/// the last rank / file.
+fn cursor_to_square(
+    board_rect: &Rect,
+    pointer: Pos2,
+    white_on_bottom: bool,
+) -> Option<Square> {
+    if !board_rect.contains(pointer) {
+        return None;
+    }
+    let square = board_rect.width() / 8.0;
+    let col = (((pointer.x - board_rect.min.x) / square).floor() as i32).clamp(0, 7) as u8;
+    let row = (((pointer.y - board_rect.min.y) / square).floor() as i32).clamp(0, 7) as u8;
+    Some(coords_to_square(white_on_bottom, row, col))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Move-target resolution (castling-aware)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The square a human clicks for move `m`.
+///
+/// For most moves that's `Move::to()`, but for castling shakmaty reports the
+/// *rook* square (h1 for O-O) whereas the user clicks the king's destination
+/// (g1). This helper normalises both cases so the widget can match user
+/// input against `game_state.legal_moves_from(from)`.
+fn move_target_square(m: Move) -> Square {
+    if let Move::Castle { king, rook } = m {
+        // Kingside: rook sits to the right of the king (bigger file index).
+        let kingside = rook.file().to_u32() > king.file().to_u32();
+        let dest_file = if kingside { File::G } else { File::C };
+        Square::from_coords(dest_file, king.rank())
+    } else {
+        m.to()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,54 +391,50 @@ fn paint_coordinates(
     board_rect: Rect,
 ) {
     let font_size = square * COORDINATE_FONT_SCALE;
-    let make_font = || FontId::proportional(font_size);
 
     for col in 0..8u8 {
-        let file_idx = match white_on_bottom {
-            true => col,
-            false => 7 - col,
-        };
+        let file_idx = if white_on_bottom { col } else { 7 - col };
         let file_ch = char::from(b'a' + file_idx);
         let rect = Rect::from_min_size(
             Pos2::new(
                 board_rect.min.x + col as f32 * square,
-                board_rect.min.y + board_rect.height() - font_size * 1.5,
+                board_rect.min.y + board_rect.height() - square,
             ),
-            Vec2::new(square, font_size * 1.5),
+            Vec2::new(square, square),
         );
         painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
+            // Draw inside the bottom-right corner of the bottom row so the
+            // labels do not collide with the a1 / h8 corner piece.
+            Pos2::new(rect.right() - font_size * 0.9, rect.bottom() - font_size * 0.4),
+            Align2::RIGHT_BOTTOM,
             file_ch.to_string(),
-            make_font(),
+            FontId::proportional(font_size),
             COORDINATE_TEXT,
         );
     }
 
     for row in 0..8u8 {
-        let rank_num = match white_on_bottom {
-            true => 8 - row,
-            false => row,
-        } + 1;
+        let rank_num = if white_on_bottom { 8 - row } else { row };
         let rect = Rect::from_min_size(
             Pos2::new(
                 board_rect.min.x,
                 board_rect.min.y + row as f32 * square,
             ),
-            Vec2::new(font_size * 1.5, square),
+            Vec2::new(square, square),
         );
         painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            rank_num.to_string(),
-            make_font(),
+            Pos2::new(rect.left() + font_size * 0.35, rect.top() + font_size * 0.5),
+            Align2::LEFT_TOP,
+            (rank_num + 1).to_string(),
+            FontId::proportional(font_size),
             COORDINATE_TEXT,
         );
     }
 }
 
 /// Paint the selected square, the last move, the checked king, and legal
-/// destinations (dots for quiet, rings for captures).
+/// destinations (dots for quiet, rings for captures). Also tints the
+/// square the dragged piece hovers over.
 fn paint_overlays(
     ui: &Ui,
     game_state: &GameState,
@@ -339,8 +447,11 @@ fn paint_overlays(
     if let Some((from, to)) = view.last_move {
         for sq in [from, to] {
             if let Some((row, col)) = square_to_coords(view.white_on_bottom, sq) {
-                ui.painter()
-                    .rect_filled(square_rect(board_rect, square, row, col), 0.0, LAST_MOVE_FILL);
+                ui.painter().rect_filled(
+                    square_rect(board_rect, square, row, col),
+                    0.0,
+                    LAST_MOVE_FILL,
+                );
             }
         }
     }
@@ -349,27 +460,32 @@ fn paint_overlays(
     if game_state.is_check() {
         if let Some(king_sq) = board.king_of(game_state.turn().into()) {
             if let Some((row, col)) = square_to_coords(view.white_on_bottom, king_sq) {
-                ui.painter()
-                    .rect_filled(square_rect(board_rect, square, row, col), 0.0, CHECK_FILL);
+                ui.painter().rect_filled(
+                    square_rect(board_rect, square, row, col),
+                    0.0,
+                    CHECK_FILL,
+                );
             }
         }
     }
 
-    // 3. Selected square + legal destinations (drives the mouse cursor).
+    // 3. Selected square + legal destinations.
     if let Some(from) = view.interaction.from_square() {
         if let Some((row, col)) = square_to_coords(view.white_on_bottom, from) {
-            ui.painter()
-                .rect_filled(square_rect(board_rect, square, row, col), 0.0, SELECTED_FILL);
+            ui.painter().rect_filled(
+                square_rect(board_rect, square, row, col),
+                0.0,
+                SELECTED_FILL,
+            );
         }
         for m in game_state.legal_moves_from(from) {
-            let Some((row, col)) = square_to_coords(view.white_on_bottom, m.to()) else {
+            let target = move_target_square(m);
+            let Some((row, col)) = square_to_coords(view.white_on_bottom, target) else {
                 continue;
             };
             let rect = square_rect(board_rect, square, row, col);
             let painter = ui.painter();
             if m.is_capture() {
-                // Ring around the destination square (draw a stroke inside
-                // the bounds by insetting the rect).
                 let inset = square * CAPTURE_RING_THICKNESS;
                 let inner = Rect::from_min_max(
                     Pos2::new(rect.min.x + inset, rect.min.y + inset),
@@ -377,9 +493,19 @@ fn paint_overlays(
                 );
                 painter.rect_filled(inner, 0.0, CAPTURE_RING);
             } else {
-                let radius = square * QUIET_DOT_RADIUS;
-                painter.circle_filled(rect.center(), radius, QUIET_MOVE_DOT);
+                painter.circle_filled(rect.center(), square * QUIET_DOT_RADIUS, QUIET_MOVE_DOT);
             }
+        }
+    }
+
+    // 4. Drag hover landing zone.
+    if let Some(cursor) = view.interaction.drag_cursor() {
+        if let Some((row, col)) = square_to_coords(view.white_on_bottom, cursor) {
+            ui.painter().rect_filled(
+                square_rect(board_rect, square, row, col),
+                0.0,
+                DRAG_HOVER_FILL,
+            );
         }
     }
 }
@@ -389,88 +515,222 @@ fn paint_overlays(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn draw_piece(painter: &Painter, center: Pos2, texture: TextureId, square: f32) {
-    let half = square / 2.0;
     let rect = Rect::from_center_size(center, Vec2::splat(square));
-    // `egui::paint_texture_at` is a free function imported through the
-    // crate root. We set up a minimal `SizedTexture` + `ImageOptions` so
-    // the piece renderer mirrors the egui `Image` widget's behaviour.
     let options = egui::ImageOptions::default();
     let sized = SizedTexture::new(texture, Vec2::splat(square));
     egui::paint_texture_at(painter, rect, &options, &sized);
+}
+
+/// Paint a piece, taking dragging into account:
+/// * origin square of the dragged piece → hidden (the cursor copy takes over),
+/// * cursor square → the lifted piece is drawn there,
+/// * otherwise → normal in-place rendering.
+fn dragging_painter(
+    painter: &Painter,
+    interaction: Interaction,
+    sq: Square,
+    sq_rect: Rect,
+    texture: TextureId,
+    square: f32,
+) {
+    match interaction {
+        Interaction::Dragging { from, cursor } if from == sq => {
+            if cursor == sq {
+                // Drag just started, pointer still on the origin.
+                draw_piece(painter, sq_rect.center(), texture, square);
+            }
+            // else: hide the origin — the lifted copy is drawn by the
+            // loop when it reaches the `cursor` square.
+        }
+        Interaction::Dragging { cursor, .. } if cursor == sq => {
+            // Lifted piece at the cursor square.
+            draw_piece(painter, sq_rect.center(), texture, square);
+        }
+        _ => {
+            draw_piece(painter, sq_rect.center(), texture, square);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Promotion modal (BUG-4-01)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The four promotion choices, in on-screen order **from the destination
+/// square inward**: Queen, Rook, Bishop, Knight.
+const PROMOTION_CHOICES: [PieceKind; 4] = [
+    PieceKind::Queen,
+    PieceKind::Rook,
+    PieceKind::Bishop,
+    PieceKind::Knight,
+];
+
+/// Compute the (row, col) on-screen position of each promotion choice.
+///
+/// The modal renders over the destination square and extends toward the
+/// board interior (the direction from `to` toward `from`), matching lichess.
+/// Pure function so it can be unit-tested for both orientations.
+fn promotion_modal_layout(
+    from: Square,
+    to: Square,
+    white_on_bottom: bool,
+) -> [(u8, u8); 4] {
+    let (from_row, _from_col) = square_to_coords(white_on_bottom, from).unwrap_or((0, 0));
+    let (to_row, to_col) = square_to_coords(white_on_bottom, to).unwrap_or((0, 0));
+    // Direction from `to` toward `from` in row space.
+    let dir: i32 = if from_row > to_row { 1 } else { -1 };
+
+    let mut out = [(0u8, 0u8); 4];
+    for (k, slot) in out.iter_mut().enumerate() {
+        let row_i = to_row as i32 + dir * k as i32;
+        // The destination always sits on a board edge and `from` is one
+        // square behind it, so rows 0..=3 in the dir direction are always
+        // on the board. Clamp defensively anyway.
+        *slot = ((row_i.clamp(0, 7) as u8), to_col);
+    }
+    out
+}
+
+/// Find the promotion legal move matching `kind`, or `None`.
+fn promotion_move_for(game: &GameState, from: Square, to: Square, kind: PieceKind) -> Option<Move> {
+    let role = kind.role();
+    game
+        .legal_moves_from(from)
+        .into_iter()
+        .find(|m| m.to() == to && matches!(m, Move::Normal { promotion: Some(r), .. } if *r == role))
+}
+
+    /// Render + interact the promotion modal. Returns the pending
+/// [`BoardAction`] for this frame (an icon click resolves to a
+/// `RequestMove`; any click elsewhere cancels to `Idle`).
+fn show_promotion_modal(
+    ui: &mut Ui,
+    game_state: &GameState,
+    textures: &crate::assets::PieceTextures,
+    white_on_bottom: bool,
+    square: f32,
+    board_rect: Rect,
+    view: &mut BoardView,
+) -> BoardAction {
+    let Interaction::Promoting { from, to } = view.interaction else {
+        return BoardAction::None;
+    };
+
+    let layout = promotion_modal_layout(from, to, white_on_bottom);
+    let promoting_color = game_state.turn();
+
+    for (choice, &(row, col)) in PROMOTION_CHOICES.into_iter().zip(layout.iter()) {
+        let icon_rect = square_rect(board_rect, square, row, col);
+        let response = ui.allocate_rect(icon_rect, Sense::click());
+
+        let painter = ui.painter();
+        painter.rect_filled(icon_rect, 0.0, PROMO_BACKDROP);
+        if response.hovered() {
+            painter.rect_filled(icon_rect, 0.0, PROMO_HOVER);
+        }
+        let id = PieceId {
+            color: promoting_color,
+            kind: choice,
+        };
+        if let Some(tex) = textures.get(id) {
+            draw_piece(painter, icon_rect.center(), tex.id(), square);
+        }
+
+        if response.clicked() {
+            return match promotion_move_for(game_state, from, to, choice) {
+                Some(m) => {
+                    view.interaction = Interaction::Idle;
+                    view.last_move = Some((from, to));
+                    BoardAction::RequestMove { m }
+                }
+                None => {
+                    // Should be impossible (the modal is only opened for
+                    // promotion-capable dest squares), but stay safe.
+                    view.interaction = Interaction::Idle;
+                    BoardAction::None
+                }
+            };
+        }
+    }
+    BoardAction::None
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interaction
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Map a pointer position (relative to a board-square rect) to a shakmaty
-/// [`Square`]. `white_on_bottom` determines whether the top of the screen
-/// holds rank 8 or rank 1.
+/// Consume one [`egui::Response`] for a board square.
 ///
-/// Returns the square whose rect contains `pointer`, or `None` if it is
-/// outside the square's bounds (i.e. `pointer` isn't on a board square).
-fn cursor_to_square(
-    board_rect: &Rect,
-    pointer: Pos2,
-    white_on_bottom: bool,
-) -> Option<Square> {
-    if !board_rect.contains(pointer) {
-        return None;
-    }
-    let square = board_rect.width() / 8.0;
-    let col = ((pointer.x - board_rect.min.x) / square).floor() as u8;
-    let row = ((pointer.y - board_rect.min.y) / square).floor() as u8;
-    if col >= 8 || row >= 8 {
-        return None;
-    }
-    Some(coords_to_square(white_on_bottom, row, col))
-}
-
-/// Consume one [`Response`] for a board square.
-///
-/// The widget is a `select.half-move` flow: click an own piece to select,
-/// click a destination to play (or click another own piece to re-select),
-/// drag a piece to its destination, or trigger the promotion modal.
+/// `board_rect` is passed in so the drop-position resolver maps the pointer
+/// through the *board*, not just this one square (BUG-4-03).
 fn handle_interaction(
     response: &egui::Response,
     sq: Square,
     game_state: &GameState,
     view: &mut BoardView,
     board: &Board,
+    board_rect: &Rect,
 ) -> Option<BoardAction> {
-    // ── Drag start (rename: "picked up" ──)
+    // ── Drag start: pick up a piece (from Idle, or re-grab / re-target from
+    // a previous selection) ──
     if response.drag_started() {
-        if board.piece_at(sq).is_some() {
-            view.interaction = Interaction::Dragging { from: sq };
+        let pick = match view.interaction {
+            Interaction::Idle | Interaction::Selected { .. } => board.piece_at(sq),
+            Interaction::Promoting { .. } | Interaction::Dragging { .. } => None,
+        };
+        if pick.is_some() {
+            view.interaction = Interaction::Dragging {
+                from: sq,
+                cursor: sq,
+            };
             return Some(BoardAction::PieceSelected { from: sq });
         }
     }
-    // ── Dragged piece dropped onto a destination ──
-    if let Interaction::Dragging { from } = view.interaction {
-        if response.drag_stopped() {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                // Determine the destination square from the cursor position.
-                let to = cursor_to_square(&response.rect, pointer, view.white_on_bottom);
-                if let Some(to) = to {
-                    let legal = game_state.legal_moves_from(from);
-                    if let Some(m) = legal.iter().find(|m| m.to() == to) {
-                        let choices = game_state.promotion_choices(from, to);
-                        if choices.is_empty() {
-                            view.interaction = Interaction::Idle;
-                            view.last_move = Some((from, to));
-                            return Some(BoardAction::RequestMove { m: *m });
-                        } else {
-                            view.interaction = Interaction::Promoting { from, to };
-                            return Some(BoardAction::PromotionChoice { from, to });
-                        }
-                    }
-                }
-                // Dropped on empty non-legal — reset.
+
+    // ── Drag drop ──
+    if let (Interaction::Dragging { from, .. }, true) = (view.interaction, response.drag_stopped())
+    {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let Some(to) = cursor_to_square(board_rect, pointer, view.white_on_bottom) else {
+                // Dropped off the board — cancel.
                 view.interaction = Interaction::Idle;
                 return Some(BoardAction::None);
+            };
+
+            // BUG-4-02: dropping back on the origin keeps the piece selected
+            // (lichess / Nibbler behaviour).
+            if to == from {
+                view.interaction = Interaction::Selected { from };
+                return Some(BoardAction::PieceSelected { from });
             }
+
+            let legal = game_state.legal_moves_from(from);
+            let matched = legal
+                .into_iter()
+                .find(|m| move_target_square(*m) == to);
+            if let Some(m) = matched {
+                let choices = game_state.promotion_choices(from, to);
+                if choices.is_empty() {
+                    view.interaction = Interaction::Idle;
+                    view.last_move = Some((from, to));
+                    return Some(BoardAction::RequestMove { m });
+                } else {
+                    view.interaction = Interaction::Promoting { from, to };
+                    return Some(BoardAction::PromotionChoice { from, to });
+                }
+            }
+            // Dropped on an empty non-legal square — cancel. Re-selecting on
+            // another own piece is handled by the click path below (egui
+            // treats a quick drop as a click when the pointer barely moves).
+            if board.piece_at(to).is_some() {
+                view.interaction = Interaction::Selected { from: to };
+                return Some(BoardAction::PieceSelected { from: to });
+            }
+            view.interaction = Interaction::Idle;
+            return Some(BoardAction::None);
         }
     }
+
     // ── Click ──
     if response.clicked() {
         match view.interaction {
@@ -486,12 +746,15 @@ fn handle_interaction(
                     return Some(BoardAction::None);
                 }
                 let legal = game_state.legal_moves_from(from);
-                if let Some(m) = legal.iter().find(|m| m.to() == sq) {
+                let matched = legal
+                    .into_iter()
+                    .find(|m| move_target_square(*m) == sq);
+                if let Some(m) = matched {
                     let choices = game_state.promotion_choices(from, sq);
                     if choices.is_empty() {
                         view.interaction = Interaction::Idle;
                         view.last_move = Some((from, sq));
-                        return Some(BoardAction::RequestMove { m: *m });
+                        return Some(BoardAction::RequestMove { m });
                     } else {
                         view.interaction = Interaction::Promoting { from, to: sq };
                         return Some(BoardAction::PromotionChoice { from, to: sq });
@@ -503,17 +766,157 @@ fn handle_interaction(
                 view.interaction = Interaction::Idle;
                 return Some(BoardAction::None);
             }
-            _ => {}
+            // A click on any square while the promotion modal is open
+            // cancels — the modal icons (painted after the squares) swallow
+            // their own clicks in `show_promotion_modal`, so clicks that
+            // reach *this* handler are guaranteed to be outside the modal.
+            Interaction::Promoting { .. } => {
+                view.interaction = Interaction::Idle;
+                return Some(BoardAction::None);
+            }
+            Interaction::Dragging { .. } => {}
         }
     }
+
     None
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unused helpers, kept for future phases
+// Tests (pure functions — no egui runtime needed)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
-fn _unused_helper(_x: u32) -> u32 {
-    0
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sq(s: &str) -> Square {
+        Square::from_ascii(s.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn coordinates_round_trip_white_on_bottom() {
+        for row in 0..8u8 {
+            for col in 0..8u8 {
+                let s = coords_to_square(true, row, col);
+                assert_eq!(
+                    square_to_coords(true, s),
+                    Some((row, col)),
+                    "white-on-bottom round trip failed at row {row} col {col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coordinates_round_trip_black_on_bottom() {
+        for row in 0..8u8 {
+            for col in 0..8u8 {
+                let s = coords_to_square(false, row, col);
+                assert_eq!(
+                    square_to_coords(false, s),
+                    Some((row, col)),
+                    "black-on-bottom round trip failed at row {row} col {col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn white_on_bottom_puts_rank1_at_bottom_row() {
+        // rank 1 (row 7 on screen), file a (col 0).
+        assert_eq!(square_to_coords(true, sq("a1")), Some((7, 0)));
+        // rank 8 at the top row.
+        assert_eq!(square_to_coords(true, sq("a8")), Some((0, 0)));
+    }
+
+    #[test]
+    fn black_on_bottom_mirrors() {
+        // Black-on-bottom: rank 8 at the bottom row, file a on the right.
+        assert_eq!(square_to_coords(false, sq("a8")), Some((7, 7)));
+        assert_eq!(square_to_coords(false, sq("h1")), Some((0, 0)));
+    }
+
+    #[test]
+    fn cursor_to_square_clamps_and_rejects() {
+        let board = Rect::from_min_size(Pos2::ZERO, Vec2::splat(800.0)); // 100 px per square
+        // Centre of d4: col 3, row (rank 8 -> row 0; rank 4 -> row 4).
+        assert_eq!(
+            cursor_to_square(&board, Pos2::new(350.0, 450.0), true),
+            Some(sq("d4"))
+        );
+        // One pixel past the right edge still maps into the last column.
+        assert_eq!(
+            cursor_to_square(&board, Pos2::new(800.0, 50.0), true),
+            Some(sq("h8"))
+        );
+        // Outside the board entirely.
+        assert_eq!(
+            cursor_to_square(&board, Pos2::new(1000.0, 50.0), true),
+            None
+        );
+    }
+
+    #[test]
+    fn castle_king_destination_used_as_target() {
+        // Standard starting position: O-O from e1 is legal only after the
+        // knights/bishops are out. Use a FEN with castling ready (small
+        // army — each side has only king + rooks + pawns — but the castling
+        // rights and empty paths are correct).
+        let game = GameState::from_fen(
+            "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        let e1 = sq("e1");
+        let legal = game.legal_moves_from(e1);
+        let king_side = legal.iter().find(|m| matches!(m, Move::Castle { rook, .. } if rook.file().to_u32() == 7));
+        let queen_side = legal.iter().find(|m| matches!(m, Move::Castle { rook, .. } if rook.file().to_u32() == 0));
+        assert!(king_side.is_some(), "O-O should be legal in this FEN");
+        assert!(queen_side.is_some(), "O-O-O should be legal in this FEN");
+        // Kingside O-O: rook target h1 but human clicks g1.
+        assert_eq!(move_target_square(*king_side.unwrap()), sq("g1"));
+        // Queenside O-O-O: rook target a1 but human clicks c1.
+        assert_eq!(move_target_square(*queen_side.unwrap()), sq("c1"));
+        // And a plain move keeps its own destination.
+        let normal = *legal.iter().find(|m| !m.is_castle()).unwrap();
+        assert_eq!(move_target_square(normal), normal.to());
+    }
+
+    #[test]
+    fn promotion_modal_layout_white_bottom_white_promotes() {
+        // White promotes a7 → a8 with white on the bottom: dest at row 0;
+        // the modal extends downward (toward the origin on row 1).
+        let layout = promotion_modal_layout(sq("a7"), sq("a8"), true);
+        assert_eq!(
+            layout,
+            [(0, 0), (1, 0), (2, 0), (3, 0)],
+            "Q at dest, then R, B, N introspect"
+        );
+    }
+
+    #[test]
+    fn promotion_modal_layout_black_promotes_upward() {
+        // Black promotes e2 → e1 with white on the bottom: dest at row 7
+        // (the bottom edge); the modal extends upward.
+        let layout = promotion_modal_layout(sq("e2"), sq("e1"), true);
+        assert_eq!(layout, [(7, 4), (6, 4), (5, 4), (4, 4)]);
+    }
+
+    #[test]
+    fn promotion_modal_layout_flipped_board() {
+        // Black-on-bottom orientation: white's rank-8 destination appears at
+        // the BOTTOM row, so the modal extends upward.
+        let layout = promotion_modal_layout(sq("a7"), sq("a8"), false);
+        assert_eq!(layout, [(7, 7), (6, 7), (5, 7), (4, 7)]);
+    }
+
+    #[test]
+    fn promotion_move_for_picks_the_right_role() {
+        let game = GameState::from_fen("7k/P7/8/8/8/8/8/7K w - - 0 1").unwrap();
+        let from = sq("a7");
+        let to = sq("a8");
+        assert!(game.promotion_choices(from, to).len() == 4);
+        let m = promotion_move_for(&game, from, to, PieceKind::Knight)
+            .expect("knight promotion should resolve");
+        assert_eq!(m.to(), to);
+    }
 }

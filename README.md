@@ -2,8 +2,10 @@
 
 A modern, high-performance UCI chess GUI for **macOS Apple Silicon**, written in Rust.
 
-> **Phase status (2026-11-02):** Phase 4 shipped — board rendering with click-click
-> and drag-and-drop interaction driving a typed `BoardAction` flow into the caller.
+> **Phase status (2026-11-02):** Phase 4 **DONE** — board rendering with
+> click-click and drag-and-drop interaction, promotion mini-modal
+> (Q/R/B/N, ESC cancellable), board-level drop targeting and castling
+> click mapping, all driving a typed `BoardAction` flow into the caller.
 > The stack now spans:
 > * **Phase 1 / 1 BIS** — Apple Silicon toolchain + `public/` asset tree
 >   (cburnett SVG pieces rasterised at startup via `usvg`/`resvg`/`tiny-skia`
@@ -16,12 +18,14 @@ A modern, high-performance UCI chess GUI for **macOS Apple Silicon**, written in
 >   `Rust-Chess-GUI-0.2.1/src-tauri/src/uci.rs`. Real-world-tested against
 >   Stockfish 19 (`/opt/homebrew/bin/stockfish`) and the secondary engine
 >   `Triumviratus/Triumviratus_8.0_macos_arm`.
-> * **Phase 4** — board view widget with the blue-board texture, cburnett
->   piece rendering, click / drag state machine, and typed `BoardAction`s.
+> * **Phase 4 (DONE)** — board view widget with the blue-board texture,
+>   cburnett piece rendering, click / drag state machine, promotion
+>   mini-modal and corrected castling input, all returning typed
+>   `BoardAction`s.
 >
-> **50 tests pass**, all on Apple Silicon. Pending within Phase 4: promotion
-> mini-modal, drag-drop back on own-origin-reselect, and drop target for a
-> drag released mid-board. See `../implementation-plan.md` § 6.1.
+> **60 tests pass** including 10 board-view unit tests. Only BUG-0-04
+> (warnings cleanup) remains; Phase 4 has no open 🟧 blockers.
+> See `../implementation-plan.md` § 6.1.
 
 ## Highlights (target architecture)
 
