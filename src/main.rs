@@ -163,9 +163,9 @@ fn apply_interface(
             }
         },
         BoardAction::PromotionChoice { .. } => {
-            // Phase-4 M4 stub — the actual promotion mini-modal is landing
-            // in a single follow-up commit.
-            *status = "promotion pending — Phase-4 M4 modal is being wired".into();
+            // The promotion modal is drawn on the board itself; this action
+            // only fires on the frame the modal opens.
+            *status = "promotion — pick Q / R / B / N on the board (Esc cancels)".into();
         }
     }
 }
