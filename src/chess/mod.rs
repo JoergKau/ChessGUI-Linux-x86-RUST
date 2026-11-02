@@ -1,27 +1,27 @@
 //! Chess domain layer.
 //!
-//! Phase 2 filled out the previously-placeholder modules:
-//!
 //! ```text
 //! src/chess/
 //! ├── mod.rs            ← re-exports of the public surface
 //! ├── game_state.rs     ← GameState wrapper around shakmaty::Chess
-//! │                       (san, fen, history, navigation, promotion)
+//! │                       (SAN, FEN, history, navigation, promotion, UCI→SAN)
 //! ├── opening_book.rs   ← PolyGlot .bin reader with binary search
-//! └── clock.rs          ← live game clock with Fischer / sudden-death
+//! ├── pgn.rs            ← PGN writer and mainline reader
+//! └── clock.rs          ← live game clock (Phase 6 arbiter)
 //! ```
 //!
-//! Phase 4 (board_view) and Phase 5 (eval / PGN panel / menu bar) consume
-//! these types. The engine side (Phase 3) reads `GameState::position()` to
-//! feed `position fen … moves …` strings to UCI subprocesses.
+//! The board, eval and PGN panels read [`GameState`]; the engine layer uses
+//! `GameState::fen()` and `GameState::uci_moves_to_san()`.
 
-pub mod clock;
 pub mod game_state;
 pub mod opening_book;
+pub mod pgn;
 
-// Convenience re-exports so the rest of the crate can use
-// `crate::chess::PieceColor` / `crate::chess::PieceKind` directly,
-// matching the Phase-1-BIS asset pipeline contract.
-pub use game_state::{GameState, PieceColor, PieceKind, Ply};
-pub use opening_book::{BookEntry, BookError, PolyglotBook};
-pub use clock::{Clock, TimeControl, TimeMode};
+/// Time-control clock. The Phase-6 game-loop arbiter is its first consumer;
+/// until that lands its API has no callers, so dead-code lints are allowed
+/// for this module only.
+#[allow(dead_code)]
+pub mod clock;
+
+pub use game_state::{GameState, PieceColor, PieceKind};
+pub use opening_book::{BookError, PolyglotBook};

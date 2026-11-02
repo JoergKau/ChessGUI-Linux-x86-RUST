@@ -17,7 +17,7 @@
 //!   the last `tap()`. The Phase-5 game loop is expected to call
 //!   `tap()` immediately after each engine / user move.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::chess::PieceColor;
 
@@ -77,6 +77,12 @@ impl TimeControl {
         Self::new(TimeMode::FischerIncrement, base_ms, increment_ms)
     }
 
+    /// Fixed time per move (e.g. 10 s per move): every turn starts with the
+    /// full `base_ms` allowance and unused time is not carried over.
+    pub const fn fixed_per_move(base_ms: u64) -> Self {
+        Self::new(TimeMode::FixedPerMove, base_ms, 0)
+    }
+
     /// Convert into a live [`Clock`] starting from the beginning of the
     /// game (white to move).
     pub fn into_clock(self) -> Clock {
@@ -104,7 +110,7 @@ impl TimeControl {
                     format!("Fischer {}s +{}s", base_sec, inc_sec)
                 }
             }
-            TimeMode::FixedPerMove => format!("Fixed {}s per move", base_sec),
+            TimeMode::FixedPerMove => format!("Fixed {}s per move", self.base_ms / 1000),
         }
     }
 }
@@ -179,10 +185,17 @@ impl Clock {
     /// `Some(side)` of the player who has run out of time, otherwise
     /// `None`.
     pub fn tap(&mut self) -> Option<PieceColor> {
-        if self.expired_for.is_some() {
-            return self.expired_for;
+        if let Some(flagged) = self.expired_for {
+            return Some(flagged);
         }
         self.commit_active();
+
+        // The side that just moved ran out of time while thinking: it loses
+        // immediately and gets no increment.
+        if let Some(flagged) = self.expired_for {
+            self.turn_started = None;
+            return Some(flagged);
+        }
 
         // Apply increment (only Fischer-style gets it).
         if matches!(self.control.mode, TimeMode::FischerIncrement) {
@@ -194,6 +207,11 @@ impl Clock {
         // Switch sides.
         self.side = self.side.opposite();
         self.turn_started = Some(Instant::now());
+
+        // Fixed-per-move: every turn gets the full allowance, nothing carries over.
+        if matches!(self.control.mode, TimeMode::FixedPerMove) {
+            self.remaining[self.side.index()] = self.control.base_ms;
+        }
 
         // Did we just expire the new active side?
         if self.remaining[self.side.index()] == 0 {
@@ -288,6 +306,7 @@ impl ColorIndexExt for PieceColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn fischer_increment_adds_after_each_move() {
@@ -328,6 +347,33 @@ mod tests {
         assert_eq!(five_three.label(), "Fischer 5+3");
         let ten = TimeControl::sudden_death(10_000);
         assert_eq!(ten.label(), "Sudden Death 10s");
+    }
+
+    #[test]
+    fn tap_reports_side_that_flagged() {
+        // 10 ms of base time, 5 s increment: White overruns on the first tap.
+        let mut clock = TimeControl::fischer(10, 5_000).into_clock();
+        clock.start();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(clock.tap(), Some(PieceColor::White));
+        assert_eq!(clock.flagged(), Some(PieceColor::White));
+        assert!(clock.is_expired());
+        // The increment must not revive a side that already flagged.
+        assert_eq!(clock.remaining_ms(PieceColor::White), 0);
+    }
+
+    #[test]
+    fn fixed_per_move_resets_clock_each_turn() {
+        let mut clock = TimeControl::fixed_per_move(1_000).into_clock();
+        clock.start();
+        std::thread::sleep(Duration::from_millis(30));
+        clock.tap();
+        // Black's clock starts a fresh 1 s turn.
+        assert!(clock.remaining_ms(PieceColor::Black) >= 990);
+        std::thread::sleep(Duration::from_millis(30));
+        clock.tap();
+        // White's clock is reset to the full per-move allowance again.
+        assert!(clock.remaining_ms(PieceColor::White) >= 990);
     }
 
     #[test]
