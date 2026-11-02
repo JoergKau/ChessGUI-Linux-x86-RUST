@@ -20,6 +20,9 @@ const APP_NAME: &str = "SiliconBoard";
 /// Initial window size (board, evaluation dashboard and move list).
 const INITIAL_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
 
+/// Smallest window that still shows the top bar, the board and both engine cards.
+const MIN_WINDOW_SIZE: [f32; 2] = [960.0, 640.0];
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
@@ -31,7 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .thread_name("siliconboard-io")
         .build()?;
 
-    let viewport = egui::ViewportBuilder::default().with_inner_size(INITIAL_WINDOW_SIZE);
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size(INITIAL_WINDOW_SIZE)
+        .with_min_inner_size(MIN_WINDOW_SIZE);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()

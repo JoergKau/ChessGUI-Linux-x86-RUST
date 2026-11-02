@@ -24,6 +24,12 @@ pub const NEON_CYAN: Color32 = Color32::from_rgb(0x8b, 0xe9, 0xfd);
 /// Accent blue: the running-engine toggle and the rule under each card header.
 pub const BLUE: Color32 = Color32::from_rgb(0x3a, 0x74, 0xd6);
 
+/// White's moves in the move list.
+pub const WHITE_MOVE: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
+
+/// Black's moves in the move list (light red), so each side reads at a glance.
+pub const BLACK_MOVE: Color32 = Color32::from_rgb(0xff, 0x9e, 0x9e);
+
 /// Engine is searching.
 pub const ALERT_YELLOW: Color32 = Color32::from_rgb(0xf1, 0xfa, 0x8c);
 

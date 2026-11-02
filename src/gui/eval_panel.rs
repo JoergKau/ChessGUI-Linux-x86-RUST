@@ -5,7 +5,7 @@
 //! summary from the engine hosts and the game state. Score, number and move
 //! formatting are pure functions with unit tests.
 
-use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
+use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
 
 use crate::app::StatusLevel;
 use crate::engine::{AnalysisStatus, EngineView, Score};
@@ -15,8 +15,15 @@ use crate::gui::theme;
 /// Height of the principal-variation box: about three lines of text.
 const PV_MAX_HEIGHT: f32 = 72.0;
 
-/// Width of one header metric (EVAL, DEPTH, NODES), so the labels never wrap.
+/// Narrowest the right panel may be. At this width one header line still fits:
+/// toggle, engine name, speed pill, and the EVAL, DEPTH and NODES block.
+pub const MIN_WIDTH: f32 = 500.0;
+
+/// Size of the EVAL / DEPTH / NODES block: each column is `METRIC_WIDTH` wide
+/// with `METRIC_GAP` between columns, and the block is `METRIC_HEIGHT` tall.
 const METRIC_WIDTH: f32 = 64.0;
+const METRIC_GAP: f32 = 8.0;
+const METRIC_HEIGHT: f32 = 44.0;
 
 /// One engine card: the slot it fills plus its live view, if an engine is loaded.
 #[derive(Clone, Debug)]
@@ -111,27 +118,18 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32)
                 }
                 match card.view.as_ref().filter(|_| live) {
                     Some(view) => {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(letter.to_string()).small().color(theme::MUTED));
-                                ui.add(egui::Label::new(RichText::new(engine_name(view)).strong().color(theme::TEXT)).truncate());
-                            });
-                            speed_pill(ui, view);
-                        });
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
-                            let depth = view
-                                .stats
-                                .depth
-                                .map_or_else(|| "--".to_string(), |d| d.to_string());
-                            let nodes = format_count(view.stats.nodes.unwrap_or(0));
-                            let eval = white_score.map_or_else(|| "--".to_string(), format_eval_one_digit);
-                            metric(ui, "NODES", &nodes, theme::NEON_CYAN);
-                            ui.add_space(8.0);
-                            metric(ui, "DEPTH", &depth, theme::NEON_CYAN);
-                            ui.add_space(8.0);
-                            metric(ui, "EVAL", &eval, theme::NEON_GREEN);
-                        });
+                        ui.label(RichText::new(letter.to_string()).small().color(theme::MUTED));
+                        ui.label(RichText::new(engine_name(view)).strong().color(theme::TEXT));
+                        speed_pill(ui, view);
+                        let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
+                        let depth = view
+                            .stats
+                            .depth
+                            .map_or_else(|| "--".to_string(), |d| d.to_string());
+                        let nodes = format_count(view.stats.nodes.unwrap_or(0));
+                        let eval = white_score.map_or_else(|| "--".to_string(), format_eval_one_digit);
+                        ui.add_space((ui.available_width() - metrics_width()).max(METRIC_GAP));
+                        metrics_block(ui, &eval, &depth, &nodes);
                     }
                     None => {
                         let text = match &card.view {
@@ -240,12 +238,39 @@ fn toggle_button(ui: &mut Ui, running: bool, enabled: bool) -> bool {
     response.on_hover_text(hover).clicked()
 }
 
-/// A labelled value, centred over its label, in a fixed-width column.
-fn metric(ui: &mut Ui, label: &str, value: &str, color: Color32) {
-    ui.allocate_ui_with_layout(Vec2::new(METRIC_WIDTH, 0.0), Layout::top_down(Align::Center), |ui| {
-        ui.label(RichText::new(label).small().color(theme::MUTED));
-        ui.label(RichText::new(value).strong().color(color));
-    });
+/// Total width of the EVAL / DEPTH / NODES block.
+fn metrics_width() -> f32 {
+    3.0 * METRIC_WIDTH + 2.0 * METRIC_GAP
+}
+
+/// EVAL, DEPTH and NODES side by side, each label centred over its value.
+/// The block is painted at fixed positions, so the three columns always share
+/// one top line.
+fn metrics_block(ui: &mut Ui, eval: &str, depth: &str, nodes: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(metrics_width(), METRIC_HEIGHT), Sense::hover());
+    let painter = ui.painter();
+    let columns = [
+        ("EVAL", eval, theme::NEON_GREEN),
+        ("DEPTH", depth, theme::NEON_CYAN),
+        ("NODES", nodes, theme::NEON_CYAN),
+    ];
+    for (i, (label, value, color)) in columns.into_iter().enumerate() {
+        let x = rect.left() + i as f32 * (METRIC_WIDTH + METRIC_GAP) + METRIC_WIDTH / 2.0;
+        painter.text(
+            Pos2::new(x, rect.top()),
+            Align2::CENTER_TOP,
+            label,
+            FontId::proportional(15.0),
+            theme::MUTED,
+        );
+        painter.text(
+            Pos2::new(x, rect.top() + 18.0),
+            Align2::CENTER_TOP,
+            value,
+            FontId::proportional(17.0),
+            color,
+        );
+    }
 }
 
 /// The evaluation from White's point of view, on a white badge.

@@ -49,8 +49,11 @@ pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
                         format!("{}...", line.number)
                     };
                     ui.label(RichText::new(number).color(theme::MUTED).monospace());
-                    for entry in [&line.white, &line.black].into_iter().flatten() {
-                        let response = ui.selectable_label(current == entry.ply, &entry.san);
+                    let moves = [(&line.white, theme::WHITE_MOVE), (&line.black, theme::BLACK_MOVE)];
+                    for (entry, color) in moves {
+                        let Some(entry) = entry else { continue };
+                        let text = RichText::new(&entry.san).color(color);
+                        let response = ui.selectable_label(current == entry.ply, text);
                         if response.clicked() {
                             target = Some(entry.ply);
                         }
