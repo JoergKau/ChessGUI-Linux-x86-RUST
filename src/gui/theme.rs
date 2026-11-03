@@ -1,7 +1,16 @@
 //! Dark, high-contrast palette in the spirit of Nibbler: near-black panels,
 //! neon green for evaluations, neon cyan for search metrics.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use eframe::egui::{self, Color32, FontId, TextStyle};
+
+/// Family name of the chess figurine font used in the PV (`♘f6`).
+pub const FIGURINE_FAMILY: &str = "siliconboard-figurines";
+
+/// Whether [`install_chess_font`] succeeded, so the PV can use figurines.
+static FIGURINES_READY: AtomicBool = AtomicBool::new(false);
 
 /// Panel and window background (`#16161a`).
 pub const PANEL_BG: Color32 = Color32::from_rgb(0x16, 0x16, 0x1a);
@@ -64,4 +73,26 @@ pub fn apply(ctx: &egui::Context) {
     visuals.selection.bg_fill = NEON_GREEN.gamma_multiply(0.35);
     visuals.hyperlink_color = NEON_CYAN;
     ctx.set_visuals(visuals);
+}
+
+/// Add the chess figurine font as a named family, used for the piece letters in
+/// the PV. The font is `public/font/lichess-chess.ttf` (a Noto Sans subset).
+pub fn install_chess_font(ctx: &egui::Context, path: &Path) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    ctx.add_font(egui::FontInsert {
+        name: "siliconboard-chess-figurines".to_owned(),
+        data: egui::FontData::from_owned(bytes),
+        families: vec![egui::InsertFontFamily {
+            family: egui::FontFamily::Name(FIGURINE_FAMILY.into()),
+            priority: egui::FontPriority::Highest,
+        }],
+    });
+    FIGURINES_READY.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Whether the figurine font is available. When it is not, the PV falls back
+/// to plain SAN (`Nf6`).
+pub fn figurines_available() -> bool {
+    FIGURINES_READY.load(Ordering::Acquire)
 }

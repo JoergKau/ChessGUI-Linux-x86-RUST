@@ -8,6 +8,7 @@
 
 use eframe::egui::{self, Color32, FontId, RichText, Ui};
 
+use crate::chess::players::{GameMode, MODES};
 use crate::gui::theme;
 
 /// Something the user asked for in the top bar.
@@ -17,6 +18,18 @@ pub enum MenuAction {
     NewGame,
     /// Game → Flip board.
     FlipBoard,
+    /// Game → one of the modes (analysis, play a colour, engine vs engine).
+    SetMode(GameMode),
+    /// Game → Time control…: open the dialog.
+    OpenTimeControl,
+    /// Game → Book moves in games: switch the book reply on or off.
+    ToggleBookInGames,
+    /// Game → Resign: the human side gives up the game.
+    Resign,
+    /// Game → Offer draw: the engine accepts or declines.
+    OfferDraw,
+    /// Engine → Engine A options… / B options… (`0` = A, `1` = B).
+    OpenEngineOptions(usize),
     /// File → Open PGN…
     OpenPgn,
     /// File → Save PGN…
@@ -33,6 +46,14 @@ pub enum MenuAction {
     ToggleEngine(usize),
     /// Engine → Load PolyGlot book…
     LoadBook,
+    /// View → Board theme: switch to the image at this index in the theme list.
+    SetBoardTheme(usize),
+    /// View → Piece set: switch to the set at this index.
+    SetPieceSet(usize),
+    /// View → Figurines in move list: toggle `♘f3` there.
+    ToggleFigurinesMoveList,
+    /// View → Figurines in engine evaluation: toggle `♘f3` in the PV.
+    ToggleFigurinesEval,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
     /// Abort: stop all searches. Engines stay loaded and can be started again.
@@ -46,8 +67,29 @@ pub enum MenuAction {
 pub struct MenuState<'a> {
     /// Whether each engine slot holds a running (or starting) engine.
     pub engine_loaded: [bool; 2],
+    /// The mode the session is in; its menu entry is marked.
+    pub mode: GameMode,
+    /// Whether engines play opening-book moves in games.
+    pub book_in_games: bool,
+    /// `true` while a game against an engine is running, so the human can
+    /// resign or offer a draw.
+    pub vs_engine_live: bool,
+    /// Whether each slot's engine has answered its handshake, so its options are known.
+    pub options_ready: [bool; 2],
     /// File name of the loaded opening book, if any.
     pub book_name: Option<&'a str>,
+    /// Board images from `public/images/board/`.
+    pub board_themes: &'a [crate::assets::BoardTheme],
+    /// File name of the board image in use, if one has been chosen.
+    pub board_theme: Option<&'a str>,
+    /// Piece sets from `public/piece/`.
+    pub piece_sets: &'a [crate::assets::PieceSet],
+    /// Folder name of the piece set in use, if one has been chosen.
+    pub piece_set: Option<&'a str>,
+    /// Whether the move list draws piece letters as figurines.
+    pub figurines_move_list: bool,
+    /// Whether the engine PV draws piece letters as figurines.
+    pub figurines_eval: bool,
     /// Number of moves played, shown in the Game menu.
     pub ply_count: usize,
 }
@@ -65,6 +107,48 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
             }
             if ui.button("Flip board").clicked() {
                 action = Some(MenuAction::FlipBoard);
+                ui.close();
+            }
+            ui.separator();
+            for mode in MODES {
+                if ui.radio(state.mode == mode, mode.label()).clicked() {
+                    action = Some(MenuAction::SetMode(mode));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button("Time control…").clicked() {
+                action = Some(MenuAction::OpenTimeControl);
+                ui.close();
+            }
+            ui.separator();
+            let vs_engine = state.vs_engine_live;
+            if ui
+                .add_enabled(vs_engine, egui::Button::new("Resign"))
+                .on_disabled_hover_text("Only in a running game against an engine.")
+                .clicked()
+            {
+                action = Some(MenuAction::Resign);
+                ui.close();
+            }
+            if ui
+                .add_enabled(vs_engine, egui::Button::new("Offer draw"))
+                .on_disabled_hover_text("Only in a running game against an engine.")
+                .clicked()
+            {
+                action = Some(MenuAction::OfferDraw);
+                ui.close();
+            }
+            ui.separator();
+            let book_available = state.book_name.is_some();
+            let book = ui
+                .add_enabled(
+                    book_available,
+                    egui::Button::selectable(state.book_in_games, "Book moves in games"),
+                )
+                .on_disabled_hover_text("Load an opening book first (Engine menu).");
+            if book.clicked() {
+                action = Some(MenuAction::ToggleBookInGames);
                 ui.close();
             }
             ui.separator();
@@ -107,12 +191,77 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 }
             }
             ui.separator();
+            for slot in 0..2 {
+                let letter = char::from(b'A' + slot as u8);
+                let button = ui
+                    .add_enabled(state.options_ready[slot], egui::Button::new(format!("Engine {} options…", letter)))
+                    .on_disabled_hover_text("Available once the engine has started.");
+                if button.clicked() {
+                    action = Some(MenuAction::OpenEngineOptions(slot));
+                    ui.close();
+                }
+            }
+            ui.separator();
             let book_label = match state.book_name {
                 Some(name) => format!("Opening book: {} (replace…)", name),
                 None => "Load opening book…".to_string(),
             };
             if ui.button(book_label).clicked() {
                 action = Some(MenuAction::LoadBook);
+                ui.close();
+            }
+        });
+        ui.menu_button("View", |ui| {
+            ui.menu_button("Board theme", |ui| {
+                if state.board_themes.is_empty() {
+                    ui.label("No board images found");
+                }
+                for (index, theme) in state.board_themes.iter().enumerate() {
+                    if ui
+                        .radio(state.board_theme == Some(theme.file.as_str()), &theme.label)
+                        .clicked()
+                    {
+                        action = Some(MenuAction::SetBoardTheme(index));
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            ui.menu_button("Piece set", |ui| {
+                if state.piece_sets.is_empty() {
+                    ui.label("No complete piece sets found");
+                }
+                for (index, set) in state.piece_sets.iter().enumerate() {
+                    if ui
+                        .radio(state.piece_set == Some(set.name.as_str()), &set.label)
+                        .clicked()
+                    {
+                        action = Some(MenuAction::SetPieceSet(index));
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            if ui
+                .add(egui::Button::selectable(
+                    state.figurines_move_list,
+                    "Figurines in move list",
+                ))
+                .on_hover_text("Show ♘f3 instead of Nf3 in the move list")
+                .clicked()
+            {
+                action = Some(MenuAction::ToggleFigurinesMoveList);
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::selectable(
+                    state.figurines_eval,
+                    "Figurines in engine evaluation",
+                ))
+                .on_hover_text("Show ♘f3 instead of Nf3 in the principal variation")
+                .clicked()
+            {
+                action = Some(MenuAction::ToggleFigurinesEval);
                 ui.close();
             }
         });

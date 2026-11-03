@@ -41,7 +41,7 @@ usvg = "0.49"
 tiny-skia = "0.12"
 
 # ── Piece sprite / texture decoding (PNG) ───────────────────────────────────
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # ── Asynchronous runtime for UCI engine subprocess supervision ──────────────
 tokio = { version = "1.40", features = [

@@ -227,6 +227,66 @@ impl std::error::Error for BookError {
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Chooses one of several book moves at random, in proportion to their
+/// PolyGlot weights. Uses a small xorshift generator; the seed is random per
+/// process, and tests fix it.
+#[derive(Clone, Debug)]
+pub struct BookPicker {
+    /// Generator state. Never zero, which xorshift cannot leave.
+    state: u64,
+}
+
+impl Default for BookPicker {
+    /// A picker with a random seed.
+    fn default() -> Self {
+        Self::with_seed(random_seed())
+    }
+}
+
+impl BookPicker {
+    /// A picker that makes the same choices for the same seed.
+    pub fn with_seed(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
+
+    /// Index of the chosen move, or `None` when no move has a positive weight.
+    /// A move with weight zero is never chosen.
+    pub fn pick(&mut self, weights: &[u16]) -> Option<usize> {
+        let total: u64 = weights.iter().map(|w| u64::from(*w)).sum();
+        if total == 0 {
+            return None;
+        }
+        let mut roll = self.next_u64() % total;
+        for (index, weight) in weights.iter().enumerate() {
+            let weight = u64::from(*weight);
+            if roll < weight {
+                return Some(index);
+            }
+            roll -= weight;
+        }
+        None
+    }
+
+    /// One step of xorshift64.
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+}
+
+/// A seed that differs between runs, taken from the standard library's
+/// randomly keyed hasher.
+fn random_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(0x5151_5151);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +563,37 @@ mod tests {
         assert_eq!(sorted.find(1).len(), 1);
         assert_eq!(sorted.find(2).len(), 1);
         assert_eq!(sorted.find(3).len(), 1);
+    }
+
+    #[test]
+    fn picker_never_chooses_a_zero_weight_move() {
+        let mut picker = BookPicker::with_seed(7);
+        for _ in 0..500 {
+            assert_eq!(picker.pick(&[0, 5, 0]), Some(1));
+        }
+    }
+
+    #[test]
+    fn picker_follows_the_weights() {
+        let mut picker = BookPicker::with_seed(42);
+        let heavy = (0..4000).filter(|_| picker.pick(&[1, 3]) == Some(1)).count();
+        // Expected 3000 with a standard deviation of about 27.
+        assert!((2800..=3200).contains(&heavy), "heavy move chosen {} times", heavy);
+    }
+
+    #[test]
+    fn picker_gives_nothing_when_no_move_has_weight() {
+        let mut picker = BookPicker::with_seed(1);
+        assert_eq!(picker.pick(&[]), None);
+        assert_eq!(picker.pick(&[0, 0]), None);
+    }
+
+    #[test]
+    fn picker_with_the_same_seed_makes_the_same_choices() {
+        let mut a = BookPicker::with_seed(99);
+        let mut b = BookPicker::with_seed(99);
+        let first: Vec<_> = (0..20).map(|_| a.pick(&[2, 2, 2])).collect();
+        let second: Vec<_> = (0..20).map(|_| b.pick(&[2, 2, 2])).collect();
+        assert_eq!(first, second);
     }
 }

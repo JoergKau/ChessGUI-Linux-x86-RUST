@@ -31,8 +31,8 @@
 //! PGN panel can paint faster than `O(ply)` per click.
 
 use shakmaty::{
-    san::SanPlus, zobrist::Zobrist64, CastlingMode, Chess, Color, EnPassantMode, File, FromSetup,
-    Move, Position, Role, Square,
+    san::SanPlus, zobrist::Zobrist64, Board, CastlingMode, Chess, Color, EnPassantMode, File,
+    FromSetup, Move, Position, Role, Square,
 };
 
 use crate::chess::opening_book::PolyglotBook;
@@ -164,6 +164,9 @@ pub struct GameState {
     /// Cursor into `history`. 0 = no moves played yet; equal to
     /// `history.len()` = at the latest position.
     cur_ply: usize,
+    /// Bumped whenever the recorded history changes, so derived views (the PGN
+    /// move list) can cache their result.
+    revision: u64,
 }
 
 impl Default for GameState {
@@ -187,6 +190,7 @@ impl GameState {
             start,
             history: Vec::new(),
             cur_ply: 0,
+            revision: 0,
         }
     }
 
@@ -216,6 +220,17 @@ impl GameState {
         }
     }
 
+    /// The board of the displayed position, borrowed rather than cloned. The
+    /// board widget reads the board every frame, so this avoids copying the
+    /// whole position just to paint.
+    pub fn board(&self) -> &Board {
+        if self.cur_ply == 0 {
+            self.start.board()
+        } else {
+            self.history[self.cur_ply - 1].after.board()
+        }
+    }
+
     /// Index of the current half-move (0-based). 0 = at the start.
     pub fn cur_ply(&self) -> usize {
         self.cur_ply
@@ -230,6 +245,12 @@ impl GameState {
     /// plus any "redo tail").
     pub fn total_plies(&self) -> usize {
         self.history.len()
+    }
+
+    /// A counter that changes whenever the recorded history changes. Derived
+    /// views (the PGN move list) use it to cache their result.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Slice of recorded plies that are currently considered played,
@@ -349,6 +370,24 @@ impl GameState {
         Ok(())
     }
 
+    /// Play a move given in UCI notation (`e2e4`, `e7e8q`, or castling as the
+    /// king's move, `e1g1`). Returns the SAN of the move played. The move must
+    /// be legal in the displayed position; the state is unchanged on error.
+    pub fn apply_uci(&mut self, uci: &str) -> Result<String, MoveError> {
+        let parsed = uci
+            .parse::<shakmaty::uci::UciMove>()
+            .map_err(|_| MoveError::NotUci)?;
+        let m = parsed
+            .to_move(&self.position())
+            .map_err(|_| MoveError::IllegalMove)?;
+        self.apply_move(m)?;
+        Ok(self
+            .active_history()
+            .last()
+            .map(|ply| ply.san.to_string())
+            .unwrap_or_default())
+    }
+
     /// `true` iff `m` is legal in the displayed position.
     fn is_legal(&self, m: Move) -> bool {
         self.position().is_legal(m)
@@ -375,8 +414,13 @@ impl GameState {
     /// The promotion pieces that are legal for a pawn move `from` → `to`, in
     /// Q/R/B/N order. Empty if the move is not a promotion. The board's
     /// promotion modal renders exactly these choices.
+    #[allow(dead_code, reason = "convenience wrapper for callers without a cached legal-move list")]
     pub fn promotion_choices(&self, from: Square, to: Square) -> Vec<PieceKind> {
-        let legal = self.legal_moves_from(from);
+        Self::promotion_choices_from(&self.legal_moves_from(from), to)
+    }
+
+    /// [`Self::promotion_choices`] using an already-computed legal-move list.
+    pub fn promotion_choices_from(legal: &[Move], to: Square) -> Vec<PieceKind> {
         [PieceKind::Queen, PieceKind::Rook, PieceKind::Bishop, PieceKind::Knight]
             .into_iter()
             .filter(|kind| {
@@ -487,17 +531,23 @@ impl GameState {
     /// heaviest first. Empty when the position is not in the book.
     pub fn book_suggestions(&self, book: &PolyglotBook) -> Vec<(String, u16)> {
         let pos = self.position();
-        let mut suggestions: Vec<(String, u16)> = book
-            .find(self.zobrist())
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .to_move(&pos)
-                    .map(|m| (SanPlus::from_move(pos.clone(), m).to_string(), entry.weight))
-            })
+        let mut suggestions: Vec<(String, u16)> = self
+            .book_moves(book)
+            .into_iter()
+            .map(|(m, weight)| (SanPlus::from_move(pos.clone(), m).to_string(), weight))
             .collect();
         suggestions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         suggestions
+    }
+
+    /// Opening-book moves for the displayed position as legal moves with their
+    /// weights, in book order. Empty when the position is not in the book.
+    pub fn book_moves(&self, book: &PolyglotBook) -> Vec<(Move, u16)> {
+        let pos = self.position();
+        book.find(self.zobrist())
+            .iter()
+            .filter_map(|entry| entry.to_move(&pos).map(|m| (m, entry.weight)))
+            .collect()
     }
 
     // ── Engine-binding helpers ───────────────────────────────────────────
@@ -516,6 +566,7 @@ impl GameState {
         self.history.truncate(self.cur_ply);
         self.history.push(ply);
         self.cur_ply = self.history.len();
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -569,6 +620,53 @@ fn piece_color_label_local(c: PieceColor) -> &'static str {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Endings
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How a game was decided when the position does not say so. Mate, stalemate
+/// and the other drawn positions come from the position itself; these three
+/// come from the game loop.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// `loser` resigned.
+    Resigned {
+        /// The side that resigned.
+        loser: PieceColor,
+    },
+    /// Both sides agreed to a draw.
+    DrawAgreed,
+    /// `loser` ran out of time.
+    OnTime {
+        /// The side whose clock ran out.
+        loser: PieceColor,
+    },
+}
+
+impl Ending {
+    /// PGN result token: `1-0`, `0-1` or `1/2-1/2`.
+    pub fn result_token(self) -> &'static str {
+        match self {
+            Ending::Resigned { loser } | Ending::OnTime { loser } => match loser {
+                PieceColor::White => "0-1",
+                PieceColor::Black => "1-0",
+            },
+            Ending::DrawAgreed => "1/2-1/2",
+        }
+    }
+
+    /// Text for the status line and the eval panel, e.g. `Black wins by resignation`.
+    pub fn description(self) -> String {
+        match self {
+            Ending::Resigned { loser } => {
+                format!("{} wins by resignation", piece_color_label_local(loser.opposite()))
+            }
+            Ending::OnTime { loser } => format!("{} wins on time", piece_color_label_local(loser.opposite())),
+            Ending::DrawAgreed => "Draw agreed".to_string(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -608,12 +706,15 @@ impl std::error::Error for FenError {
 pub enum MoveError {
     /// The move is not legal in the displayed position.
     IllegalMove,
+    /// The text is not a UCI move at all.
+    NotUci,
 }
 
 impl std::fmt::Display for MoveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MoveError::IllegalMove => f.write_str("illegal move"),
+            MoveError::NotUci => f.write_str("not a UCI move"),
         }
     }
 }
@@ -642,6 +743,17 @@ mod tests {
         assert_eq!(g.turn(), PieceColor::White);
         assert_eq!(g.cur_ply(), 0);
         assert_eq!(g.total_plies(), 0);
+    }
+
+    #[test]
+    fn board_follows_the_history_cursor() {
+        let mut g = GameState::new();
+        assert!(g.board().piece_at(sq("e2")).is_some());
+        g.apply_uci("e2e4").unwrap();
+        assert!(g.board().piece_at(sq("e2")).is_none(), "the pawn left e2");
+        assert!(g.board().piece_at(sq("e4")).is_some(), "and stands on e4");
+        g.goto_ply(0);
+        assert!(g.board().piece_at(sq("e2")).is_some(), "browsing shows the earlier board");
     }
 
     #[test]
@@ -847,6 +959,34 @@ mod tests {
     }
 
     #[test]
+    fn apply_uci_plays_the_move_and_reports_its_san() {
+        let mut g = GameState::new();
+        assert_eq!(g.apply_uci("e2e4").as_deref(), Ok("e4"));
+        assert_eq!(g.cur_ply(), 1);
+        assert_eq!(g.apply_uci("g8f6").as_deref(), Ok("Nf6"));
+        assert_eq!(g.cur_ply(), 2);
+    }
+
+    #[test]
+    fn apply_uci_rejects_illegal_and_malformed_moves_without_changing_the_game() {
+        let mut g = GameState::new();
+        assert_eq!(g.apply_uci("e2e5"), Err(MoveError::IllegalMove));
+        assert_eq!(g.apply_uci("hello"), Err(MoveError::NotUci));
+        assert_eq!(g.apply_uci(""), Err(MoveError::NotUci));
+        assert_eq!(g.cur_ply(), 0);
+    }
+
+    #[test]
+    fn apply_uci_accepts_castling_and_promotion() {
+        let mut g = GameState::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
+        assert_eq!(g.apply_uci("e1g1").as_deref(), Ok("O-O"));
+
+        let mut g = GameState::from_fen("7k/P7/8/8/8/8/8/7K w - - 0 1").unwrap();
+        assert_eq!(g.apply_uci("a7a8"), Err(MoveError::IllegalMove), "a promotion needs a piece");
+        assert_eq!(g.apply_uci("a7a8q").as_deref(), Ok("a8=Q+"));
+    }
+
+    #[test]
     fn target_square_maps_castling_onto_the_king_destination() {
         let g = GameState::from_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1").unwrap();
         let castles: Vec<Move> = g
@@ -883,6 +1023,29 @@ mod tests {
         }
         let weights: Vec<u16> = suggestions.iter().map(|(_, w)| *w).collect();
         assert!(weights.windows(2).all(|pair| pair[0] >= pair[1]), "heaviest first");
+    }
+
+    #[test]
+    fn book_moves_are_legal_and_match_the_suggestions() {
+        let book = PolyglotBook::open(std::path::Path::new("../books/gm2001.bin"))
+            .expect("the workspace fixture books/gm2001.bin must be present");
+        let game = GameState::new();
+        let moves = game.book_moves(&book);
+        assert!(!moves.is_empty(), "start position must have book moves");
+        assert_eq!(moves.len(), game.book_suggestions(&book).len());
+        for (m, _) in &moves {
+            assert!(game.position().is_legal(*m), "book move must be legal");
+        }
+    }
+
+    #[test]
+    fn endings_give_their_pgn_result_and_text() {
+        assert_eq!(Ending::Resigned { loser: PieceColor::Black }.result_token(), "1-0");
+        assert_eq!(Ending::OnTime { loser: PieceColor::White }.result_token(), "0-1");
+        assert_eq!(Ending::DrawAgreed.result_token(), "1/2-1/2");
+        assert_eq!(Ending::Resigned { loser: PieceColor::White }.description(), "Black wins by resignation");
+        assert_eq!(Ending::OnTime { loser: PieceColor::Black }.description(), "White wins on time");
+        assert_eq!(Ending::DrawAgreed.description(), "Draw agreed");
     }
 
     #[test]
