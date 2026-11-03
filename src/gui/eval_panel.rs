@@ -76,6 +76,9 @@ pub struct EvalSummary {
     pub book_moves: Vec<(String, u16)>,
     /// Name of the loaded opening book, if any.
     pub book_name: Option<String>,
+    /// Name of the opening that ends at the displayed position, when the
+    /// position is in the book and the ECO table knows it.
+    pub opening_name: Option<String>,
     /// Whether engines answer with book moves in games (Game → Book moves in games).
     pub book_in_games: bool,
     /// Whether piece letters in the PV are drawn as figurines.
@@ -92,7 +95,7 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     let mut requested = None;
 
     ui.add_space(4.0);
-    ui.label(RichText::new(&summary.outcome).color(theme::MUTED));
+    ui.label(RichText::new(&summary.outcome).color(theme::NEON_CYAN));
     ui.add_space(6.0);
 
     for card in &summary.cards {
@@ -377,12 +380,14 @@ fn book_box(ui: &mut Ui, summary: &EvalSummary) {
         .inner_margin(8.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let heading = match &summary.book_name {
+            let heading = match &summary.opening_name {
                 Some(name) => format!("Opening book · {}", name),
-                None => "Opening book · none loaded".to_string(),
+                None => "Opening book".to_string(),
             };
             ui.label(RichText::new(heading).color(theme::NEON_CYAN).small());
-            if summary.book_name.is_some() && summary.book_moves.is_empty() {
+            if summary.book_name.is_none() {
+                ui.label(RichText::new("none loaded").color(theme::MUTED).small());
+            } else if summary.book_moves.is_empty() {
                 ui.label(RichText::new("not in book").color(theme::MUTED).small());
             }
             let total: u32 = summary.book_moves.iter().map(|(_, w)| u32::from(*w)).sum();

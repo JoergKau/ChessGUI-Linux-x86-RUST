@@ -274,6 +274,15 @@ pub fn chess_font_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Path of the ECO opening-name table, if it is present.
+pub fn opening_data_path() -> Option<PathBuf> {
+    let path = resolve_asset_root()
+        .join("data")
+        .join("openings")
+        .join("openings.tsv");
+    path.is_file().then_some(path)
+}
+
 /// List the piece sets in the workspace `public/piece/` folder.
 pub fn piece_sets() -> Vec<PieceSet> {
     piece_sets_from(&resolve_asset_root())

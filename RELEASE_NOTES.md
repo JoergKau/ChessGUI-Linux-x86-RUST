@@ -16,7 +16,8 @@ engine analysis on the right, move list along the bottom.
 - **Clocks:** no clock, sudden death, Fischer increment and fixed time per move;
   player bars above and below the board; flags end the game.
 - **Opening book:** PolyGlot (`.bin`), loaded at start-up from
-  `books/gm2001.bin`; weighted-random book replies in games, switchable.
+  `books/gm2001.bin`; weighted-random book replies in games, switchable. The
+  book box labels the current opening by name (ECO table) when it is known.
 - **Games:** resign and draw by agreement, with the result written to the PGN.
 - **Files:** open and save PGN (mainline), copy PGN, copy/save FEN.
 - **Board themes:** View → Board theme picks any PNG/JPEG board from

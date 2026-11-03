@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use crate::chess::clock::{Clock, TimeControl};
 use crate::chess::game_state::{Ending, MoveLine};
 use crate::chess::opening_book::BookPicker;
+use crate::chess::openings::{OpeningError, OpeningNames};
 use crate::chess::pgn::{self, PgnError, PgnImport};
 use crate::chess::players::{accepts_draw, GameMode, Seat};
 use crate::chess::{BookError, GameState, PieceColor, PolyglotBook};
@@ -278,6 +279,10 @@ enum AppEvent {
     BookLoaded {
         outcome: Option<(String, Result<PolyglotBook, BookError>)>,
     },
+    /// The ECO opening-name table was indexed.
+    OpeningNamesLoaded {
+        outcome: Result<OpeningNames, OpeningError>,
+    },
     /// A PGN file was read and parsed.
     PgnOpened {
         outcome: Option<Result<(String, PgnImport), OpenPgnError>>,
@@ -400,6 +405,8 @@ pub struct SiliconBoardApp {
     analysis_on: [bool; 2],
     /// The loaded opening book and its file name.
     book: Option<(String, PolyglotBook)>,
+    /// ECO opening names, keyed by position.
+    opening_names: Option<OpeningNames>,
     /// Book moves for the displayed position, heaviest first.
     book_moves: Vec<(String, u16)>,
     /// FEN the engines and book were last synchronised to.
@@ -450,6 +457,7 @@ impl SiliconBoardApp {
         // The settings were read before the window existed (for its size).
         app.apply_settings(settings);
         app.load_default_book();
+        app.load_opening_names();
         app
     }
 
@@ -520,6 +528,7 @@ impl SiliconBoardApp {
             engine_loading: [false, false],
             analysis_on: [false, false],
             book: None,
+            opening_names: None,
             book_moves: Vec::new(),
             synced_fen: String::new(),
             last_ply: 0,
@@ -786,6 +795,16 @@ impl SiliconBoardApp {
                     Some((name, Err(err))) => {
                         self.set_status(StatusLevel::Error, format!("Could not load book {}: {}", name, err));
                     }
+                },
+                AppEvent::OpeningNamesLoaded { outcome } => match outcome {
+                    Ok(names) if names.is_empty() => {
+                        log::warn!("opening names table is empty");
+                    }
+                    Ok(names) => {
+                        log::info!("opening names indexed: {} positions", names.len());
+                        self.opening_names = Some(names);
+                    }
+                    Err(err) => log::warn!("opening names not loaded: {}", err),
                 },
                 AppEvent::PgnOpened { outcome } => match outcome {
                     None => self.set_status(StatusLevel::Info, "Open cancelled.".to_string()),
@@ -1372,6 +1391,26 @@ impl SiliconBoardApp {
         self.schedule_settings_save();
     }
 
+    /// Index the ECO opening-name table at start-up, off the UI thread.
+    fn load_opening_names(&mut self) {
+        let Some(path) = crate::assets::opening_data_path() else {
+            return;
+        };
+        let error_path = path.clone();
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let outcome = match tokio::task::spawn_blocking(move || OpeningNames::load(&path)).await
+            {
+                Ok(result) => result,
+                Err(join) => Err(OpeningError::Read {
+                    path: error_path,
+                    source: std::io::Error::other(join),
+                }),
+            };
+            tx.send(AppEvent::OpeningNamesLoaded { outcome });
+        });
+    }
+
     /// Read the workspace opening book at start-up, if it is there. The Engine
     /// menu can replace it. Reading runs off the UI thread.
     fn load_default_book(&mut self) {
@@ -1947,6 +1986,13 @@ impl SiliconBoardApp {
             outcome: self.result_text().unwrap_or_else(|| self.game.outcome()),
             book_moves: self.book_moves.clone(),
             book_name: self.book.as_ref().map(|(name, _)| name.clone()),
+            opening_name: if self.book_in_games && !self.book_moves.is_empty() {
+                self.opening_names
+                    .as_ref()
+                    .and_then(|names| names.name_for(&self.game.position()).map(str::to_string))
+            } else {
+                None
+            },
             book_in_games: self.book_in_games,
             figurines: self.settings.figurines_eval,
             status: self.status.clone(),
