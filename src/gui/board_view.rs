@@ -46,7 +46,7 @@ use eframe::egui::{
     self, Color32, Key, Painter, Pos2, Rect, Sense, TextureId, Ui, Vec2,
     load::SizedTexture,
 };
-use shakmaty::{Board, File, Move, Piece, Position, Rank, Square};
+use shakmaty::{Board, File, Move, Piece, Rank, Square};
 
 use crate::assets::{Assets, PieceId, PieceTextures};
 use crate::chess::game_state::target_square;
@@ -140,6 +140,45 @@ pub struct BoardView {
     pub interaction: Interaction,
     /// White at the bottom? Black is at the bottom after [`BoardView::flip`].
     pub white_on_bottom: bool,
+    /// Cached legal moves for the selected square.
+    legal: Option<LegalCache>,
+}
+
+/// Legal moves for one selected square at one recorded position.
+#[derive(Debug, PartialEq, Eq)]
+struct LegalCache {
+    /// `GameState::cur_ply` of the position the moves were generated for.
+    ply: usize,
+    /// `GameState::revision` of the history at that point.
+    revision: u64,
+    /// The selected source square.
+    from: Square,
+    /// Legal moves from `from`.
+    moves: Vec<Move>,
+}
+
+impl BoardView {
+    /// Legal moves from `from`, cached until the displayed position or the
+    /// selected square changes. The board repaints every frame, so this saves a
+    /// full legal-move generation while a piece is selected.
+    fn legal_moves(&mut self, game: &GameState, from: Square) -> &[Move] {
+        let fresh = self.legal.as_ref().is_some_and(|cache| {
+            cache.ply == game.cur_ply() && cache.revision == game.revision() && cache.from == from
+        });
+        if !fresh {
+            self.legal = Some(LegalCache {
+                ply: game.cur_ply(),
+                revision: game.revision(),
+                from,
+                moves: game.legal_moves_from(from),
+            });
+        }
+        &self
+            .legal
+            .as_ref()
+            .expect("the cache was just filled")
+            .moves
+    }
 }
 
 impl Default for BoardView {
@@ -148,6 +187,7 @@ impl Default for BoardView {
         Self {
             interaction: Interaction::Idle,
             white_on_bottom: true,
+            legal: None,
         }
     }
 }
@@ -192,12 +232,14 @@ pub enum BoardAction {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Draw one [`BoardView`] inside the given `Ui` and return the pending
-/// [`BoardAction`].
+/// [`BoardAction`]. `input_allowed` is `false` when a person may not move
+/// now (an engine is on the move); the board is then shown read-only.
 pub fn show(
     ui: &mut Ui,
     game_state: &GameState,
     assets: &Assets,
     view: &mut BoardView,
+    input_allowed: bool,
 ) -> BoardAction {
     let avail_rect = ui.available_rect_before_wrap();
     let square = (avail_rect.width().min(avail_rect.height()) / 8.0).floor().max(1.0);
@@ -212,10 +254,10 @@ pub fn show(
     // Reserve the board region so egui doesn't overlap widgets outside it.
     let _reserved = ui.allocate_rect(board_rect, Sense::hover());
 
-    let board = game_state.position().board().clone();
+    let board = game_state.board();
     let textures = &assets.pieces;
-    // Browsing an earlier ply makes the board read-only.
-    let interactive = game_state.cur_ply() == game_state.total_plies();
+    // Browsing an earlier ply, or an engine being on the move, makes the board read-only.
+    let interactive = input_allowed && game_state.cur_ply() == game_state.total_plies();
     if !interactive {
         view.clear_selection();
     }
@@ -234,7 +276,8 @@ pub fn show(
     }
 
     paint_board_texture(ui, board_rect, assets.board.handle());
-    paint_overlays(ui, game_state, view, square, board_rect, &board);
+    paint_overlays(ui, game_state, view, square, board_rect, board);
+    paint_coordinates(ui, board_rect, square, view.white_on_bottom);
 
     let mut action = BoardAction::None;
     for row in 0..8u8 {
@@ -261,7 +304,7 @@ pub fn show(
                 sq,
                 game_state,
                 view,
-                &board,
+                board,
                 &board_rect,
             ) {
                 action = a;
@@ -391,13 +434,43 @@ fn paint_board_texture(ui: &Ui, board_rect: Rect, handle: &egui::TextureHandle) 
     egui::paint_texture_at(ui.painter(), board_rect, &options, &sized);
 }
 
+/// Rank numbers in the top-left corner of the left-hand squares, and file
+/// letters in the bottom-right corner of the bottom row, as en-croissant draws
+/// them. They follow the orientation of the board.
+fn paint_coordinates(ui: &Ui, board_rect: Rect, square: f32, white_on_bottom: bool) {
+    let font = egui::FontId::proportional(13.0);
+    let painter = ui.painter();
+    for row in 0..8u8 {
+        let rank = if white_on_bottom { 8 - row } else { row + 1 };
+        let cell = square_rect(board_rect, square, row, 0);
+        painter.text(
+            cell.left_top() + Vec2::new(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            rank.to_string(),
+            font.clone(),
+            crate::gui::theme::MUTED,
+        );
+    }
+    for col in 0..8u8 {
+        let file = if white_on_bottom { col } else { 7 - col };
+        let cell = square_rect(board_rect, square, 7, col);
+        painter.text(
+            cell.right_bottom() - Vec2::new(4.0, 2.0),
+            egui::Align2::RIGHT_BOTTOM,
+            char::from(b'a' + file).to_string(),
+            font.clone(),
+            crate::gui::theme::MUTED,
+        );
+    }
+}
+
 /// Paint the selected square, the last move, the checked king, and legal
 /// destinations (dots for quiet, rings for captures). Also tints the
 /// square the dragged piece hovers over.
 fn paint_overlays(
     ui: &Ui,
     game_state: &GameState,
-    view: &BoardView,
+    view: &mut BoardView,
     square: f32,
     board_rect: Rect,
     board: &Board,
@@ -428,18 +501,20 @@ fn paint_overlays(
         }
     }
 
-    // 3. Selected square + legal destinations.
+    // 3. Selected square + legal destinations. The legal moves are cached in
+    // the view for as long as the position and selected square stay the same.
     if let Some(from) = view.interaction.source_square() {
-        if let Some((row, col)) = square_to_coords(view.white_on_bottom, from) {
+        let white_on_bottom = view.white_on_bottom;
+        if let Some((row, col)) = square_to_coords(white_on_bottom, from) {
             ui.painter().rect_filled(
                 square_rect(board_rect, square, row, col),
                 0.0,
                 SELECTED_FILL,
             );
         }
-        for m in game_state.legal_moves_from(from) {
+        for &m in view.legal_moves(game_state, from) {
             let target = target_square(m);
-            let Some((row, col)) = square_to_coords(view.white_on_bottom, target) else {
+            let Some((row, col)) = square_to_coords(white_on_bottom, target) else {
                 continue;
             };
             let rect = square_rect(board_rect, square, row, col);
@@ -634,12 +709,13 @@ fn handle_interaction(
                 return Some(BoardAction::PieceSelected { from });
             }
 
-            let legal = game_state.legal_moves_from(from);
+            let legal = view.legal_moves(game_state, from).to_vec();
             let matched = legal
-                .into_iter()
+                .iter()
+                .copied()
                 .find(|m| target_square(*m) == to);
             if let Some(m) = matched {
-                let choices = game_state.promotion_choices(from, to);
+                let choices = GameState::promotion_choices_from(&legal, to);
                 if choices.is_empty() {
                     view.interaction = Interaction::Idle;
                     return Some(BoardAction::RequestMove { m });
@@ -672,12 +748,13 @@ fn handle_interaction(
                     view.interaction = Interaction::Idle;
                     return Some(BoardAction::None);
                 }
-                let legal = game_state.legal_moves_from(from);
+                let legal = view.legal_moves(game_state, from).to_vec();
                 let matched = legal
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .find(|m| target_square(*m) == sq);
                 if let Some(m) = matched {
-                    let choices = game_state.promotion_choices(from, sq);
+                    let choices = GameState::promotion_choices_from(&legal, sq);
                     if choices.is_empty() {
                         view.interaction = Interaction::Idle;
                         return Some(BoardAction::RequestMove { m });
@@ -842,7 +919,7 @@ mod tests {
 
     #[test]
     fn only_side_to_move_pieces_are_selectable() {
-        let board = GameState::new().position().board().clone();
+        let board = GameState::new().board().clone();
         assert!(is_selectable(&board, sq("e2"), PieceColor::White));
         assert!(!is_selectable(&board, sq("e7"), PieceColor::White));
         assert!(!is_selectable(&board, sq("e4"), PieceColor::White));
@@ -857,5 +934,54 @@ mod tests {
         let m = promotion_move_for(&game, from, to, PieceKind::Knight)
             .expect("knight promotion should resolve");
         assert_eq!(m.to(), to);
+    }
+
+    /// A timing harness for the board hot path. It is ignored by default, so
+    /// the normal suite stays fast. Run it on a release build:
+    ///
+    /// ```text
+    /// cargo test --release --bin siliconboard board_paint -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "timing harness; run with --release --ignored --nocapture"]
+    fn board_paint_stays_within_a_frame_budget() {
+        use std::time::{Duration, Instant};
+
+        let ctx = egui::Context::default();
+        crate::gui::theme::apply(&ctx);
+        let assets = Assets::load(&ctx).expect("the workspace public/ assets must load");
+        let mut game = GameState::new();
+        game.apply_uci("e2e4").unwrap();
+        game.apply_uci("e7e5").unwrap();
+        game.apply_uci("g1f3").unwrap();
+        let mut view = BoardView {
+            interaction: Interaction::Selected { from: sq("f3") },
+            ..BoardView::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0))),
+            ..Default::default()
+        };
+        let paint = |view: &mut BoardView| {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                let _ = show(ui, &game, &assets, view, true);
+            });
+        };
+
+        // Warm up the font atlas, the galley cache and the texture list.
+        for _ in 0..20 {
+            paint(&mut view);
+        }
+        const FRAMES: u32 = 2_000;
+        let started = Instant::now();
+        for _ in 0..FRAMES {
+            paint(&mut view);
+        }
+        let per_frame = started.elapsed() / FRAMES;
+        println!("board_view::show: {per_frame:?} per frame over {FRAMES} frames");
+        assert!(
+            per_frame < Duration::from_millis(4),
+            "a board paint should stay far below a 60 fps frame ({per_frame:?})"
+        );
     }
 }

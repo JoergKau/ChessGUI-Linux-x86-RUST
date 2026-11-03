@@ -11,6 +11,7 @@ mod assets;
 mod chess;
 mod engine;
 mod gui;
+mod settings;
 
 use app::SiliconBoardApp;
 
@@ -34,8 +35,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .thread_name("siliconboard-io")
         .build()?;
 
+    // The settings are read before the window exists, because the window size
+    // is one of them. The file is small, so this one read is done here.
+    let settings_file = settings::settings_path().ok();
+    let settings = match &settings_file {
+        Some(path) => settings::load_sync(path).unwrap_or_else(|err| {
+            log::warn!("{}", err);
+            settings::Settings::default()
+        }),
+        None => settings::Settings::default(),
+    };
+    let window_size = settings
+        .window_size
+        .map(|size| [size.width.max(MIN_WINDOW_SIZE[0]), size.height.max(MIN_WINDOW_SIZE[1])])
+        .unwrap_or(INITIAL_WINDOW_SIZE);
+
     let viewport = egui::ViewportBuilder::default()
-        .with_inner_size(INITIAL_WINDOW_SIZE)
+        .with_inner_size(window_size)
         .with_min_inner_size(MIN_WINDOW_SIZE);
     let options = eframe::NativeOptions {
         viewport,
@@ -48,7 +64,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             gui::theme::apply(&cc.egui_ctx);
-            Ok(Box::new(SiliconBoardApp::new(runtime)))
+            if let Some(path) = assets::chess_font_path() {
+                if let Err(err) = gui::theme::install_chess_font(&cc.egui_ctx, &path) {
+                    log::warn!("chess figurine font not loaded: {}", err);
+                }
+            }
+            Ok(Box::new(SiliconBoardApp::new(
+                runtime,
+                cc.egui_ctx.clone(),
+                settings,
+                settings_file,
+            )))
         }),
     )?;
     Ok(())

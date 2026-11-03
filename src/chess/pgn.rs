@@ -15,7 +15,7 @@ use std::fmt::Write;
 
 use shakmaty::{fen::Fen, san::SanPlus, Color, EnPassantMode, Position};
 
-use crate::chess::game_state::{FenError, GameState};
+use crate::chess::game_state::{Ending, FenError, GameState};
 
 /// Movetext is wrapped before this many columns.
 const LINE_WIDTH: usize = 80;
@@ -23,9 +23,13 @@ const LINE_WIDTH: usize = 80;
 /// FEN of the standard starting position.
 const STANDARD_START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
-/// Result token for the game's current state: `1-0`, `0-1`, `1/2-1/2`, or `*`
-/// while the game is still running.
-pub fn result_token(game: &GameState) -> &'static str {
+/// Result token for the game: the ending when the game loop decided it
+/// (resignation, agreed draw, flag), otherwise the final position's result.
+/// `*` while the game is still running.
+pub fn result_token(game: &GameState, ending: Option<Ending>) -> &'static str {
+    if let Some(ending) = ending {
+        return ending.result_token();
+    }
     let pos = game.final_position();
     if pos.is_checkmate() {
         // The side to move is mated.
@@ -41,8 +45,9 @@ pub fn result_token(game: &GameState) -> &'static str {
 }
 
 /// Render the whole recorded game as PGN, including moves after the cursor.
-/// The result tag comes from the final position.
-pub fn to_pgn(game: &GameState) -> String {
+/// The result tag comes from `ending`, or from the final position when the
+/// game loop did not end the game.
+pub fn to_pgn(game: &GameState, ending: Option<Ending>) -> String {
     let start = game.start_position();
     let mut out = String::new();
     push_tag(&mut out, "Event", "SiliconBoard game");
@@ -51,7 +56,7 @@ pub fn to_pgn(game: &GameState) -> String {
     push_tag(&mut out, "Round", "?");
     push_tag(&mut out, "White", "?");
     push_tag(&mut out, "Black", "?");
-    push_tag(&mut out, "Result", result_token(game));
+    push_tag(&mut out, "Result", result_token(game, ending));
     let start_fen = Fen::from_position(&start, EnPassantMode::Legal).to_string();
     if start_fen != STANDARD_START_FEN {
         push_tag(&mut out, "SetUp", "1");
@@ -76,7 +81,7 @@ pub fn to_pgn(game: &GameState) -> String {
         }
         tokens.push(ply.san.to_string());
     }
-    tokens.push(result_token(game).to_string());
+    tokens.push(result_token(game, ending).to_string());
 
     let mut line = String::new();
     for token in tokens {
@@ -412,7 +417,7 @@ mod tests {
         play(&mut game, "e7", "e5");
         play(&mut game, "g1", "f3");
         play(&mut game, "b8", "c6");
-        let text = to_pgn(&game);
+        let text = to_pgn(&game, None);
         assert!(text.contains("1. e4 e5 2. Nf3 Nc6 *"), "movetext: {}", text);
         let parsed = parse_pgn(&text).unwrap();
         assert_eq!(sans(&parsed), vec!["e4", "e5", "Nf3", "Nc6"]);
@@ -427,9 +432,9 @@ mod tests {
         play(&mut game, "e7", "e5");
         play(&mut game, "g2", "g4");
         play(&mut game, "d8", "h4");
-        assert_eq!(result_token(&game), "0-1");
-        assert!(to_pgn(&game).contains("[Result \"0-1\"]"));
-        assert!(to_pgn(&game).trim_end().ends_with("0-1"));
+        assert_eq!(result_token(&game, None), "0-1");
+        assert!(to_pgn(&game, None).contains("[Result \"0-1\"]"));
+        assert!(to_pgn(&game, None).trim_end().ends_with("0-1"));
     }
 
     #[test]
@@ -438,7 +443,7 @@ mod tests {
         let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 12";
         let mut game = GameState::from_fen(fen).unwrap();
         play(&mut game, "c7", "c5");
-        let text = to_pgn(&game);
+        let text = to_pgn(&game, None);
         assert!(text.contains("[SetUp \"1\"]"));
         assert!(text.contains("[FEN \""));
         assert!(text.contains("12... c5"), "movetext: {}", text);
@@ -516,12 +521,24 @@ mod tests {
     }
 
     #[test]
+    fn result_tag_follows_the_ending_the_game_loop_gives() {
+        let mut game = GameState::new();
+        game.play_squares(Square::from_ascii(b"e2").unwrap(), Square::from_ascii(b"e4").unwrap(), None).unwrap();
+        assert!(to_pgn(&game, None).contains("[Result \"*\"]"));
+        let resigned = Some(Ending::Resigned { loser: crate::chess::PieceColor::Black });
+        assert_eq!(result_token(&game, resigned), "1-0");
+        let text = to_pgn(&game, Some(Ending::DrawAgreed));
+        assert!(text.contains("[Result \"1/2-1/2\"]"));
+        assert!(text.trim_end().ends_with("1/2-1/2"));
+    }
+
+    #[test]
     fn mate_suffix_is_read_and_the_result_is_derived_from_the_position() {
         // Scholar's mate: 4.Qxf7# ends the game with White winning.
         let game = parse_pgn("1.e4 e5 2.Bc4 Nc6 3.Qh5 Nf6 4.Qxf7#\n").unwrap();
         assert_eq!(sans(&game).last().map(String::as_str), Some("Qxf7#"));
         assert!(game.is_checkmate());
-        assert_eq!(result_token(&game), "1-0");
+        assert_eq!(result_token(&game, None), "1-0");
     }
 
     /// Path of a PGN file in the workspace `PGN/` folder.
@@ -572,7 +589,7 @@ mod tests {
             game.play_squares(sq(from), sq(to), None).unwrap();
         }
         game.goto_start();
-        let text = to_pgn(&game);
+        let text = to_pgn(&game, None);
         assert!(text.contains("1. e4 e5 2. Nf3 Nc6 *"), "saved text: {}", text);
         assert_eq!(game.cur_ply(), 0, "saving must not move the cursor");
     }

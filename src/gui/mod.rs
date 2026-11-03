@@ -7,12 +7,18 @@
 //! ├── theme.rs      ← dark palette and egui visuals
 //! ├── board_view.rs ← chess board: paint, click / drag, promotion modal
 //! ├── eval_panel.rs ← right panel: engine cards, eval bar, opening book
+//! ├── figurines.rs ← SAN piece letters as figurines (PV and move list)
 //! ├── pgn_panel.rs  ← bottom panel: move list and navigation
-//! └── menu_bar.rs   ← top menu bar and FEN bar
+//! ├── menu_bar.rs   ← top menu bar and FEN bar
+//! ├── options_dialog.rs ← engine options window (UCI setoption)
+//! └── time_control.rs ← clock labels above the board and the time-control dialog
 //! ```
 
 pub mod board_view;
 pub mod eval_panel;
+pub mod figurines;
 pub mod menu_bar;
+pub mod options_dialog;
 pub mod pgn_panel;
 pub mod theme;
+pub mod time_control;

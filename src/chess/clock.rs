@@ -1,10 +1,10 @@
 //! Time-control arbiter.
 //!
 //! Tracks the remaining time on both sides and applies the appropriate
-//! increment / fixed-time rules on each move. Although full integration
-//! lands in Phase 5, the data structure and helper methods are already
-//! usable so the Phase 4 menu builder can wire up a "Time Control" dialog
-//! against a real `Clock` instance.
+//! increment / fixed-time rules on each move. `app.rs` drives it in a play
+//! mode: one `tap()` per ply, `start()` and `pause()` with the game's
+//! state, and the `go` limits for engines come from [`Clock::go_control`].
+//! The time-control dialog and the clock labels live in `gui::time_control`.
 //!
 //! # Properties
 //! * Microsoft-style monophonic design — there is only ever one active
@@ -19,14 +19,17 @@
 
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 use crate::chess::PieceColor;
+use crate::engine::protocol::GoControl;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Time-control configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Time-control mode.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeMode {
     /// Single countdown per side. Reaching 0 forfeits the game.
     SuddenDeath,
@@ -38,8 +41,8 @@ pub enum TimeMode {
 }
 
 /// Configuration parameters describing a time control. Reads as a recipe;
-/// turned into a live [`Clock`] via [`TimeControl::into_clock`].
-#[derive(Copy, Clone, Debug)]
+/// turned into a live [`Clock`] with [`Clock::new`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeControl {
     pub mode: TimeMode,
     pub base_ms: u64,
@@ -83,12 +86,6 @@ impl TimeControl {
         Self::new(TimeMode::FixedPerMove, base_ms, 0)
     }
 
-    /// Convert into a live [`Clock`] starting from the beginning of the
-    /// game (white to move).
-    pub fn into_clock(self) -> Clock {
-        Clock::new(self, PieceColor::White)
-    }
-
     /// Human-readable label for the time control — used in menus and in
     /// the Phase-5 eval panel's "current game" widget.
     pub fn label(&self) -> String {
@@ -119,7 +116,7 @@ impl TimeControl {
 // Live clock
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Live game clock. Constructed via [`TimeControl::into_clock`].
+/// Live game clock. Constructed with [`Clock::new`].
 ///
 /// Cloning is intentionally fine — once a clock exists, multiple widgets
 /// (board label, eval dashboard, system tray) can hold owned copies; all
@@ -239,15 +236,8 @@ impl Clock {
         }
     }
 
-    /// `true` iff the active side has run out of time (and the clock has
-    /// not been reset since).
-    pub fn is_expired(&self) -> bool {
-        self.expired_for.is_some()
-    }
-
     /// `Some(side)` of the player whose clock has expired, `None` if the
-    /// game is still live. Equivalent to [`Self::is_expired`] but more
-    /// ergonomically named for callers building UI labels.
+    /// game is still live. Stays set until [`Clock::reset`].
     pub fn flagged(&self) -> Option<PieceColor> {
         self.expired_for
     }
@@ -257,15 +247,26 @@ impl Clock {
         self.control
     }
 
-    /// Format the remaining time of `color` as e.g. `"00:04:32"`.
-    /// Convenience for the eval panel's "clock" label.
-    pub fn remaining_label(&self, color: PieceColor) -> String {
-        let ms = self.remaining_ms(color);
-        let secs = ms / 1000;
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        let s = secs % 60;
-        format!("{:02}:{:02}:{:02}", h, m, s)
+    /// The `go` limits that tell an engine how to budget its next move from
+    /// this clock. Fixed-per-move sends its allowance as a move time; the
+    /// other modes send both remaining times and the increment.
+    pub fn go_control(&self) -> GoControl {
+        match self.control.mode {
+            TimeMode::FixedPerMove => GoControl::MoveTime(self.control.base_ms),
+            TimeMode::SuddenDeath | TimeMode::FischerIncrement => {
+                let increment = match self.control.mode {
+                    TimeMode::FischerIncrement => self.control.increment_ms,
+                    _ => 0,
+                };
+                GoControl::Clock {
+                    wtime: self.remaining_ms(PieceColor::White).max(1),
+                    btime: self.remaining_ms(PieceColor::Black).max(1),
+                    winc: increment,
+                    binc: increment,
+                    movetime: None,
+                }
+            }
+        }
     }
 
     // ── Internal ─────────────────────────────────────────────────────────
@@ -281,6 +282,22 @@ impl Clock {
                 self.expired_for = Some(self.side);
             }
         }
+    }
+}
+
+/// The clock face for `ms` milliseconds left, as en-croissant shows it:
+/// `05:00` from a minute up, `1:02:03` from an hour up, and `00:09.5` under a
+/// minute. Tenths are truncated, as on a real clock.
+pub fn format_clock(ms: u64) -> String {
+    if ms < 60_000 {
+        return format!("00:{:02}.{}", ms / 1000, (ms % 1000) / 100);
+    }
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{}:{:02}:{:02}", h, m, s)
+    } else {
+        format!("{:02}:{:02}", m, s)
     }
 }
 
@@ -310,7 +327,7 @@ mod tests {
 
     #[test]
     fn fischer_increment_adds_after_each_move() {
-        let mut clock = TimeControl::fischer(60_000, 5_000).into_clock();
+        let mut clock = Clock::new(TimeControl::fischer(60_000, 5_000), PieceColor::White);
         clock.start();
         // Simulate white playing for 2 seconds.
         std::thread::sleep(Duration::from_millis(20));
@@ -331,12 +348,12 @@ mod tests {
 
     #[test]
     fn reset_restores_initial_time() {
-        let mut clock = TimeControl::sudden_death(120_000).into_clock();
+        let mut clock = Clock::new(TimeControl::sudden_death(120_000), PieceColor::White);
         clock.start();
         clock.remaining[0] = 5_000;
         clock.reset(PieceColor::White);
         assert_eq!(clock.remaining_ms(PieceColor::White), 120_000);
-        assert!(!clock.is_expired());
+        assert_eq!(clock.flagged(), None);
     }
 
     #[test]
@@ -352,19 +369,19 @@ mod tests {
     #[test]
     fn tap_reports_side_that_flagged() {
         // 10 ms of base time, 5 s increment: White overruns on the first tap.
-        let mut clock = TimeControl::fischer(10, 5_000).into_clock();
+        let mut clock = Clock::new(TimeControl::fischer(10, 5_000), PieceColor::White);
         clock.start();
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(clock.tap(), Some(PieceColor::White));
         assert_eq!(clock.flagged(), Some(PieceColor::White));
-        assert!(clock.is_expired());
+        assert!(clock.flagged().is_some());
         // The increment must not revive a side that already flagged.
         assert_eq!(clock.remaining_ms(PieceColor::White), 0);
     }
 
     #[test]
     fn fixed_per_move_resets_clock_each_turn() {
-        let mut clock = TimeControl::fixed_per_move(1_000).into_clock();
+        let mut clock = Clock::new(TimeControl::fixed_per_move(1_000), PieceColor::White);
         clock.start();
         std::thread::sleep(Duration::from_millis(30));
         clock.tap();
@@ -378,7 +395,7 @@ mod tests {
 
     #[test]
     fn pause_then_start_does_not_double_count() {
-        let mut clock = TimeControl::fischer(60_000, 0).into_clock();
+        let mut clock = Clock::new(TimeControl::fischer(60_000, 0), PieceColor::White);
         clock.start();
         std::thread::sleep(Duration::from_millis(20));
         clock.pause();
@@ -392,5 +409,57 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         let t_after_resume = clock.remaining_ms(PieceColor::White);
         assert!(t_after_resume < t_paused, "expected timer to resume");
+    }
+
+    #[test]
+    fn clock_face_examples() {
+        assert_eq!(format_clock(300_000), "05:00");
+        assert_eq!(format_clock(59_900), "00:59.9");
+        assert_eq!(format_clock(3_600_000), "1:00:00");
+        assert_eq!(format_clock(10_000), "00:10.0");
+        assert_eq!(format_clock(9_500), "00:09.5");
+        assert_eq!(format_clock(0), "00:00.0");
+    }
+
+    #[test]
+    fn go_control_sends_both_clocks_and_the_increment() {
+        // Not started, so the remaining times are exact.
+        let clock = Clock::new(TimeControl::fischer(300_000, 3_000), PieceColor::White);
+        assert_eq!(
+            clock.go_control(),
+            GoControl::Clock {
+                wtime: 300_000,
+                btime: 300_000,
+                winc: 3_000,
+                binc: 3_000,
+                movetime: None,
+            }
+        );
+        let sudden = Clock::new(TimeControl::sudden_death(60_000), PieceColor::White);
+        assert_eq!(
+            sudden.go_control(),
+            GoControl::Clock {
+                wtime: 60_000,
+                btime: 60_000,
+                winc: 0,
+                binc: 0,
+                movetime: None,
+            }
+        );
+    }
+
+    #[test]
+    fn fixed_per_move_clock_sends_its_allowance_as_a_move_time() {
+        let clock = Clock::new(TimeControl::fixed_per_move(10_000), PieceColor::White);
+        assert_eq!(clock.go_control(), GoControl::MoveTime(10_000));
+    }
+
+    #[test]
+    fn pausing_after_the_time_ran_out_flags_that_side() {
+        let mut clock = Clock::new(TimeControl::fischer(10, 0), PieceColor::White);
+        clock.start();
+        std::thread::sleep(Duration::from_millis(30));
+        clock.pause();
+        assert_eq!(clock.flagged(), Some(PieceColor::White));
     }
 }

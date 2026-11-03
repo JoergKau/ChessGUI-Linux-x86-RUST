@@ -5,14 +5,26 @@
 //! The panel navigates the [`GameState`] cursor directly. Clicking a move
 //! moves the cursor; the board follows on the next frame.
 
-use eframe::egui::{self, Align, RichText, Ui};
+use std::sync::Arc;
 
+use eframe::egui::{self, Align, Galley, RichText, Ui, WidgetText};
+
+use crate::chess::game_state::MoveLine;
 use crate::chess::GameState;
-use crate::gui::theme;
+use crate::gui::{figurines, theme};
 
 /// Draw the move list. `follow` scrolls the current move into view; the app
-/// sets it on the frame the cursor moved.
-pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
+/// sets it on the frame the cursor moved. `lines` is the cached move list for
+/// the current history revision; `galleys[ply]` is its cached SAN layout.
+/// `figurines` draws `♘f3` instead of `Nf3` when the View setting is on.
+pub fn show(
+    ui: &mut Ui,
+    game: &mut GameState,
+    lines: &[MoveLine],
+    galleys: &[Option<Arc<Galley>>],
+    follow: bool,
+    figurines: bool,
+) {
     ui.horizontal(|ui| {
         if ui.button("|<").on_hover_text("Start of game").clicked() {
             game.goto_start();
@@ -32,7 +44,6 @@ pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
         }
     });
 
-    let lines = game.pgn_lines();
     let current = game.cur_ply();
     let mut target: Option<usize> = None;
 
@@ -41,7 +52,7 @@ pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
             ui.horizontal_wrapped(|ui| {
-                for line in &lines {
+                for line in lines {
                     // A line that starts with Black's move is numbered `N...`.
                     let number = if line.white.is_some() {
                         format!("{}.", line.number)
@@ -52,8 +63,16 @@ pub fn show(ui: &mut Ui, game: &mut GameState, follow: bool) {
                     let moves = [(&line.white, theme::WHITE_MOVE), (&line.black, theme::BLACK_MOVE)];
                     for (entry, color) in moves {
                         let Some(entry) = entry else { continue };
-                        let text = RichText::new(&entry.san).color(color);
-                        let response = ui.selectable_label(current == entry.ply, text);
+                        let response = match galleys.get(entry.ply).and_then(|g| g.as_ref()) {
+                            Some(galley) => ui.selectable_label(
+                                current == entry.ply,
+                                WidgetText::Galley(Arc::clone(galley)),
+                            ),
+                            None => ui.selectable_label(
+                                current == entry.ply,
+                                figurines::san_job(ui, &entry.san, color, figurines),
+                            ),
+                        };
                         if response.clicked() {
                             target = Some(entry.ply);
                         }

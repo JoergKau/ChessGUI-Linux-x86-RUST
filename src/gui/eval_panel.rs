@@ -5,6 +5,8 @@
 //! summary from the engine hosts and the game state. Score, number and move
 //! formatting are pure functions with unit tests.
 
+use std::sync::Arc;
+
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
 
 use crate::app::StatusLevel;
@@ -12,8 +14,12 @@ use crate::engine::{AnalysisStatus, EngineView, Score};
 use crate::gui::menu_bar::MenuAction;
 use crate::gui::theme;
 
-/// Height of the principal-variation box: about three lines of text.
-const PV_MAX_HEIGHT: f32 = 72.0;
+/// Number of lines of principal variation shown. Both engine cards use it, so
+/// their PV areas are the same height; the rest is cut off with "…".
+const PV_LINES: usize = 2;
+
+/// Space between the two engine cards, so their evaluations read separately.
+const CARD_GAP: f32 = 32.0;
 
 /// Narrowest the right panel may be. At this width one header line still fits:
 /// toggle, engine name, speed pill, and the EVAL, DEPTH and NODES block.
@@ -38,9 +44,12 @@ pub struct EvalCard {
     /// Engine snapshot; `None` when the slot is empty.
     pub view: Option<EngineView>,
     /// Principal variation in SAN, relative to the displayed position.
-    pub pv_san: Vec<String>,
+    pub pv_san: Arc<Vec<String>>,
     /// Whether analysis is switched on for this slot (the card's toggle).
     pub running: bool,
+    /// Whether the toggle can act on this engine. A loaded engine that does not
+    /// play in the current game is shown, but its toggle is disabled.
+    pub toggle_enabled: bool,
 }
 
 impl EvalCard {
@@ -67,6 +76,10 @@ pub struct EvalSummary {
     pub book_moves: Vec<(String, u16)>,
     /// Name of the loaded opening book, if any.
     pub book_name: Option<String>,
+    /// Whether engines answer with book moves in games (Game → Book moves in games).
+    pub book_in_games: bool,
+    /// Whether piece letters in the PV are drawn as figurines.
+    pub figurines: bool,
     /// Last status message of the application.
     pub status: String,
     /// Severity of the status message.
@@ -83,13 +96,17 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     ui.add_space(6.0);
 
     for card in &summary.cards {
-        if let Some(action) = engine_card(ui, card, summary.white_to_move, summary.fullmove) {
+        if let Some(action) = engine_card(ui, card, summary.white_to_move, summary.fullmove, summary.figurines) {
             requested = Some(action);
         }
-        ui.add_space(6.0);
+        ui.add_space(CARD_GAP);
     }
 
-    book_box(ui, summary);
+    // The book box belongs to book play. With Game → Book moves in games
+    // switched off it is not shown at all (round 10).
+    if summary.book_in_games {
+        book_box(ui, summary);
+    }
 
     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
         let color = match summary.status_level {
@@ -107,7 +124,7 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
 /// One engine card: a header row (toggle, name, speed, metrics), a blue rule,
 /// and the score badge with the principal variation. Returns a menu action
 /// when the toggle or the "Load engine" button is pressed.
-fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32) -> Option<MenuAction> {
+fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32, figurines: bool) -> Option<MenuAction> {
     let mut action = None;
     let live = card.is_live();
     let letter = slot_letter(card.slot);
@@ -118,7 +135,13 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if toggle_button(ui, card.running, live) {
+                let toggle_enabled = live && card.toggle_enabled;
+                let disabled_hint = if live {
+                    "This engine is not playing in this game"
+                } else {
+                    "Load an engine first"
+                };
+                if toggle_button(ui, card.running, toggle_enabled, disabled_hint) {
                     action = Some(MenuAction::ToggleEngine(card.slot));
                 }
                 match card.view.as_ref().filter(|_| live) {
@@ -179,15 +202,11 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32)
 
             let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
             let badge = white_score.map_or_else(|| "--".to_string(), format_score_white);
-            let tokens = number_pv(fullmove, white_to_move, &card.pv_san);
+            let tokens = number_pv(fullmove, white_to_move, card.pv_san.as_slice());
             ui.horizontal_top(|ui| {
                 score_badge(ui, &badge);
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .id_salt(("pv", card.slot))
-                    .max_height(PV_MAX_HEIGHT)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| pv_flow(ui, &tokens));
+                pv_flow(ui, &tokens, figurines);
             });
         });
     action
@@ -224,8 +243,8 @@ fn speed_pill(ui: &mut Ui, view: &EngineView) {
 
 /// Round play/pause button drawn with the painter. Pause while the engine is
 /// running, play while it is stopped. Returns `true` when clicked; a disabled
-/// button (no live engine) never reports a click.
-fn toggle_button(ui: &mut Ui, running: bool, enabled: bool) -> bool {
+/// button never reports a click, and its tooltip gives `disabled_hint`.
+fn toggle_button(ui: &mut Ui, running: bool, enabled: bool, disabled_hint: &str) -> bool {
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), sense);
     let (fill, ink) = match (enabled, running) {
@@ -250,7 +269,7 @@ fn toggle_button(ui: &mut Ui, running: bool, enabled: bool) -> bool {
         painter.add(Shape::convex_polygon(points, ink, Stroke::NONE));
     }
     let hover = if !enabled {
-        "Load an engine first"
+        disabled_hint
     } else if running {
         "Stop this engine's analysis"
     } else {
@@ -305,25 +324,52 @@ fn score_badge(ui: &mut Ui, text: &str) {
         });
 }
 
-/// The principal variation as a wrapping flow. Move numbers are muted, moves bold.
-fn pv_flow(ui: &mut Ui, tokens: &[String]) {
+/// The principal variation as wrapped text: move numbers are muted, moves use
+/// the text colour. At most [`PV_LINES`] lines are shown; the rest is replaced
+/// by "…", and the full line is available as a tooltip.
+fn pv_flow(ui: &mut Ui, tokens: &[String], figurines: bool) {
     if tokens.is_empty() {
         ui.label(RichText::new("PV: --").color(theme::MUTED).small());
         return;
     }
-    ui.horizontal_wrapped(|ui| {
-        for token in tokens {
-            let text = if token.ends_with('.') {
-                RichText::new(token).color(theme::MUTED)
-            } else {
-                RichText::new(token).strong()
-            };
-            ui.label(text);
+    let job = pv_job(ui, tokens, figurines);
+    // Paint the laid-out galley directly: `Label` would replace the wrap
+    // settings (and with them the two-line limit) with its own.
+    let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
+    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    ui.painter().galley(rect.min, galley, theme::TEXT);
+    response.on_hover_text(tokens.join(" "));
+}
+
+/// Lay the PV out as one wrapped text job, truncated after [`PV_LINES`] rows.
+/// Piece letters use figurines when the setting is on.
+fn pv_job(ui: &Ui, tokens: &[String], figurines: bool) -> egui::text::LayoutJob {
+    let body = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    job.wrap.max_rows = PV_LINES;
+    job.wrap.overflow_character = Some('…');
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            job.append(" ", 0.0, egui::TextFormat::simple(body.clone(), theme::MUTED));
         }
-    });
+        if token.ends_with('.') {
+            job.append(token, 0.0, egui::TextFormat::simple(body.clone(), theme::MUTED));
+            continue;
+        }
+        crate::gui::figurines::append_san(&mut job, token, &body, theme::TEXT, figurines);
+    }
+    job
 }
 
 /// Opening-book box: the heaviest book moves with their share of the weight.
+/// Drawn only while book moves in games are on; otherwise it is not shown.
 fn book_box(ui: &mut Ui, summary: &EvalSummary) {
     egui::Frame::new()
         .fill(theme::CARD_BG)
@@ -505,6 +551,22 @@ mod tests {
             number_pv(3, false, &sans(&["Nf6", "O-O", "Nxe4", "d4"])),
             sans(&["3...", "Nf6", "4.", "O-O", "Nxe4", "5.", "d4"])
         );
+    }
+
+    #[test]
+    fn a_long_pv_is_elided_after_two_lines() {
+        let mut rows = 0;
+        let mut elided = false;
+        egui::__run_test_ui(|ui| {
+            ui.set_width(120.0);
+            let words: Vec<String> = (1..=40).map(|i| format!("Nf{}", i % 8)).collect();
+            let tokens = number_pv(1, true, &words);
+            let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(pv_job(ui, &tokens, false)));
+            rows = galley.rows.len();
+            elided = galley.elided;
+        });
+        assert_eq!(rows, PV_LINES, "the PV stops after two lines");
+        assert!(elided, "the rest of the PV is replaced by an ellipsis");
     }
 
     #[test]

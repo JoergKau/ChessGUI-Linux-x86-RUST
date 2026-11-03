@@ -7,6 +7,7 @@
 //! │                       (SAN, FEN, history, navigation, promotion, UCI→SAN)
 //! ├── opening_book.rs   ← PolyGlot .bin reader with binary search
 //! ├── pgn.rs            ← PGN writer and mainline reader
+//! ├── players.rs        ← game modes and the seat (human or engine) of each colour
 //! └── clock.rs          ← live game clock (Phase 6 arbiter)
 //! ```
 //!
@@ -16,11 +17,9 @@
 pub mod game_state;
 pub mod opening_book;
 pub mod pgn;
+pub mod players;
 
-/// Time-control clock. The Phase-6 game-loop arbiter is its first consumer;
-/// until that lands its API has no callers, so dead-code lints are allowed
-/// for this module only.
-#[allow(dead_code)]
+/// Time-control clock, driven by the game loop in `app.rs` (Phase 6).
 pub mod clock;
 
 pub use game_state::{GameState, PieceColor, PieceKind};
