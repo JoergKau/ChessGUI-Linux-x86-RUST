@@ -67,6 +67,9 @@ arboard = { version = "3.4", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# ── Process signals for engine process groups (registry, stall kills) ───────
+libc = "0.2"
+
 # ── Diagnostic logging ───────────────────────────────────────────────────────
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
@@ -85,5 +88,7 @@ incremental = true
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Unwinding (the default) runs `Drop` on a panic, so the engine handles are
+# dropped and their processes are killed. With "abort" nothing runs, and the
+# engines are left behind (see BUG-7-09).
 strip = "symbols"

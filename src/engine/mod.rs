@@ -27,6 +27,7 @@
 pub mod analysis;
 pub mod host;
 pub mod protocol;
+pub mod registry;
 pub mod uci_parser;
 pub mod watchdog;
 
@@ -128,15 +129,22 @@ impl EngineProcess {
     async fn spawn_inner(binary: &Path, wake: Option<EngineWake>) -> Result<Self, EngineError> {
         check_executable(binary)?;
         let mut cmd = Command::new(binary);
+        // The engine leads its own process group, so a kill also reaches any
+        // helper process it started (see `registry::kill_group`).
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .kill_on_drop(true);
 
         let mut child = cmd.spawn().map_err(|source| EngineError::SpawnFailed {
             binary: Some(binary.to_path_buf()),
             source,
         })?;
+        let pid = child.id().unwrap_or(0);
+        if pid != 0 {
+            registry::register(pid, binary);
+        }
 
         let stdin = child.stdin.take().ok_or(EngineError::Io {
             source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "missing stdin pipe"),
@@ -193,7 +201,7 @@ impl EngineProcess {
         let supervisor_exited = Arc::clone(&exited);
         let supervisor_binary = binary.to_path_buf();
         tokio::spawn(async move {
-            run_supervisor(child, &mut kill_rx, supervisor_exited, supervisor_binary).await;
+            run_supervisor(child, pid, &mut kill_rx, supervisor_exited, supervisor_binary).await;
         });
 
         Ok(Self {
@@ -422,17 +430,27 @@ async fn run_stderr(stderr: tokio::process::ChildStderr, binary: PathBuf) {
 /// the supervisor then ensures the child is dead before returning.
 async fn run_supervisor(
     mut child: tokio::process::Child,
+    pid: u32,
     kill_rx: &mut mpsc::Receiver<()>,
     exited: Arc<AtomicBool>,
     binary: PathBuf,
 ) {
     let status = tokio::select! {
         _ = kill_rx.recv() => {
+            // Kill the whole group, so helper processes go too.
+            if pid != 0 {
+                registry::kill_group(pid);
+            }
             let _ = child.kill().await;
             child.wait().await.ok()
         }
         status = child.wait() => status.ok(),
     };
+    // The engine may have left helpers behind after a normal quit.
+    if pid != 0 {
+        registry::kill_group(pid);
+        registry::unregister(pid);
+    }
     match status {
         Some(status) if status.success() => {
             log::info!("{} exited ({status})", binary.display());
@@ -720,5 +738,42 @@ mod tests {
         );
 
         engine.terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn helper_processes_are_stopped_with_their_engine() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The engine starts a helper, records its PID, and quits on `quit`
+        // while the helper is still running.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("helper.pid");
+        let script = dir.path().join("helper-engine.sh");
+        let body = format!(
+            "#!/bin/sh\nsleep 4343 &\necho $! > '{}'\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Helper'; echo uciok;;\n    quit) exit 0;;\n  esac\ndone\n",
+            pidfile.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let engine = EngineProcess::spawn(&script).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !pidfile.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let helper: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        assert!(unsafe { libc::kill(helper, 0) } == 0, "the helper must be running before the quit");
+
+        engine.terminate().await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !engine.has_exited() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = unsafe { libc::kill(helper, 0) } == 0;
+        if alive {
+            registry::kill_group(helper as u32);
+        }
+        assert!(!alive, "the helper process must not outlive its engine");
     }
 }

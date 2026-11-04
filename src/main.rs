@@ -77,6 +77,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(err) = settings_error {
         log::warn!("{err}");
     }
+    if let Some(folder) = settings_file.as_deref().and_then(|path| path.parent()) {
+        engine::registry::configure(folder.join("engines.txt"));
+        for message in engine::registry::sweep_configured() {
+            log::warn!("{message}");
+        }
+    }
     if let Some(path) = &log_file {
         if logging::file_enabled() {
             log::info!("session log: {}", path.display());
