@@ -37,7 +37,7 @@ use crate::gui::tournament_dialog::{
 };
 use crate::settings::{self, Settings, SettingsError};
 use crate::gui::time_control::{self, ClockFace, DialogOutcome, PlayerBar, TimeControlDialog};
-use crate::gui::{about, pgn_panel, theme};
+use crate::gui::{pgn_panel, theme};
 use crate::tournament::{
     self, book_kind, find_book_path, game_headers, schedule_games, score_label, Adjudication,
     Adjudicator, BookKind, CurrentGame, EngineSpec, EpdBook, ScheduledGame, TournamentBook,
@@ -570,8 +570,6 @@ pub struct SiliconBoardApp {
     pgn_browser_window_open: bool,
     /// Whether the tournament window is visible.
     tournament_window_open: bool,
-    /// Whether the About window is open.
-    about_open: bool,
     /// Whether the small result pop-up should be shown.
     tournament_finished_popup: bool,
 }
@@ -694,7 +692,6 @@ impl SiliconBoardApp {
             pgn_players: None,
             pgn_browser_window_open: false,
             tournament_window_open: false,
-            about_open: false,
             tournament_finished_popup: false,
         }
     }
@@ -1324,7 +1321,6 @@ impl SiliconBoardApp {
                 self.tournament_finished_popup = false;
             }
             MenuAction::ToggleSessionLog => self.toggle_session_log(),
-            MenuAction::About => self.about_open = true,
         }
     }
 
@@ -3710,10 +3706,6 @@ impl eframe::App for SiliconBoardApp {
                 Some(ProgressAction::None) => {}
                 None => self.tournament_window_open = false,
             }
-        }
-
-        if self.about_open {
-            about::show(&ctx, &mut self.about_open);
         }
 
         if self.tournament_finished_popup {
