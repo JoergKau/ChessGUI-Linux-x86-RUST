@@ -19,7 +19,8 @@ MD-Viewer-style toolbar across the top.
 - **Opening book:** PolyGlot (`.bin`) books are loaded on demand —
   Engine → Load PolyGlot book…, and the choice is remembered for the next
   start-up; no book is loaded by default. Weighted-random book replies in
-  games are switchable. The book box labels the current opening by name
+  games are switchable — the switch starts off until a book is loaded.
+  The book box labels the current opening by name
   (ECO table) and keeps the last known name after the line leaves the book.
 - **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
   (Game → Claim draw (threefold)), with the result written to the PGN.
