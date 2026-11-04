@@ -36,6 +36,7 @@ pub use host::{EngineHost, EngineView};
 pub use protocol::{EngineCommand, EngineError, EngineEvent, Score};
 
 use uci_parser::{parse_line, HandshakeAccumulator, UciParseError};
+use protocol::EngineStats;
 use watchdog::{Timing, Watchdog, WatchdogAction};
 
 use std::path::{Path, PathBuf};
@@ -89,6 +90,39 @@ pub struct EngineProcess {
     /// in it as lines arrive, and the monitor task checks it on its own clock,
     /// so a hidden window cannot stop the checks (BUG-7-07).
     watchdog: Arc<Mutex<Watchdog>>,
+    /// The pending principal `info` statistics (see [`InfoSlot`]).
+    info: InfoSlot,
+}
+
+/// What the reader shares with the rest of the engine: the deadlines and the
+/// pending `info` statistics.
+struct ReaderShared {
+    /// The deadlines, updated for every sign of life.
+    watchdog: Arc<Mutex<Watchdog>>,
+    /// Where merged `info` statistics are left for the host.
+    info: InfoSlot,
+}
+
+/// Principal `info` statistics waiting for the host, merged in arrival order.
+/// Only one entry is kept, so a fast engine cannot grow the queue (BUG-7-17).
+pub type InfoSlot = Arc<Mutex<Option<EngineStats>>>;
+
+/// `true` for an `info` line of a MultiPV line other than the first. The UI
+/// never shows those lines, so they are not parsed (BUG-7-18).
+fn is_secondary_info(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("info ") else {
+        return false;
+    };
+    let mut tokens = rest.split_ascii_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "multipv" {
+            return tokens
+                .next()
+                .and_then(|number| number.parse::<u32>().ok())
+                .is_some_and(|number| number > 1);
+        }
+    }
+    false
 }
 
 /// One event from the engine, already trimmed and reduced.
@@ -174,6 +208,7 @@ impl EngineProcess {
         let (line_tx, line_rx) = mpsc::unbounded_channel::<ParsedUciLine>();
         let exited = Arc::new(AtomicBool::new(false));
         let watchdog = Arc::new(Mutex::new(Watchdog::default()));
+        let info: InfoSlot = Arc::new(Mutex::new(None));
 
         // ── Writer task ──
         tokio::spawn(async move {
@@ -186,6 +221,7 @@ impl EngineProcess {
         let reader_binary = binary.to_path_buf();
         let reader_watchdog = Arc::clone(&watchdog);
         let reader_wake = wake.clone();
+        let reader_info = Arc::clone(&info);
         tokio::spawn(async move {
             run_reader(
                 stdout,
@@ -194,7 +230,10 @@ impl EngineProcess {
                 reader_exited,
                 reader_binary,
                 reader_wake,
-                reader_watchdog,
+                ReaderShared {
+                    watchdog: reader_watchdog,
+                    info: reader_info,
+                },
             )
             .await;
         });
@@ -235,7 +274,13 @@ impl EngineProcess {
             binary: binary.to_path_buf(),
             exited,
             watchdog,
+            info,
         })
+    }
+
+    /// The pending principal `info` statistics, merged since the host last took them.
+    pub fn info_slot(&self) -> InfoSlot {
+        Arc::clone(&self.info)
     }
 
     /// The deadlines of this engine's search, shared with the reader and the monitor.
@@ -369,8 +414,9 @@ async fn run_reader(
     exited: Arc<AtomicBool>,
     binary: PathBuf,
     wake: Option<EngineWake>,
-    watchdog: Arc<Mutex<Watchdog>>,
+    shared: ReaderShared,
 ) {
+    let ReaderShared { watchdog, info } = shared;
     let mut reader = BufReader::new(stdout);
     let mut raw: Vec<u8> = Vec::new();
     let mut acc = HandshakeAccumulator::new();
@@ -383,7 +429,7 @@ async fn run_reader(
                 // rather than treating the whole engine as dead.
                 let text = String::from_utf8_lossy(&raw);
                 let trimmed = text.trim_end_matches(['\r', '\n']);
-                if trimmed.is_empty() {
+                if trimmed.is_empty() || is_secondary_info(trimmed) {
                     continue;
                 }
                 log::trace!("{} -> {}", binary.display(), trimmed);
@@ -427,7 +473,24 @@ async fn run_reader(
                 if events.receiver_count() > 0 {
                     let _ = events.send(message.clone());
                 }
-                let _ = lines.send(message);
+                match message {
+                    ParsedUciLine::Event(EngineEvent::Info(stats)) => {
+                        // `info` lines are merged into one pending entry, which
+                        // the host takes before its queue. A search that prints
+                        // faster than the window draws no longer piles up
+                        // (BUG-7-17). Merging is what the host would do anyway.
+                        let mut pending = info
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        match pending.as_mut() {
+                            Some(entry) => entry.merge(&stats),
+                            None => *pending = Some(stats),
+                        }
+                    }
+                    other => {
+                        let _ = lines.send(other);
+                    }
+                }
                 if let Some(wake) = &wake {
                     wake(important);
                 }
@@ -924,5 +987,13 @@ mod tests {
             registry::kill_group(helper as u32);
         }
         assert!(!alive, "the helper process must not outlive its engine");
+    }
+
+    #[test]
+    fn only_secondary_multipv_info_lines_are_skipped() {
+        assert!(is_secondary_info("info depth 9 multipv 2 score cp -12 pv e2e4"));
+        assert!(!is_secondary_info("info depth 9 multipv 1 score cp 12 pv e2e4"));
+        assert!(!is_secondary_info("info depth 9 score cp 12 pv e2e4"), "no MultiPV means line 1");
+        assert!(!is_secondary_info("bestmove multipv 2"), "only `info` lines are considered");
     }
 }
