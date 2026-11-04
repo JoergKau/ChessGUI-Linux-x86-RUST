@@ -36,8 +36,10 @@ pub use host::{EngineHost, EngineView};
 pub use protocol::{EngineCommand, EngineError, EngineEvent, Score};
 
 use uci_parser::{parse_line, HandshakeAccumulator, UciParseError};
+use watchdog::{Timing, Watchdog, WatchdogAction};
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +85,10 @@ pub struct EngineProcess {
     /// Sticky flag set once the engine's output ends. Unlike a broadcast
     /// event it is still visible to a subscriber that attaches late.
     exited: Arc<AtomicBool>,
+    /// The deadlines of the running search. The reader records signs of life
+    /// in it as lines arrive, and the monitor task checks it on its own clock,
+    /// so a hidden window cannot stop the checks (BUG-7-07).
+    watchdog: Arc<Mutex<Watchdog>>,
 }
 
 /// One event from the engine, already trimmed and reduced.
@@ -167,6 +173,7 @@ impl EngineProcess {
         let (events, _) = broadcast::channel::<ParsedUciLine>(BROADCAST_BUFFER);
         let (line_tx, line_rx) = mpsc::unbounded_channel::<ParsedUciLine>();
         let exited = Arc::new(AtomicBool::new(false));
+        let watchdog = Arc::new(Mutex::new(Watchdog::default()));
 
         // ── Writer task ──
         tokio::spawn(async move {
@@ -177,6 +184,8 @@ impl EngineProcess {
         let events_for_reader = events.clone();
         let reader_exited = Arc::clone(&exited);
         let reader_binary = binary.to_path_buf();
+        let reader_watchdog = Arc::clone(&watchdog);
+        let reader_wake = wake.clone();
         tokio::spawn(async move {
             run_reader(
                 stdout,
@@ -184,9 +193,23 @@ impl EngineProcess {
                 line_tx,
                 reader_exited,
                 reader_binary,
-                wake,
+                reader_wake,
+                reader_watchdog,
             )
             .await;
+        });
+
+        // ── Monitor task ──
+        let monitor = Monitor {
+            watchdog: Arc::clone(&watchdog),
+            commands: cmd_tx.clone(),
+            kill: kill_tx.clone(),
+            exited: Arc::clone(&exited),
+            wake,
+            binary: binary.to_path_buf(),
+        };
+        tokio::spawn(async move {
+            run_monitor(monitor).await;
         });
 
         // ── Stderr task ──
@@ -211,7 +234,21 @@ impl EngineProcess {
             event_rx: Arc::new(Mutex::new(Some(line_rx))),
             binary: binary.to_path_buf(),
             exited,
+            watchdog,
         })
+    }
+
+    /// The deadlines of this engine's search, shared with the reader and the monitor.
+    pub fn watchdog(&self) -> Arc<Mutex<Watchdog>> {
+        Arc::clone(&self.watchdog)
+    }
+
+    /// Use `timing` for this engine's deadlines from now on.
+    pub fn set_timing(&self, timing: Timing) {
+        self.watchdog
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_timing(timing);
     }
 
     /// Take the lossless event stream once, when the UI host attaches.
@@ -331,6 +368,7 @@ async fn run_reader(
     exited: Arc<AtomicBool>,
     binary: PathBuf,
     wake: Option<EngineWake>,
+    watchdog: Arc<Mutex<Watchdog>>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut raw: Vec<u8> = Vec::new();
@@ -372,6 +410,9 @@ async fn run_reader(
                         }
                     }
                 };
+                if let ParsedUciLine::Event(event) = &message {
+                    observe_line(&watchdog, &binary, event);
+                }
                 // Ignore the SendError when no listeners exist (tests
                 // that don't subscribe).
                 let important = !matches!(
@@ -400,6 +441,109 @@ async fn run_reader(
     let _ = events.send(terminated);
     if let Some(wake) = &wake {
         wake(true);
+    }
+}
+
+/// Record one engine event in the watchdog. Only real signs of life count:
+/// `readyok`, `uciok`, `bestmove`, and `info` lines with a depth or a node count.
+/// Noise does not (BUG-7-04). Replies are logged at debug with their timing.
+fn observe_line(watchdog: &Mutex<Watchdog>, binary: &Path, event: &EngineEvent) {
+    let now = std::time::Instant::now();
+    let mut watch = watchdog.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match event {
+        EngineEvent::ReadyOk => {
+            log::debug!("{} -> readyok", binary.display());
+            watch.answered();
+            watch.note_output(now);
+        }
+        EngineEvent::UciOk { .. } => {
+            log::debug!("{} -> uciok", binary.display());
+            watch.note_output(now);
+        }
+        EngineEvent::Info(stats) if stats.depth.is_some() || stats.nodes.is_some() => {
+            watch.note_progress(now);
+        }
+        EngineEvent::BestMove { best_move, .. } => {
+            let since = match (watch.stop_age(now), watch.search_age(now)) {
+                (Some(stop), _) => format!("{:.2} s after stop", stop.as_secs_f64()),
+                (None, Some(search)) => format!("{:.2} s after go", search.as_secs_f64()),
+                (None, None) => "no search running".to_string(),
+            };
+            log::debug!(
+                "{} -> bestmove {} ({})",
+                binary.display(),
+                best_move.as_deref().unwrap_or("(none)"),
+                since
+            );
+            watch.search_finished();
+            watch.note_output(now);
+        }
+        _ => {}
+    }
+}
+
+/// How often the monitor checks the deadlines of a running search.
+const MONITOR_TICK: Duration = Duration::from_millis(250);
+
+/// What the monitor task needs from its engine.
+struct Monitor {
+    /// The deadlines, shared with the host and the reader.
+    watchdog: Arc<Mutex<Watchdog>>,
+    /// Commands to the writer, for the pings.
+    commands: mpsc::Sender<EngineCommand>,
+    /// Kill signal for the supervisor, for a stalled engine.
+    kill: mpsc::Sender<()>,
+    /// Set when the engine's output ends; the monitor then stops.
+    exited: Arc<AtomicBool>,
+    /// Wakes the window when the engine is declared stalled.
+    wake: Option<EngineWake>,
+    /// The engine's file, for the log.
+    binary: PathBuf,
+}
+
+/// Monitor task: checks the search deadlines and pings the engine, on its own
+/// clock, so the checks run even while the window is hidden (BUG-7-07). A
+/// stalled engine is killed here; the host sees the stall through the shared
+/// watchdog and restarts it.
+async fn run_monitor(monitor: Monitor) {
+    let mut tick = tokio::time::interval(MONITOR_TICK);
+    while !monitor.exited.load(Ordering::Acquire) {
+        tick.tick().await;
+        let action = {
+            let mut watch = monitor
+                .watchdog
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let action = watch.check(std::time::Instant::now());
+            if let WatchdogAction::Stalled(reason) = action {
+                let now = std::time::Instant::now();
+                log::warn!(
+                    "{} stalled: {} (search {} s old, stop {} s old)",
+                    monitor.binary.display(),
+                    reason,
+                    watch.search_age(now).map_or(0.0, |age| age.as_secs_f64()),
+                    watch
+                        .stop_age(now)
+                        .map_or_else(|| "none".to_string(), |age| format!("{:.1}", age.as_secs_f64()))
+                );
+            }
+            action
+        };
+        match action {
+            WatchdogAction::Nothing => {}
+            WatchdogAction::Ping => {
+                let _ = monitor.commands.try_send(EngineCommand::IsReady);
+            }
+            WatchdogAction::Stalled(_) => {
+                // The kill makes the supervisor stop the group; the host
+                // restarts the engine on its next frame.
+                let _ = monitor.kill.try_send(());
+                if let Some(wake) = &monitor.wake {
+                    wake(true);
+                }
+                return;
+            }
+        }
     }
 }
 
