@@ -18,7 +18,9 @@
 #
 # With `--install` (or `-i`), the freshly signed bundle is also copied into
 # /Applications (replacing an existing SiliconBoard.app), so the daily-use
-# app is the one just built. Without the flag nothing is installed.
+# app is the one just built; the repo copy is then removed and its Launch
+# Services entry unregistered, so only /Applications ever shows the app.
+# Without the flag nothing is installed.
 #
 # The .app is a build artefact; it is listed in .gitignore.
 
@@ -95,7 +97,13 @@ if [[ "$install_flag" == "--install" || "$install_flag" == "-i" ]]; then
     print "▶ Installing into /Applications"
     rm -rf /Applications/"$APP"
     if ditto "$REPO_ROOT/$APP" /Applications/"$APP"; then
-        print "  ✓ /Applications/$APP"
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+            -u "$REPO_ROOT/$APP" 2>/dev/null || true
+        # One live copy only: after the install the repo bundle (a build
+        # artefact) is removed, so Launch Services cannot end up showing two
+        # app entries — one pointing into the dev folder.
+        rm -rf "$REPO_ROOT/$APP"
+        print "  ✓ /Applications/$APP (the repo copy was removed; the app lives in /Applications)"
     else
         print -u2 "  Could not write to /Applications (permissions?). Drag $APP there by hand, or run the install step with sudo."
     fi
