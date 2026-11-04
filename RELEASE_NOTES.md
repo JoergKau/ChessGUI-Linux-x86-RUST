@@ -59,13 +59,15 @@ MD-Viewer-style toolbar across the top.
   `bestmove` within 3 s of `stop`; a move ends within its time plus 3 s; an
   analysis shows progress (a new depth or node count) within 60 s. Only real
   replies and progress count as signs of life, so noise does not keep a stuck
-  engine alive. The status line gives the reason for a stall. A second failure
-  within 60 s leaves the engine offline to avoid loops; in a match, that stops
-  the match. The
+  engine alive. The status line gives the reason for a stall. The deadlines are
+  checked by the engine's own monitor task, so they run while the window is
+  hidden. A slot may restart three times in ten minutes; after that the engine
+  stays offline, and in a match that stops the match. The
   Engine A/B options window is a grouped settings page: engine header, dashed
   sections, labeled fields in two columns, and a Default button that resets
   every option.
-- **Diagnostics:** one `logs/siliconboard.log` per run, truncated at start-up.
+- **Diagnostics:** one session log per run in `~/Library/Logs/SiliconBoard/`;
+  the newest five are kept.
   It records lifecycle messages, UCI commands, engine replies (`readyok`,
   `bestmove` with its timing), engine stderr, process exit status and the reason
   for any stall, which is what is needed to diagnose an engine that goes offline.
@@ -73,7 +75,13 @@ MD-Viewer-style toolbar across the top.
   between launches). Idle engines are no longer pinged, so a finished match
   leaves the log and the CPU alone.
 - **Settings:** time control, book play, engine option values, window size and
-  panel sizes survive a restart.
+  panel sizes survive a restart. The settings file is replaced atomically, so a
+  crash during a save keeps the previous settings.
+- **Process cleanup:** every engine runs in its own process group, and a stop,
+  stall or exit ends the whole group, helpers included. Engines left running by
+  a crash or a forced quit are stopped at the next start.
+- **Warnings:** setting Threads whose total over both engines exceeds the core
+  count, or MultiPV above 1, shows a warning; the value is still applied.
 - **Performance:** engine output wakes the window directly, coalesced to about
   30 fps; an idle loaded engine causes no redraws. The board paint measures
   8–11 µs, and a live run with two Stockfish 19 instances (2.6–2.9 M NPS
