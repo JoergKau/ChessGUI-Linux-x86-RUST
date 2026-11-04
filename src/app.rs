@@ -3508,7 +3508,6 @@ impl eframe::App for SiliconBoardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let menu_state = MenuState {
-            engine_loaded: [self.engines[0].is_some(), self.engines[1].is_some()],
             mode: self.mode,
             book_in_games: self.book_in_games,
             session_log: self.settings.session_log,
