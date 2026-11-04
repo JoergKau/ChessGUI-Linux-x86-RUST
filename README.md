@@ -26,8 +26,28 @@ The full list of features, planned items and backlog lives in
 
 - macOS on Apple Silicon (other platforms are out of scope for now)
 - Rust 2021 edition (`cargo`)
-- At least one **UCI engine** (e.g. Stockfish) — choose it via
-  *Engine → Load engine A/B…*; no engine is bundled
+- At least one **UCI engine** of your choice — SiliconBoard ships none; see
+  the next section to install one
+
+## Loading a UCI engine (example: Stockfish)
+
+No engine is distributed with SiliconBoard: *Engine → Load engine A…* and
+*Load engine B…* always open the native file picker, and whichever engine
+the user points them at fills the slot (loading into an occupied slot
+replaces it). The chosen file is checked before it starts — a launcher
+script must name an existing interpreter, and a non-program or a non-UCI
+binary is refused with the reason. Each engine keeps its own option values,
+which are sent again after a restart and restored at the next launch.
+
+Installing the free Stockfish:
+
+1. Download from <https://stockfishchess.org/download/> (the macOS build).
+2. Unpack the file; the UCI binary inside is
+   `stockfish-macos-universal`.
+3. In the GUI, *Engine → Load engine A…* and point it at that binary.
+
+The process is the same for any other UCI engine: unpack it and point the
+menu at its executable.
 
 ## Building and running
 

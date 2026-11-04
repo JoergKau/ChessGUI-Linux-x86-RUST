@@ -77,8 +77,6 @@ pub enum MenuAction {
 /// Read-only facts the menu needs to draw its labels.
 #[derive(Clone, Debug)]
 pub struct MenuState<'a> {
-    /// Whether each engine slot holds a running (or starting) engine.
-    pub engine_loaded: [bool; 2],
     /// The mode the session is in; its menu entry is marked.
     pub mode: GameMode,
     /// Whether engines play opening-book moves in games.
@@ -262,12 +260,9 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         ui.menu_button("Engine", |ui| {
             for slot in 0..2 {
                 let letter = char::from(b'A' + slot as u8);
-                let label = if state.engine_loaded[slot] {
-                    format!("Replace engine {}…", letter)
-                } else {
-                    format!("Load engine {}…", letter)
-                };
-                if ui.button(label).clicked() {
+                // The item always reads "Load engine X…"; picking a file while
+                // an engine is loaded replaces it in the same slot.
+                if ui.button(format!("Load engine {}…", letter)).clicked() {
                     action = Some(MenuAction::LoadEngine(slot));
                     ui.close();
                 }
