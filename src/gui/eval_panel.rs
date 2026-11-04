@@ -342,7 +342,10 @@ fn pv_flow(ui: &mut Ui, tokens: &[String], figurines: bool) {
     let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
     ui.painter().galley(rect.min, galley, theme::TEXT);
-    response.on_hover_text(tokens.join(" "));
+    // Built only when the card is hovered, not on every frame.
+    response.on_hover_ui(|ui| {
+        ui.label(tokens.join(" "));
+    });
 }
 
 /// Lay the PV out as one wrapped text job, truncated after [`PV_LINES`] rows.

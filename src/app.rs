@@ -44,8 +44,10 @@ use crate::tournament::{
 };
 use shakmaty::Move;
 
-/// How long engines get to quit on their own at app exit before they are killed.
-const EXIT_GRACE: Duration = Duration::from_millis(600);
+/// How long the app waits at exit for engines to quit before it leaves. The
+/// quit path kills an engine that has not gone after 500 ms, so the wait
+/// ends at the latest soon after that.
+const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// Time an engine thinks for each move in a game without a clock.
 const ENGINE_MOVE_MS: u64 = 1_000;
@@ -715,7 +717,7 @@ impl SiliconBoardApp {
         // loaded engine costs no frames.
         let engine_tick_needed = self.engines.iter().flatten().any(|host| {
             matches!(
-                host.view().status,
+                host.status(),
                 AnalysisStatus::Starting | AnalysisStatus::Thinking
             )
         });
@@ -748,7 +750,7 @@ impl SiliconBoardApp {
         self.engines
             .iter()
             .flatten()
-            .filter(|host| host.view().status == AnalysisStatus::Thinking)
+            .filter(|host| host.status() == AnalysisStatus::Thinking)
             .count()
     }
 
@@ -829,7 +831,7 @@ impl SiliconBoardApp {
             let letter = slot_letter(slot);
             let timed_out = self.engine_started[slot].is_some_and(|t| t.elapsed() > HANDSHAKE_TIMEOUT);
             let failure = match self.engines[slot].as_mut() {
-                Some(host) if host.view().status == AnalysisStatus::Starting => {
+                Some(host) if host.status() == AnalysisStatus::Starting => {
                     let reason = if host.has_exited() {
                         Some("it exited before answering `uci`")
                     } else if timed_out {
@@ -1657,6 +1659,9 @@ impl SiliconBoardApp {
             return;
         }
         self.engine_loading[slot] = true;
+        // A manual load replaces whatever restart was in flight for this slot,
+        // so the new engine is not taken for the restart (BUG-7-19).
+        self.restarting[slot] = None;
         self.set_status(StatusLevel::Info, format!("Choose an engine for slot {}…", slot_letter(slot)));
         let tx = self.events_tx.clone();
         let wake = self.engine_wake.clone();
@@ -1995,7 +2000,7 @@ impl SiliconBoardApp {
         for (slot, spec) in specs.iter().enumerate() {
             let already = self.engines[slot].as_ref().is_some_and(|host| {
                 host.binary_path() == spec.path
-                    && host.view().status != AnalysisStatus::Offline
+                    && host.status() != AnalysisStatus::Offline
             });
             if !already {
                 self.spawn_engine_file(slot, spec.path.clone());
@@ -2190,7 +2195,7 @@ impl SiliconBoardApp {
                 let ready = (0..2).all(|slot| {
                     self.engines[slot].as_ref().is_some_and(|host| {
                         matches!(
-                            host.view().status,
+                            host.status(),
                             AnalysisStatus::Ready | AnalysisStatus::Thinking
                         )
                     })
@@ -2199,7 +2204,7 @@ impl SiliconBoardApp {
                 let failed = (0..2).any(|slot| {
                     self.engines[slot]
                         .as_ref()
-                        .is_none_or(|host| host.view().status == AnalysisStatus::Offline)
+                        .is_none_or(|host| host.status() == AnalysisStatus::Offline)
                 });
                 if ready {
                     self.start_tournament_game();
@@ -2240,7 +2245,7 @@ impl SiliconBoardApp {
                     !self.engine_loading[slot]
                         && self.engines[slot]
                             .as_ref()
-                            .is_none_or(|host| host.view().status == AnalysisStatus::Offline)
+                            .is_none_or(|host| host.status() == AnalysisStatus::Offline)
                 }) {
                     self.fail_tournament(
                         "A tournament engine stopped during the game.".to_string(),
@@ -2802,7 +2807,7 @@ impl SiliconBoardApp {
     fn engine_live(&self, slot: usize) -> bool {
         self.engines[slot]
             .as_ref()
-            .is_some_and(|host| host.view().status != AnalysisStatus::Offline)
+            .is_some_and(|host| host.status() != AnalysisStatus::Offline)
     }
 
     /// Switch analysis on or off for one slot and point it at the displayed
@@ -3343,7 +3348,11 @@ impl SiliconBoardApp {
                     log::warn!("engine did not accept quit at exit: {}", err);
                 }
             }
-            tokio::time::sleep(EXIT_GRACE).await;
+            // Leave as soon as every engine has gone, instead of always waiting.
+            let deadline = Instant::now() + EXIT_GRACE;
+            while processes.iter().any(|process| !process.has_exited()) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         });
     }
 
@@ -3437,7 +3446,7 @@ impl eframe::App for SiliconBoardApp {
                 self.engine_live(slot)
                     && self.engines[slot]
                         .as_ref()
-                        .is_some_and(|host| host.view().status != AnalysisStatus::Starting)
+                        .is_some_and(|host| host.status() != AnalysisStatus::Starting)
             }),
             book_name: self.book.as_ref().map(|(name, _)| name.as_str()),
             figurines_move_list: self.settings.figurines_move_list,
@@ -3957,7 +3966,7 @@ mod game_flow_tests {
                 .engines
                 .iter()
                 .flatten()
-                .all(|h| h.view().status == AnalysisStatus::Ready)),
+                .all(|h| h.status() == AnalysisStatus::Ready)),
             "both engines must finish their handshake"
         );
 
@@ -3970,7 +3979,7 @@ mod game_flow_tests {
         assert_eq!(app.game.total_plies(), 0, "no move before Start");
         assert_eq!(app.clock.as_ref().map(|c| c.remaining_ms(PieceColor::White)), Some(60_000));
         assert!(
-            app.engines.iter().flatten().all(|h| h.view().status == AnalysisStatus::Ready),
+            app.engines.iter().flatten().all(|h| h.status() == AnalysisStatus::Ready),
             "no engine thinks before Start"
         );
 
@@ -4238,7 +4247,7 @@ mod game_flow_tests {
                 .engines
                 .iter()
                 .flatten()
-                .any(|host| host.view().status == AnalysisStatus::Thinking);
+                .any(|host| host.status() == AnalysisStatus::Thinking);
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
@@ -4573,7 +4582,7 @@ mod game_flow_tests {
         assert!(
             run_until(&mut app, &ctx, |a| a.engines[0]
                 .as_ref()
-                .is_some_and(|h| h.view().status == AnalysisStatus::Ready)),
+                .is_some_and(|h| h.status() == AnalysisStatus::Ready)),
             "the flaky engine must finish its handshake"
         );
 
@@ -4589,7 +4598,7 @@ mod game_flow_tests {
         assert!(
             run_until(&mut app, &ctx, |a| a.engines[0]
                 .as_ref()
-                .is_some_and(|h| h.view().status == AnalysisStatus::Ready)),
+                .is_some_and(|h| h.status() == AnalysisStatus::Ready)),
             "the replacement engine must complete its handshake"
         );
         assert!(app.engine_auto_restart[0], "one restart is allowed");

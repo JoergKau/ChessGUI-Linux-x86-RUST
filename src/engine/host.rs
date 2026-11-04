@@ -219,6 +219,12 @@ impl EngineHost {
         self.process.clone()
     }
 
+    /// The badge state alone, without copying the statistics (called several
+    /// times per frame).
+    pub fn status(&self) -> AnalysisStatus {
+        self.analysis.status()
+    }
+
     /// Snapshot for the evaluation panel.
     pub fn view(&self) -> EngineView {
         EngineView {
