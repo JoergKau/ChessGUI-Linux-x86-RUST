@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::engine::analysis::{AnalysisSession, AnalysisStatus, SearchGoal};
-use crate::engine::protocol::{EngineCommand, EngineStats, GoControl, Score, UciOption};
+use crate::engine::protocol::{EngineCommand, EngineEvent, EngineStats, GoControl, Score, UciOption};
 use crate::engine::watchdog::{StallReason, Timing, Watchdog};
-use crate::engine::{EngineProcess, ParsedUciLine};
+use crate::engine::{EngineProcess, InfoSlot, ParsedUciLine};
 
 /// Read-only snapshot of an engine for drawing its card.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +42,8 @@ pub struct EngineHost {
     analysis: AnalysisSession,
     /// The engine's deadlines, shared with its reader and monitor tasks.
     watchdog: Arc<Mutex<Watchdog>>,
+    /// Principal `info` statistics the reader has merged since the last pump.
+    info: InfoSlot,
     /// Side to move in the last position sent, which decides the clock of a
     /// clock search.
     white_to_move: bool,
@@ -63,11 +65,13 @@ impl EngineHost {
             .expect("an engine event receiver is handed out once");
         process.set_timing(timing);
         let watchdog = process.watchdog();
+        let info = process.info_slot();
         let mut host = Self {
             process,
             events,
             analysis: AnalysisSession::with_settings(settings),
             watchdog,
+            info,
             white_to_move: true,
         };
         let handshake = host.analysis.handshake();
@@ -142,6 +146,14 @@ impl EngineHost {
             self.analysis.mark_offline();
         }
         let mut changed = before != self.analysis.status();
+        // The merged `info` comes first: the `bestmove` that follows it in the
+        // queue must find its statistics already applied.
+        let pending = self.info.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        if let Some(stats) = pending {
+            changed = true;
+            let commands = self.analysis.on_event(&EngineEvent::Info(stats));
+            self.dispatch(commands);
+        }
         loop {
             let line = match self.events.try_recv() {
                 Ok(line) => line,
@@ -697,6 +709,33 @@ mod tests {
         assert!(host.is_stalled(), "the monitor found the stall without a frame");
         assert_eq!(host.stall_reason(), Some(StallReason::StopNotAnswered));
         assert!(!host.has_exited() || host.is_stalled(), "the stalled engine was killed");
+        host.shutdown().terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fast_engine_leaves_one_merged_info_entry_not_a_queue() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Answers `go` with 300 `info` lines before its `bestmove`. The UI
+        // does not pump in between, so the lines pile up if they are queued.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fast-info.sh");
+        let body = "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Fast'; echo uciok;;\n    isready) echo readyok;;\n    go*) i=1; while [ $i -le 300 ]; do echo \"info depth $i score cp $i pv e2e4\"; i=$((i+1)); done; echo 'bestmove e2e4';;\n    quit) exit 0;;\n  esac\ndone\n";
+        std::fs::write(&script, format!("#!/bin/sh\n{}", body.trim_start_matches("#!/bin/sh\n"))).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let process = EngineProcess::spawn(&script).await.unwrap();
+        let slot = process.info_slot();
+        let mut host = EngineHost::attach_with_settings(process, BTreeMap::new());
+        assert!(pump_until(&mut host, Duration::from_secs(5), |v| v.status == AnalysisStatus::Ready));
+
+        host.process
+            .try_send(EngineCommand::Go(GoControl::Depth(1)))
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let merged = slot.lock().unwrap().clone().expect("the info lines were merged");
+        assert_eq!(merged.depth, Some(300), "the latest depth is kept");
+        assert_eq!(merged.score, Some(Score::Cp(300)), "the latest score is kept");
         host.shutdown().terminate().await.unwrap();
     }
 }
