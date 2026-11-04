@@ -24,6 +24,10 @@ pub struct Settings {
     pub time_control: Option<TimeControl>,
     /// Whether engines in a play mode answer with opening-book moves.
     pub book_in_games: bool,
+    /// The PolyGlot book the user loaded last (Engine → Load PolyGlot
+    /// book…), restored at start-up. No book is loaded without it: there
+    /// is no default book.
+    pub book_path: Option<PathBuf>,
     /// Whether the app writes the session log (`~/Library/Logs/SiliconBoard`). On by
     /// default; Engine → Session log switches it.
     pub session_log: bool,
@@ -73,6 +77,7 @@ impl Default for Settings {
         Self {
             time_control: None,
             book_in_games: true,
+            book_path: None,
             session_log: true,
             engine_options: BTreeMap::new(),
             engines: [None, None],

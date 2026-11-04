@@ -49,12 +49,12 @@ The workspace copy is refreshed from the canonical shared tree with
 `./sync-public.sh`. The window icon is compiled
 in from `assets/icon/` (`siliconboard-512.png`).
 
-SiliconBoard does **not** ship an opening book. If a PolyGlot book named
-`books/gm2001.bin` (exactly that file name) exists in a folder above the
-executable, it is loaded at start-up; `$SILICONBOARD_BOOK` overrides the
-path. *Engine → Load PolyGlot book…* replaces the current book at run time
-(a loaded book is not kept in the settings). For a book to download, we
-recommend the [PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).
+SiliconBoard does **not** ship an opening book and loads none by default:
+the app starts bookless. Load one via *Engine → Load PolyGlot book…* —
+the choice is kept in the settings and restored at the next start-up.
+`$SILICONBOARD_BOOK` names an explicit start-up book instead. For a book
+to download, we recommend the
+[PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).
 
 ## Release as a macOS `.app` bundle
 
@@ -110,13 +110,11 @@ codesign --force --deep --sign - SiliconBoard.app
 **What to do with it:** double-click to launch, or drag it to
 `/Applications`. Nothing else is bundled, so on first launch:
 
-1. Load an engine via *Engine → Load engine A…* (and B as needed) — no UCI
+2. Load an engine via *Engine → Load engine A…* (and B as needed) — no UCI
    engine is distributed with SiliconBoard; the engines keep running from
    wherever their binaries live (e.g. `~/engines/`).
-2. For opening-book play in games, copy your book into the bundle as
-   `SiliconBoard.app/books/gm2001.bin` (the start-up search walks the
-   folders above the executable), set `$SILICONBOARD_BOOK` before launch,
-   or load it each session via *Engine → Load PolyGlot book…* — like the
+3. For opening-book play in games, load your book once via *Engine → Load
+   PolyGlot book…* — the choice is remembered across starts. Like the
    engines, books are not distributed and need to be downloaded separately,
    for example from the
    [PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).

@@ -16,10 +16,11 @@ MD-Viewer-style toolbar across the top.
   castling.
 - **Clocks:** no clock, sudden death, Fischer increment and fixed time per move;
   player bars above and below the board; flags end the game.
-- **Opening book:** PolyGlot (`.bin`), loaded at start-up from
-  `books/gm2001.bin`; weighted-random book replies in games, switchable. The
-  book box labels the current opening by name (ECO table) and keeps the last
-  known name after the line leaves the book.
+- **Opening book:** PolyGlot (`.bin`) books are loaded on demand —
+  Engine → Load PolyGlot book…, and the choice is remembered for the next
+  start-up; no book is loaded by default. Weighted-random book replies in
+  games are switchable. The book box labels the current opening by name
+  (ECO table) and keeps the last known name after the line leaves the book.
 - **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
   (Game → Claim draw (threefold)), with the result written to the PGN.
 - **Tournaments:** Tournament → New tournament… opens a two-engine match
@@ -75,7 +76,8 @@ MD-Viewer-style toolbar across the top.
   Engine → Session log switches the file on or off (on by default, remembered
   between launches). Idle engines are no longer pinged, so a finished match
   leaves the log and the CPU alone.
-- **Settings:** time control, book play, engine option values, window size and
+- **Settings:** time control, book play and the last loaded book, engine
+  option values, window size and
   panel sizes survive a restart. The settings file is replaced atomically, so a
   crash during a save keeps the previous settings.
 - **Process cleanup:** every engine runs in its own process group, and a stop,

@@ -294,9 +294,12 @@ enum AppEvent {
         slot: usize,
         outcome: Option<Result<EngineProcess, EngineError>>,
     },
-    /// An opening book was read (or failed to read).
+    /// An opening book was read (or failed to read). `startup` marks the
+    /// restored or `SILICONBOARD_BOOK` start-up book, whose path is not
+    /// written back to the settings.
     BookLoaded {
-        outcome: Option<(String, Result<PolyglotBook, BookError>)>,
+        outcome: Option<(PathBuf, String, Result<PolyglotBook, BookError>)>,
+        startup: bool,
     },
     /// The ECO opening-name table was indexed.
     OpeningNamesLoaded {
@@ -576,8 +579,8 @@ pub struct SiliconBoardApp {
 
 impl SiliconBoardApp {
     /// Create the application with the given Tokio runtime, and start the
-    /// background loads: the start-up book, the settings and the engines saved
-    /// in them.
+    /// background loads: the user's book from the settings (none by
+    /// default), the opening names, and the engines saved in the settings.
     pub fn new(
         runtime: tokio::runtime::Runtime,
         ctx: egui::Context,
@@ -591,7 +594,7 @@ impl SiliconBoardApp {
         app.piece_sets = crate::assets::piece_sets();
         // The settings were read before the window existed (for its size).
         app.apply_settings(settings);
-        app.load_default_book();
+        app.load_startup_book();
         app.load_opening_names();
         app
     }
@@ -963,18 +966,25 @@ impl SiliconBoardApp {
                         }
                     }
                 }
-                AppEvent::BookLoaded { outcome } => match outcome {
+                AppEvent::BookLoaded { outcome, startup } => match outcome {
                     None => self.set_status(StatusLevel::Info, "Book selection cancelled.".to_string()),
-                    Some((name, Ok(book))) if book.is_empty() => {
+                    Some((_, name, Ok(book))) if book.is_empty() => {
                         self.set_status(StatusLevel::Warning, format!("Opening book {} has no records.", name));
                     }
-                    Some((name, Ok(book))) => {
+                    Some((path, name, Ok(book))) => {
                         self.set_status(StatusLevel::Info, format!("Opening book loaded: {} ({} records)", name, book.len()));
                         self.book = Some((name, book));
                         self.book_generation += 1;
+                        // The user's choice is kept for the next launch. A
+                        // restored or `SILICONBOARD_BOOK` start-up book is
+                        // not written back.
+                        if !startup && self.settings.book_path.as_ref() != Some(&path) {
+                            self.settings.book_path = Some(path);
+                            self.save_settings();
+                        }
                         self.sync_position(true);
                     }
-                    Some((name, Err(err))) => {
+                    Some((_, name, Err(err))) => {
                         self.set_status(StatusLevel::Error, format!("Could not load book {}: {}", name, err));
                     }
                 },
@@ -2612,7 +2622,7 @@ impl SiliconBoardApp {
                 None => None,
                 Some(handle) => Some(read_book(handle.path().to_path_buf()).await),
             };
-            tx.send(AppEvent::BookLoaded { outcome });
+            tx.send(AppEvent::BookLoaded { outcome, startup: false });
         });
     }
 
@@ -2698,16 +2708,19 @@ impl SiliconBoardApp {
         });
     }
 
-    /// Read the workspace opening book at start-up, if it is there. The Engine
-    /// menu can replace it. Reading runs off the UI thread.
-    fn load_default_book(&mut self) {
-        let Some(path) = default_book_path() else {
+    /// The start-up book, when one is wanted: `SILICONBOARD_BOOK` for an
+    /// explicit start-up book, otherwise the book the user loaded last
+    /// (settings `book_path`). There is no default book: without either,
+    /// the app starts without one and the user picks a book via
+    /// Engine → Load PolyGlot book…. Reading runs off the UI thread.
+    fn load_startup_book(&mut self) {
+        let Some(path) = startup_book_path(&self.settings) else {
             return;
         };
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let outcome = Some(read_book(path).await);
-            tx.send(AppEvent::BookLoaded { outcome });
+            tx.send(AppEvent::BookLoaded { outcome, startup: true });
         });
     }
 
@@ -3832,41 +3845,34 @@ fn colour_name(color: PieceColor) -> &'static str {
     }
 }
 
-/// Opening book read at start-up when present, relative to the workspace.
-const DEFAULT_BOOK: &str = "gm2001.bin";
-
-/// The start-up book: `SILICONBOARD_BOOK` if set, else `books/gm2001.bin` in
-/// the nearest folder above the executable or the working directory.
-fn default_book_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("SILICONBOARD_BOOK").map(PathBuf::from) {
-        return path.is_file().then_some(path);
+/// A start-up book is only used when it is asked for explicitly:
+/// `SILICONBOARD_BOOK` (an existing file), else the book the user loaded
+/// last (settings `book_path`) if its file still exists. Without either,
+/// there is no start-up book.
+fn startup_book_path(settings: &Settings) -> Option<PathBuf> {
+    match std::env::var_os("SILICONBOARD_BOOK") {
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            path.is_file().then_some(path)
+        }
+        None => settings.book_path.clone().filter(|path| path.is_file()),
     }
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        roots.extend(exe.ancestors().map(Path::to_path_buf));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.extend(cwd.ancestors().map(Path::to_path_buf));
-    }
-    roots
-        .into_iter()
-        .map(|dir| dir.join("books").join(DEFAULT_BOOK))
-        .find(|path| path.is_file())
 }
 
-/// Read a PolyGlot book on a blocking thread. Returns the file name and the result.
-async fn read_book(path: PathBuf) -> (String, Result<PolyglotBook, BookError>) {
+/// Read a PolyGlot book on a blocking thread. Returns the file path, its
+/// name and the result.
+async fn read_book(path: PathBuf) -> (PathBuf, String, Result<PolyglotBook, BookError>) {
     let name = file_name_of(&path);
     let loader_path = path.clone();
     let joined = tokio::task::spawn_blocking(move || PolyglotBook::open(&loader_path)).await;
     let result = match joined {
         Ok(result) => result,
         Err(join_error) => Err(BookError::Open {
-            path,
+            path: path.clone(),
             source: std::io::Error::other(join_error),
         }),
     };
-    (name, result)
+    (path, name, result)
 }
 
 /// File name for display, falling back to the full path.
@@ -3972,10 +3978,45 @@ mod tests {
         assert_eq!(summary.average_gap, Duration::from_millis(16));
     }
 
+    /// Without SILICONBOARD_BOOK and without a saved book no book loads:
+    /// the workspace `books/gm2001.bin` is not picked up any more.
     #[test]
-    fn start_up_book_is_the_workspace_gm2001_book() {
-        let path = default_book_path().expect("books/gm2001.bin must be found from the workspace");
-        assert!(path.ends_with("books/gm2001.bin"), "found {}", path.display());
+    fn no_book_loads_without_explicit_choice() {
+        if std::env::var_os("SILICONBOARD_BOOK").is_some() {
+            return; // the environment asks for an explicit start-up book
+        }
+        assert!(startup_book_path(&Settings::default()).is_none());
+    }
+
+    /// The book the user loaded last is restored at start-up while its
+    /// file still exists.
+    #[test]
+    fn the_saved_book_is_restored_at_start_up() {
+        let path = std::env::temp_dir().join(format!(
+            "siliconboard-test-book-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, []).unwrap();
+        let settings = Settings {
+            book_path: Some(path.clone()),
+            ..Settings::default()
+        };
+        let found = startup_book_path(&settings);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(found.as_deref(), Some(path.as_path()));
+    }
+
+    /// A saved book whose file disappeared means no start-up book.
+    #[test]
+    fn a_missing_saved_book_is_not_tried() {
+        if std::env::var_os("SILICONBOARD_BOOK").is_some() {
+            return;
+        }
+        let settings = Settings {
+            book_path: Some("/no/such/book.bin".into()),
+            ..Default::default()
+        };
+        assert!(startup_book_path(&settings).is_none());
     }
 }
 
