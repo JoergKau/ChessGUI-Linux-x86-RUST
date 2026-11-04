@@ -24,7 +24,7 @@ pub struct Settings {
     pub time_control: Option<TimeControl>,
     /// Whether engines in a play mode answer with opening-book moves.
     pub book_in_games: bool,
-    /// Whether the app writes the session log (`logs/siliconboard.log`). On by
+    /// Whether the app writes the session log (`~/Library/Logs/SiliconBoard`). On by
     /// default; Engine → Session log switches it.
     pub session_log: bool,
     /// Option values per engine file (the path as text), by option name.
