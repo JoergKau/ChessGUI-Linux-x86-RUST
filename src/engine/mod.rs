@@ -420,6 +420,9 @@ async fn run_reader(
     let mut reader = BufReader::new(stdout);
     let mut raw: Vec<u8> = Vec::new();
     let mut acc = HandshakeAccumulator::new();
+    // The statistics the card shows, merged as the lines arrive. A line only
+    // wakes the window when one of these changes (BUG-7-16).
+    let mut shown = EngineStats::default();
     loop {
         raw.clear();
         match reader.read_until(b'\n', &mut raw).await {
@@ -462,12 +465,19 @@ async fn run_reader(
                 }
                 // Ignore the SendError when no listeners exist (tests
                 // that don't subscribe).
-                let important = !matches!(
-                    &message,
-                    ParsedUciLine::Event(EngineEvent::Info(_))
-                        | ParsedUciLine::Unknown(_)
-                        | ParsedUciLine::ParseError { .. }
-                );
+                // Whether this line should wake the window, and how urgently.
+                // `info` wakes only when a value the card shows has changed (a
+                // `currmove` line does not change it); `bestmove`, `readyok`
+                // and the rest always wake; noise does not wake at all.
+                let wake_now: Option<bool> = match &message {
+                    ParsedUciLine::Event(EngineEvent::Info(stats)) => {
+                        let before = shown_values(&shown);
+                        shown.merge(stats);
+                        (shown_values(&shown) != before).then_some(false)
+                    }
+                    ParsedUciLine::Event(_) => Some(true),
+                    ParsedUciLine::Unknown(_) | ParsedUciLine::ParseError { .. } => None,
+                };
                 // Only clone for the broadcast when someone listens to it; the
                 // app reads the lossless stream, so usually nobody does.
                 if events.receiver_count() > 0 {
@@ -491,8 +501,8 @@ async fn run_reader(
                         let _ = lines.send(other);
                     }
                 }
-                if let Some(wake) = &wake {
-                    wake(important);
+                if let (Some(wake), Some(urgent)) = (&wake, wake_now) {
+                    wake(urgent);
                 }
             }
             Err(source) => {
@@ -510,6 +520,15 @@ async fn run_reader(
     if let Some(wake) = &wake {
         wake(true);
     }
+}
+
+/// What the card shows of one search: depth, score, nodes, speed and the PV.
+type ShownValues = (Option<u32>, Option<Score>, Option<u64>, Option<u64>, Vec<String>);
+
+/// The values of the statistics the card shows: score, depth, nodes, speed and
+/// the principal variation. A change in any of them is a visible change.
+fn shown_values(stats: &EngineStats) -> ShownValues {
+    (stats.depth, stats.score, stats.nodes, stats.nps, stats.pv.clone())
 }
 
 /// Record one engine event in the watchdog. Only real signs of life count:
@@ -995,5 +1014,48 @@ mod tests {
         assert!(!is_secondary_info("info depth 9 multipv 1 score cp 12 pv e2e4"));
         assert!(!is_secondary_info("info depth 9 score cp 12 pv e2e4"), "no MultiPV means line 1");
         assert!(!is_secondary_info("bestmove multipv 2"), "only `info` lines are considered");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn currmove_lines_and_noise_do_not_wake_the_window() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicUsize;
+
+        // One line that changes the card, then 200 `currmove` lines that do
+        // not, and some noise. Only the first `info` should wake the window.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("currmove-engine.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Chatty'; echo uciok;;\n    isready) echo readyok;;\n    go*) echo 'info depth 1 score cp 5 pv e2e4'; i=1; while [ $i -le 200 ]; do echo \"info currmove e2e4 currmovenumber $i\"; echo 'info string noise'; i=$((i+1)); done; echo 'bestmove e2e4';;\n    quit) exit 0;;\n  esac\ndone\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let quiet_wakes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&quiet_wakes);
+        let engine = EngineProcess::spawn_waking(
+            &script,
+            Arc::new(move |urgent: bool| {
+                if !urgent {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let rx = engine.subscribe();
+        engine.try_send(EngineCommand::Go(GoControl::Depth(1))).unwrap();
+        let drained = wait_until(rx, Duration::from_secs(5), |line| {
+            matches!(line, ParsedUciLine::Event(EngineEvent::BestMove { .. }))
+        })
+        .await;
+        assert!(drained.iter().any(|l| matches!(l, ParsedUciLine::Event(EngineEvent::BestMove { .. }))));
+        assert_eq!(
+            quiet_wakes.load(Ordering::Relaxed),
+            1,
+            "only the line that changes the card wakes the window quietly"
+        );
+        engine.terminate().await.unwrap();
     }
 }
