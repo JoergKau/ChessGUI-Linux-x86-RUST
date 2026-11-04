@@ -176,7 +176,16 @@ pub fn save_sync(path: &Path, settings: &Settings) -> Result<(), SettingsError> 
     if let Some(folder) = path.parent() {
         std::fs::create_dir_all(folder).map_err(write_error)?;
     }
-    std::fs::write(path, to_json(settings)).map_err(write_error)
+    // Write beside the file, sync, then rename over it. A crash during the
+    // write leaves the previous settings in place instead of a truncated file.
+    let tmp = path.with_extension("json.tmp");
+    let text = to_json(settings);
+    let written = std::fs::File::create(&tmp).and_then(|mut file| {
+        std::io::Write::write_all(&mut file, text.as_bytes())?;
+        file.sync_all()
+    });
+    written.map_err(write_error)?;
+    std::fs::rename(&tmp, path).map_err(write_error)
 }
 
 /// Parse settings JSON. Fields that are missing take their defaults.
@@ -194,6 +203,20 @@ pub fn to_json(settings: &Settings) -> String {
 mod tests {
     use super::*;
     use crate::chess::clock::TimeControl;
+
+    #[test]
+    fn a_save_replaces_the_file_and_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let first = Settings {
+            book_in_games: false,
+            ..Settings::default()
+        };
+        save_sync(&path, &first).unwrap();
+        save_sync(&path, &Settings::default()).unwrap();
+        assert!(load_sync(&path).unwrap().book_in_games, "the second save wins");
+        assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left");
+    }
 
     #[test]
     fn settings_round_trip_through_json() {
