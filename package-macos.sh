@@ -11,7 +11,10 @@
 #      in src/assets.rs),
 #   3. write Contents/Info.plist with the version from Cargo.toml and the
 #      About-panel copyright (macos_about.rs reads both from the bundle),
-#   4. ad-hoc sign the bundle.
+#   4. ad-hoc sign the bundle,
+#   5. build the distributable zip: SiliconBoard-<version>-macos-arm64.zip
+#      holds one folder with the signed app plus LICENSE and README.md,
+#      and the SHA-256 is printed for the release listing.
 #
 # The .app is a build artefact; it is listed in .gitignore.
 
@@ -63,4 +66,22 @@ plutil -lint "$PLIST"
 print "▶ Ad-hoc signature"
 codesign --force --deep --sign - "$APP"
 
+# The distributable zip: the app plus a copy of README and LICENSE (so a
+# user who only downloads the zip still gets the MIT text). The zip holds
+# one folder, `SiliconBoard-<version>`, and the app is signed before it is
+# zipped — a zip added to a signed app would break the seal.
+print "▶ Distribution zip"
+stage="$REPO_ROOT/target/dist/SiliconBoard-$version"
+rm -rf "$(dirname "$stage")"
+mkdir -p "$stage"
+cp -R "$REPO_ROOT/$APP" "$stage/"
+cp LICENSE README.md "$stage/"
+zip_file="$REPO_ROOT/SiliconBoard-$version-macos-arm64.zip"
+rm -f "$zip_file"
+ditto -c -k --sequesterRsrc --keepParent "$stage" "$zip_file"
+rm -rf "$(dirname "$stage")"
+print "  SHA-256 of $zip_file:"
+shasum -a 256 "$zip_file"
+
 print "▶ Done: $REPO_ROOT/$APP"
+print "        $zip_file"
