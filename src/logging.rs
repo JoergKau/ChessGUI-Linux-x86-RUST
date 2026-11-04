@@ -11,7 +11,9 @@
 //! example `SILICONBOARD_LOG=trace` when hunting a problem).
 
 use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{LevelFilter, Log, Metadata, Record};
@@ -122,6 +124,11 @@ fn file_is_enabled() -> bool {
 /// How many session logs are kept. Older ones are deleted at start-up.
 const KEEP_LOGS: usize = 5;
 
+/// A session log continues in a new file once it reaches this size, so one
+/// long run (a tournament) cannot grow a single file without limit. With
+/// [`KEEP_LOGS`] files, the folder stays below about 25 MB.
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
 /// The file for this run: `SILICONBOARD_LOG_FILE` when set, otherwise a new
 /// file named by the start time in `~/Library/Logs/SiliconBoard/`. The working
 /// directory is not used: a Finder-launched app starts in `/`.
@@ -134,15 +141,101 @@ fn session_log_path() -> Option<PathBuf> {
     Some(folder.join(format!("siliconboard-{}.log", utc_stamp(std::time::SystemTime::now()))))
 }
 
-/// Opens this run's log. A file given by `SILICONBOARD_LOG_FILE` is truncated,
-/// as before. Otherwise older session logs in the same folder are pruned first.
-fn open_log(path: &Path) -> Option<File> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-        if std::env::var_os("SILICONBOARD_LOG_FILE").is_none() {
-            prune_logs(parent, KEEP_LOGS - 1);
+/// Opens this run's log. A file given by `SILICONBOARD_LOG_FILE` is truncated
+/// and kept as one file, as before. Otherwise older session logs in the same
+/// folder are pruned first, and this run's log rotates at [`MAX_LOG_BYTES`].
+fn open_log(path: &Path) -> Option<SessionFile> {
+    let rotating = std::env::var_os("SILICONBOARD_LOG_FILE").is_none();
+    let folder = path.parent().map(Path::to_path_buf);
+    if let Some(folder) = &folder {
+        std::fs::create_dir_all(folder).ok()?;
+        if rotating {
+            prune_logs(folder, KEEP_LOGS - 1, Some(path));
         }
     }
+    SessionFile::open(path, rotating.then_some(MAX_LOG_BYTES))
+}
+
+/// Delete session logs in `folder` until `keep` remain besides `current`. The
+/// oldest go first, judged by modification time, and the file being written
+/// (`current`) is never deleted.
+fn prune_logs(folder: &Path, keep: usize, current: Option<&Path>) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    let mut logs: Vec<(SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| is_session_log(path) && Some(path.as_path()) != current)
+        .map(|path| {
+            let modified = path
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(UNIX_EPOCH);
+            (modified, path)
+        })
+        .collect();
+    logs.sort();
+    let surplus = logs.len().saturating_sub(keep);
+    for (_, path) in logs.into_iter().take(surplus) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// `true` for a file that this app writes as a session log.
+fn is_session_log(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("siliconboard-") && name.ends_with(".log"))
+}
+
+/// The session log of this run. When `max_bytes` is set, a full file is
+/// continued in a numbered sibling (`siliconboard-<stamp>-2.log`, …), so no
+/// single file grows without limit.
+struct SessionFile {
+    /// The file being written.
+    file: File,
+    /// Its path, and the stem the numbered continuations are named after.
+    current: PathBuf,
+    /// The first file's path without `.log`.
+    stem: PathBuf,
+    /// The file number, from 1.
+    part: u32,
+    /// Bytes written to the current file.
+    written: u64,
+    /// The size at which the next file is started; `None` keeps one file.
+    max_bytes: Option<u64>,
+}
+
+impl SessionFile {
+    fn open(path: &Path, max_bytes: Option<u64>) -> Option<Self> {
+        Some(Self {
+            file: create_log(path)?,
+            current: path.to_path_buf(),
+            stem: path.with_extension(""),
+            part: 1,
+            written: 0,
+            max_bytes,
+        })
+    }
+
+    /// Start the next numbered file and keep the folder within the limit.
+    fn rotate(&mut self) -> io::Result<()> {
+        self.part += 1;
+        let name = format!("{}-{}.log", self.stem.display(), self.part);
+        let next = PathBuf::from(name);
+        self.file = create_log(&next).ok_or_else(|| io::Error::other("cannot start the next log file"))?;
+        if let Some(folder) = next.parent() {
+            prune_logs(folder, KEEP_LOGS - 1, Some(&next));
+        }
+        self.current = next;
+        self.written = 0;
+        Ok(())
+    }
+}
+
+/// Create or truncate a log file.
+fn create_log(path: &Path) -> Option<File> {
     OpenOptions::new()
         .create(true)
         .write(true)
@@ -151,25 +244,20 @@ fn open_log(path: &Path) -> Option<File> {
         .ok()
 }
 
-/// Delete all but the newest `keep` session logs in `folder`. The names carry a
-/// UTC time stamp in fixed-width form, so sorting by name sorts by age.
-fn prune_logs(folder: &Path, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return;
-    };
-    let mut logs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("siliconboard-") && name.ends_with(".log"))
-        })
-        .collect();
-    logs.sort();
-    let surplus = logs.len().saturating_sub(keep);
-    for path in logs.into_iter().take(surplus) {
-        let _ = std::fs::remove_file(path);
+impl Write for SessionFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(limit) = self.max_bytes {
+            if self.written >= limit {
+                self.rotate()?;
+            }
+        }
+        let written = self.file.write(buf)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -216,11 +304,14 @@ mod tests {
     #[test]
     fn only_the_newest_session_logs_are_kept() {
         let dir = tempfile::tempdir().unwrap();
-        for day in 1..=7 {
-            std::fs::write(dir.path().join(format!("siliconboard-2026110{day}-120000.log")), "x").unwrap();
+        let base = SystemTime::now() - std::time::Duration::from_secs(10_000);
+        for n in 1..=7u64 {
+            let path = dir.path().join(format!("siliconboard-2026110{n}-120000.log"));
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_modified(base + std::time::Duration::from_secs(n * 100)).unwrap();
         }
         std::fs::write(dir.path().join("notes.txt"), "unrelated").unwrap();
-        prune_logs(dir.path(), KEEP_LOGS - 1);
+        prune_logs(dir.path(), KEEP_LOGS - 1, None);
         let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -235,7 +326,43 @@ mod tests {
                 "siliconboard-20261106-120000.log",
                 "siliconboard-20261107-120000.log",
             ],
-            "the four newest logs remain, plus the file that is not a log"
+            "the four newest by modification time remain, plus the file that is not a log"
         );
+    }
+
+    #[test]
+    fn the_file_being_written_is_never_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("siliconboard-20260101-000000.log");
+        std::fs::write(&current, "x").unwrap();
+        prune_logs(dir.path(), 0, Some(&current));
+        assert!(current.exists(), "the open log stays");
+    }
+
+    #[test]
+    fn a_full_session_log_continues_in_numbered_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("siliconboard-20260101-000000.log");
+        let mut log = SessionFile::open(&path, Some(150)).unwrap();
+        for _ in 0..3 {
+            log.write_all(&[b'x'; 100]).unwrap();
+        }
+        let first = std::fs::metadata(&path).unwrap().len();
+        let second = std::fs::metadata(dir.path().join("siliconboard-20260101-000000-2.log"))
+            .unwrap()
+            .len();
+        assert_eq!((first, second), (200, 100), "the third record starts the second file");
+    }
+
+    #[test]
+    fn a_log_given_by_path_is_one_file_without_a_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.log");
+        let mut log = SessionFile::open(&path, None).unwrap();
+        for _ in 0..3 {
+            log.write_all(&[b'x'; 100]).unwrap();
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 300);
+        assert!(!dir.path().join("one-2.log").exists());
     }
 }

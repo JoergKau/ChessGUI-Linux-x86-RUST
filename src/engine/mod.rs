@@ -546,7 +546,9 @@ fn observe_line(watchdog: &Mutex<Watchdog>, binary: &Path, event: &EngineEvent) 
     let mut watch = watchdog.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     match event {
         EngineEvent::ReadyOk => {
-            log::debug!("{} -> readyok", binary.display());
+            // Answers to the watchdog's pings: one every few seconds during a
+            // search, so trace only, like the `isready` they answer.
+            log::trace!("{} -> readyok", binary.display());
             watch.answered();
             watch.note_output(now);
         }
