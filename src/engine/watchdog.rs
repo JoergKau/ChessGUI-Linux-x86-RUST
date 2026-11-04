@@ -139,6 +139,8 @@ pub struct Watchdog {
     stop_sent: Option<Instant>,
     /// Set once the engine is declared stalled. Sticky.
     stalled: Option<StallReason>,
+    /// `false` while the engine is not searching: nothing is checked then.
+    active: bool,
 }
 
 impl Default for Watchdog {
@@ -172,7 +174,22 @@ impl Watchdog {
             search: None,
             stop_sent: None,
             stalled: None,
+            active: true,
         }
+    }
+
+    /// Replace the deadlines. The running search keeps its start time.
+    pub fn set_timing(&mut self, timing: Timing) {
+        self.timing = timing;
+    }
+
+    /// Switch the checks on (the engine is searching) or off (it is not). Off
+    /// forgets the running search, so the next one starts a fresh window.
+    pub fn set_active(&mut self, active: bool) {
+        if !active {
+            self.idle();
+        }
+        self.active = active;
     }
 
     /// Decide what to do at `now`. Sends nothing by itself: a
@@ -180,6 +197,9 @@ impl Watchdog {
     pub fn check(&mut self, now: Instant) -> WatchdogAction {
         if let Some(reason) = self.stalled {
             return WatchdogAction::Stalled(reason);
+        }
+        if !self.active {
+            return WatchdogAction::Nothing;
         }
         if let Some(reason) = self.overdue_search(now) {
             return self.stall(reason);
@@ -272,6 +292,7 @@ impl Watchdog {
             last_progress: now,
         });
         self.stop_sent = None;
+        self.active = true;
     }
 
     /// `stop` has been sent for the running search. The first one starts the clock.
@@ -285,6 +306,7 @@ impl Watchdog {
     pub fn search_finished(&mut self) {
         self.search = None;
         self.stop_sent = None;
+        self.active = false;
     }
 
     /// Time since the running search was sent, if one is running.
@@ -447,7 +469,7 @@ mod tests {
         w.note_stop(at(base, 10));
         w.search_finished();
         assert!(!w.stop_pending());
-        assert_eq!(w.check(at(base, 5_000)), WatchdogAction::Ping, "no stop deadline any more");
+        assert_eq!(w.check(at(base, 5_000)), WatchdogAction::Nothing, "no stop deadline, and an idle engine is not pinged");
         assert!(!w.is_stalled());
     }
 
