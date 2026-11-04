@@ -54,15 +54,21 @@ MD-Viewer-style toolbar across the top.
   Figurines in engine evaluation (off by default). Saved and copied PGN files
   always stay standard SAN.
 - **Engines:** UCI handshake and options, a watchdog that restarts a stalled
-  or exited engine, loaded engines remembered between launches. Recent engine
-  output counts as proof of life, so a busy search is not mistaken for a stall;
-  a second failure within 60 s leaves the engine offline to avoid loops. The
+  or exited engine, loaded engines remembered between launches. While a search
+  runs, the watchdog enforces deadlines: `isready` answered within 10 s; a
+  `bestmove` within 3 s of `stop`; a move ends within its time plus 3 s; an
+  analysis shows progress (a new depth or node count) within 60 s. Only real
+  replies and progress count as signs of life, so noise does not keep a stuck
+  engine alive. The status line gives the reason for a stall. A second failure
+  within 60 s leaves the engine offline to avoid loops; in a match, that stops
+  the match. The
   Engine A/B options window is a grouped settings page: engine header, dashed
   sections, labeled fields in two columns, and a Default button that resets
   every option.
 - **Diagnostics:** one `logs/siliconboard.log` per run, truncated at start-up.
-  It records lifecycle messages, UCI commands, engine stderr and process exit
-  status, which is what is needed to diagnose an engine that goes offline.
+  It records lifecycle messages, UCI commands, engine replies (`readyok`,
+  `bestmove` with its timing), engine stderr, process exit status and the reason
+  for any stall, which is what is needed to diagnose an engine that goes offline.
   Engine → Session log switches the file on or off (on by default, remembered
   between launches). Idle engines are no longer pinged, so a finished match
   leaves the log and the CPU alone.
