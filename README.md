@@ -40,10 +40,79 @@ The **asset tree** is expected in a `public/` folder: board themes under
 `public/piece/`, the figurine font at `public/font/lichess-chess.ttf` and the
 CC0 ECO openings table at `public/data/openings/openings.tsv`. SiliconBoard
 finds it via `$SILICONBOARD_PUBLIC_ROOT`, by walking up from the executable,
-or as `./public`. A PolyGlot book next to the working folder at
-`books/gm2001.bin` is loaded at start-up; `$SILICONBOARD_BOOK` overrides the
-path. The bundles in `assets/icon/` carry the application icon; the visible
-piece artwork is not part of this repository.
+or as `./public`. The window icon is compiled in from `assets/icon/`
+(`siliconboard-512.png`); the visible piece artwork is not part of this
+repository.
+
+SiliconBoard does **not** ship an opening book. If a PolyGlot book named
+`books/gm2001.bin` (exactly that file name) exists in a folder above the
+executable, it is loaded at start-up; `$SILICONBOARD_BOOK` overrides the
+path. *Engine → Load PolyGlot book…* replaces the current book at run time
+(a loaded book is not kept in the settings). Download sources for books will
+be listed here.
+
+## Release as a macOS `.app` bundle
+
+The packaging script is still on the backlog (F-15), so these are the manual
+steps. The asset resolver already understands the bundle layout: a bundled
+app reads its assets from `Contents/Resources/public` — also
+`Contents/Resources` itself counts — as unit-tested in `src/assets.rs`.
+
+Assemble the bundle:
+
+```shell
+cargo build --release
+
+mkdir -p SiliconBoard.app/Contents/MacOS SiliconBoard.app/Contents/Resources
+cp target/release/siliconboard   SiliconBoard.app/Contents/MacOS/SiliconBoard
+cp assets/icon/SiliconBoard.icns SiliconBoard.app/Contents/Resources/
+cp -R <your public tree>/public  SiliconBoard.app/Contents/Resources/public
+```
+
+Note the `cp` renames the binary to `SiliconBoard`, which the plist then
+names as the executable. Create `SiliconBoard.app/Contents/Info.plist`
+(the About panel reads the version and the copyright from this file when
+the app runs inside a bundle):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>               <string>SiliconBoard</string>
+    <key>CFBundleDisplayName</key>        <string>SiliconBoard</string>
+    <key>CFBundleExecutable</key>         <string>SiliconBoard</string>
+    <key>CFBundleIdentifier</key>         <string>org.chess-gui.SiliconBoard</string>
+    <key>CFBundlePackageType</key>        <string>APPL</string>
+    <key>CFBundleShortVersionString</key> <string>1.0.0</string>
+    <key>CFBundleVersion</key>            <string>1</string>
+    <key>CFBundleIconFile</key>           <string>SiliconBoard.icns</string>
+    <key>LSMinimumSystemVersion</key>     <string>11.0</string>
+    <key>NSHighResolutionCapable</key>    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Joerg Kauschke. MIT License.</string>
+</dict>
+</plist>
+```
+
+An ad-hoc signature is enough for local use:
+
+```shell
+codesign --force --deep --sign - SiliconBoard.app
+```
+
+**What to do with it:** double-click to launch, or drag it to
+`/Applications`. Nothing else is bundled, so on first launch:
+
+1. Load an engine via *Engine → Load engine A…* (and B as needed) — no UCI
+   engine is distributed with SiliconBoard; the engines keep running from
+   wherever their binaries live (e.g. `~/engines/`).
+2. For opening-book play in games, copy your book into the bundle as
+   `SiliconBoard.app/books/gm2001.bin` (the start-up search walks the
+   folders above the executable), set `$SILICONBOARD_BOOK` before launch,
+   or load it each session via *Engine → Load PolyGlot book…* — like the
+   engines, books are not distributed and need to be downloaded separately.
 
 ## Development
 
