@@ -31,8 +31,8 @@ The full list of features, planned items and backlog lives in
 
 ## Loading a UCI engine (example: Stockfish)
 
-No engine is distributed with SiliconBoard: *Engine → Load engine A…* and
-*Load engine B…* always open the native file picker, and whichever engine
+No engine is distributed with SiliconBoard: _Engine → Load engine A…_ and
+_Load engine B…_ always open the native file picker, and whichever engine
 the user points them at fills the slot (loading into an occupied slot
 replaces it). The chosen file is checked before it starts — a launcher
 script must name an existing interpreter, and a non-program or a non-UCI
@@ -44,7 +44,7 @@ Installing the free Stockfish:
 1. Download from <https://stockfishchess.org/download/> (the macOS build).
 2. Unpack the file; the UCI binary inside is
    `stockfish-macos-universal`.
-3. In the GUI, *Engine → Load engine A…* and point it at that binary.
+3. In the GUI, _Engine → Load engine A…_ and point it at that binary.
 
 The process is the same for any other UCI engine: unpack it and point the
 menu at its executable.
@@ -70,7 +70,7 @@ The workspace copy is refreshed from the canonical shared tree with
 in from `assets/icon/` (`siliconboard-512.png`).
 
 SiliconBoard does **not** ship an opening book and loads none by default:
-the app starts bookless. Load one via *Engine → Load PolyGlot book…* —
+the app starts bookless. Load one via _Engine → Load PolyGlot book…_ —
 the choice is kept in the settings and restored at the next start-up.
 `$SILICONBOARD_BOOK` names an explicit start-up book instead. For a book
 to download, we recommend the
@@ -101,9 +101,15 @@ The bundle is a build artefact and stays out of git.
 **Distribution:** the script also packs the signed app into
 `SiliconBoard-<version>-macos-arm64.zip` — one folder holding the app plus
 `LICENSE` and `README.md` — and prints the zip's SHA-256 for the release
-listing. The app is signed *before* it is zipped (modifying a signed app
+listing. The app is signed _before_ it is zipped (modifying a signed app
 breaks the seal), and the zip is verified by unzipping it and re-checking
 the signature.
+
+**Install locally:** `./package-macos.sh --install` (or `-i`) also copies
+the freshly signed bundle into `/Applications`, replacing an existing
+copy there; without the flag nothing is installed, and an unknown
+argument is rejected with the usage line. If `/Applications` cannot be
+written, the script says so and the `.app` can be dragged by hand.
 
 **What to do with it:** double-click to launch, or drag it to
 `/Applications`. A copy that came over the internet is quarantined by
@@ -111,14 +117,11 @@ macOS: right-click → **Open** the first time.
 
 Nothing else is bundled, so on first launch:
 
-2. Load an engine via *Engine → Load engine A…* (and B as needed) — no UCI
+2. Load an engine via _Engine → Load engine A…_ (and B as needed) — no UCI
    engine is distributed with SiliconBoard; the engines keep running from
    wherever their binaries live (e.g. `~/engines/`).
-3. For opening-book play in games, load your book once via *Engine → Load
-   PolyGlot book…* — the choice is remembered across starts. Like the
-   engines, books are not distributed and need to be downloaded separately,
-   for example from the
-   [PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).
+3. For opening-book play in games, load your book once via _Engine → Load
+   PolyGlot book…_ — the choice is remembered across starts.
 
 ## Development
 
