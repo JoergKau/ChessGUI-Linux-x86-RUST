@@ -1670,7 +1670,7 @@ impl SiliconBoardApp {
         crate::logging::set_file_enabled(self.settings.session_log);
         self.save_settings();
         let text = if self.settings.session_log {
-            "Session log: on (logs/siliconboard.log).".to_string()
+            "Session log: on, in ~/Library/Logs/SiliconBoard.".to_string()
         } else {
             "Session log: off.".to_string()
         };

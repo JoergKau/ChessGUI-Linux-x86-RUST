@@ -286,7 +286,7 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
             ui.separator();
             let session_log = ui
                 .add(egui::Button::selectable(state.session_log, "Session log"))
-                .on_hover_text("Write logs/siliconboard.log for this session");
+                .on_hover_text("Write the session log to ~/Library/Logs/SiliconBoard");
             if session_log.clicked() {
                 action = Some(MenuAction::ToggleSessionLog);
                 ui.close();
