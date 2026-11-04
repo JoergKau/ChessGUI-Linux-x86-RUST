@@ -31,5 +31,8 @@ doc/
 /scratch/
 /notes.md
 
+# Build artifacts: the assembled and signed macOS bundle
+/SiliconBoard.app/
+
 # Tournament output (the Engine match writes its PGN here by default)
 /tournament/
