@@ -30,3 +30,6 @@ doc/
 # Generated demo / scratch files
 /scratch/
 /notes.md
+
+# Tournament output (the Engine match writes its PGN here by default)
+/tournament/
