@@ -1,8 +1,8 @@
 //! Session logging: the console plus one file for the whole run.
 //!
-//! The file is truncated at start-up, so a session never leaves a trail of
-//! dated log files. It is `logs/siliconboard.log` in the working directory.
-//! Set `SILICONBOARD_LOG_FILE` to choose another path.
+//! Each run writes its own file, `siliconboard-<UTC time>.log`, in
+//! `~/Library/Logs/SiliconBoard/`. The newest five are kept. Set
+//! `SILICONBOARD_LOG_FILE` to choose one file instead (it is truncated).
 //!
 //! The console keeps the `RUST_LOG` behaviour. The file defaults to
 //! `info,siliconboard::engine=debug,siliconboard::app=debug`, which captures
@@ -119,21 +119,29 @@ fn file_is_enabled() -> bool {
     FILE_ENABLED.load(Ordering::Acquire)
 }
 
+/// How many session logs are kept. Older ones are deleted at start-up.
+const KEEP_LOGS: usize = 5;
+
+/// The file for this run: `SILICONBOARD_LOG_FILE` when set, otherwise a new
+/// file named by the start time in `~/Library/Logs/SiliconBoard/`. The working
+/// directory is not used: a Finder-launched app starts in `/`.
 fn session_log_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SILICONBOARD_LOG_FILE") {
         return Some(PathBuf::from(path));
     }
-    Some(
-        std::env::current_dir()
-            .ok()?
-            .join("logs")
-            .join("siliconboard.log"),
-    )
+    let home = std::env::var_os("HOME")?;
+    let folder = PathBuf::from(home).join("Library/Logs/SiliconBoard");
+    Some(folder.join(format!("siliconboard-{}.log", utc_stamp(std::time::SystemTime::now()))))
 }
 
+/// Opens this run's log. A file given by `SILICONBOARD_LOG_FILE` is truncated,
+/// as before. Otherwise older session logs in the same folder are pruned first.
 fn open_log(path: &Path) -> Option<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
+        if std::env::var_os("SILICONBOARD_LOG_FILE").is_none() {
+            prune_logs(parent, KEEP_LOGS - 1);
+        }
     }
     OpenOptions::new()
         .create(true)
@@ -141,4 +149,93 @@ fn open_log(path: &Path) -> Option<File> {
         .truncate(true)
         .open(path)
         .ok()
+}
+
+/// Delete all but the newest `keep` session logs in `folder`. The names carry a
+/// UTC time stamp in fixed-width form, so sorting by name sorts by age.
+fn prune_logs(folder: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    let mut logs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("siliconboard-") && name.ends_with(".log"))
+        })
+        .collect();
+    logs.sort();
+    let surplus = logs.len().saturating_sub(keep);
+    for path in logs.into_iter().take(surplus) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC for `time`, from the days since 1970 (no clock crate needed).
+fn utc_stamp(time: std::time::SystemTime) -> String {
+    let secs = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from a day count (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        year,
+        month,
+        day,
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn time_stamps_are_utc_and_fixed_width() {
+        assert_eq!(utc_stamp(UNIX_EPOCH), "19700101-000000");
+        assert_eq!(utc_stamp(UNIX_EPOCH + Duration::from_secs(1_000_000_000)), "20010909-014640");
+        assert_eq!(utc_stamp(UNIX_EPOCH + Duration::from_secs(951_782_400)), "20000229-000000", "leap day");
+    }
+
+    #[test]
+    fn only_the_newest_session_logs_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        for day in 1..=7 {
+            std::fs::write(dir.path().join(format!("siliconboard-2026110{day}-120000.log")), "x").unwrap();
+        }
+        std::fs::write(dir.path().join("notes.txt"), "unrelated").unwrap();
+        prune_logs(dir.path(), KEEP_LOGS - 1);
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "notes.txt",
+                "siliconboard-20261104-120000.log",
+                "siliconboard-20261105-120000.log",
+                "siliconboard-20261106-120000.log",
+                "siliconboard-20261107-120000.log",
+            ],
+            "the four newest logs remain, plus the file that is not a log"
+        );
+    }
 }
