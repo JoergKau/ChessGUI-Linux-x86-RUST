@@ -16,6 +16,10 @@
 #      holds one folder with the signed app plus LICENSE and README.md,
 #      and the SHA-256 is printed for the release listing.
 #
+# With `--install` (or `-i`), the freshly signed bundle is also copied into
+# /Applications (replacing an existing SiliconBoard.app), so the daily-use
+# app is the one just built. Without the flag nothing is installed.
+#
 # The .app is a build artefact; it is listed in .gitignore.
 
 set -euo pipefail
@@ -85,3 +89,17 @@ shasum -a 256 "$zip_file"
 
 print "▶ Done: $REPO_ROOT/$APP"
 print "        $zip_file"
+
+install_flag="${1:-}"
+if [[ "$install_flag" == "--install" || "$install_flag" == "-i" ]]; then
+    print "▶ Installing into /Applications"
+    rm -rf /Applications/"$APP"
+    if ditto "$REPO_ROOT/$APP" /Applications/"$APP"; then
+        print "  ✓ /Applications/$APP"
+    else
+        print -u2 "  Could not write to /Applications (permissions?). Drag $APP there by hand, or run the install step with sudo."
+    fi
+elif [[ -n "$install_flag" ]]; then
+    print -u2 "Unknown argument: $install_flag (usage: $0 [--install|-i])"
+    exit 1
+fi
