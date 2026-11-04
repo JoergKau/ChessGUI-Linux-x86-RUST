@@ -25,6 +25,7 @@
 //! easier to reason about. We follow that pattern here.
 
 pub mod analysis;
+mod launch;
 pub mod host;
 pub mod protocol;
 pub mod registry;
@@ -36,6 +37,7 @@ pub use host::{EngineHost, EngineView};
 pub use protocol::{EngineCommand, EngineError, EngineEvent, Score};
 
 use uci_parser::{parse_line, HandshakeAccumulator, UciParseError};
+use launch::{check_executable, engine_path, Diagnostics};
 use protocol::EngineStats;
 use watchdog::{Timing, Watchdog, WatchdogAction};
 
@@ -92,6 +94,8 @@ pub struct EngineProcess {
     watchdog: Arc<Mutex<Watchdog>>,
     /// The pending principal `info` statistics (see [`InfoSlot`]).
     info: InfoSlot,
+    /// Stderr lines and the exit status, for a failure report.
+    diagnostics: Arc<Mutex<Diagnostics>>,
 }
 
 /// What the reader shares with the rest of the engine: the deadlines and the
@@ -170,12 +174,18 @@ impl EngineProcess {
         check_executable(binary)?;
         let mut cmd = Command::new(binary);
         // The engine leads its own process group, so a kill also reaches any
-        // helper process it started (see `registry::kill_group`).
+        // helper process it started (see `registry::kill_group`). It runs from
+        // its own folder, where its data files usually are, and with the tool
+        // folders on PATH, which a Finder launch does not give it.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)
+            .env("PATH", engine_path())
             .kill_on_drop(true);
+        if let Some(folder) = binary.parent().filter(|folder| !folder.as_os_str().is_empty()) {
+            cmd.current_dir(folder);
+        }
 
         let mut child = cmd.spawn().map_err(|source| EngineError::SpawnFailed {
             binary: Some(binary.to_path_buf()),
@@ -209,6 +219,7 @@ impl EngineProcess {
         let exited = Arc::new(AtomicBool::new(false));
         let watchdog = Arc::new(Mutex::new(Watchdog::default()));
         let info: InfoSlot = Arc::new(Mutex::new(None));
+        let diagnostics = Arc::new(Mutex::new(Diagnostics::default()));
 
         // ── Writer task ──
         tokio::spawn(async move {
@@ -253,17 +264,27 @@ impl EngineProcess {
 
         // ── Stderr task ──
         // Engines report crashes and internal errors on stderr; the session
-        // log keeps them so an engine that goes offline can be diagnosed.
+        // log keeps them, and the last lines go to a failure report.
         let stderr_binary = binary.to_path_buf();
+        let stderr_diagnostics = Arc::clone(&diagnostics);
         tokio::spawn(async move {
-            run_stderr(stderr, stderr_binary).await;
+            run_stderr(stderr, stderr_binary, stderr_diagnostics).await;
         });
 
         // ── Supervisor task ──
         let supervisor_exited = Arc::clone(&exited);
         let supervisor_binary = binary.to_path_buf();
+        let supervisor_diagnostics = Arc::clone(&diagnostics);
         tokio::spawn(async move {
-            run_supervisor(child, pid, &mut kill_rx, supervisor_exited, supervisor_binary).await;
+            run_supervisor(
+                child,
+                pid,
+                &mut kill_rx,
+                supervisor_exited,
+                supervisor_binary,
+                supervisor_diagnostics,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -275,7 +296,16 @@ impl EngineProcess {
             exited,
             watchdog,
             info,
+            diagnostics,
         })
+    }
+
+    /// What the engine has said about its own failure, for the status line.
+    pub fn diagnosis(&self) -> String {
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .summary()
     }
 
     /// The pending principal `info` statistics, merged since the host last took them.
@@ -347,29 +377,6 @@ impl EngineProcess {
     pub fn binary(&self) -> &Path {
         &self.binary
     }
-}
-
-/// Reject anything that is not a regular file with an execute bit set, with a
-/// message that says why. Scripts and wrapper programs pass this check;
-/// whether the file really speaks UCI is decided by the handshake.
-fn check_executable(binary: &Path) -> Result<(), EngineError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fail = |reason: &str| EngineError::SpawnFailed {
-        binary: Some(binary.to_path_buf()),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, reason.to_string()),
-    };
-    let metadata = std::fs::metadata(binary).map_err(|source| EngineError::SpawnFailed {
-        binary: Some(binary.to_path_buf()),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(fail("not a regular file"));
-    }
-    if metadata.permissions().mode() & 0o111 == 0 {
-        return Err(fail("file is not marked executable"));
-    }
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -637,7 +644,11 @@ async fn run_monitor(monitor: Monitor) {
 /// Reader task for the engine's stderr. Some engines print warnings or crash
 /// details there, and they are invisible otherwise. Lines go to the session
 /// log at debug level (the file's default filter includes them).
-async fn run_stderr(stderr: tokio::process::ChildStderr, binary: PathBuf) {
+async fn run_stderr(
+    stderr: tokio::process::ChildStderr,
+    binary: PathBuf,
+    diagnostics: Arc<Mutex<Diagnostics>>,
+) {
     let mut lines = BufReader::new(stderr).lines();
     loop {
         match lines.next_line().await {
@@ -645,6 +656,10 @@ async fn run_stderr(stderr: tokio::process::ChildStderr, binary: PathBuf) {
                 let line = line.trim_end();
                 if !line.is_empty() {
                     log::debug!("{} stderr: {}", binary.display(), line);
+                    diagnostics
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .note_stderr(line);
                 }
             }
             Ok(None) => break,
@@ -665,6 +680,7 @@ async fn run_supervisor(
     kill_rx: &mut mpsc::Receiver<()>,
     exited: Arc<AtomicBool>,
     binary: PathBuf,
+    diagnostics: Arc<Mutex<Diagnostics>>,
 ) {
     let status = tokio::select! {
         _ = kill_rx.recv() => {
@@ -682,6 +698,10 @@ async fn run_supervisor(
         registry::kill_group(pid);
         registry::unregister(pid);
     }
+    let how = match &status {
+        Some(status) => status.to_string(),
+        None => "exit status unavailable".to_string(),
+    };
     match status {
         Some(status) if status.success() => {
             log::info!("{} exited ({status})", binary.display());
@@ -693,6 +713,10 @@ async fn run_supervisor(
             log::warn!("{} exit status unavailable", binary.display());
         }
     }
+    diagnostics
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .note_exit(how);
     exited.store(true, Ordering::Release);
 }
 
@@ -1014,6 +1038,79 @@ mod tests {
         assert!(!is_secondary_info("info depth 9 multipv 1 score cp 12 pv e2e4"));
         assert!(!is_secondary_info("info depth 9 score cp 12 pv e2e4"), "no MultiPV means line 1");
         assert!(!is_secondary_info("bestmove multipv 2"), "only `info` lines are considered");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launcher_script_runs_the_program_it_names_from_its_own_folder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The launcher starts a program by a relative path, so it only works
+        // when the engine runs from the launcher's folder (as Calvin's and
+        // many others do).
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-engine.sh");
+        std::fs::write(
+            &real,
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Real'; echo uciok;;\n    quit) exit 0;;\n  esac\ndone\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let wrapper = dir.path().join("launcher.sh");
+        std::fs::write(&wrapper, "#!/bin/sh\nexec ./real-engine.sh\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let engine = EngineProcess::spawn(&wrapper).await.unwrap();
+        let rx = engine.subscribe();
+        engine.try_send(EngineCommand::Initialize).unwrap();
+        let drained = wait_until(rx, Duration::from_secs(5), |line| {
+            matches!(line, ParsedUciLine::Event(EngineEvent::UciOk { name, .. }) if name == "Real")
+        })
+        .await;
+        assert!(
+            drained.iter().any(|l| matches!(l, ParsedUciLine::Event(EngineEvent::UciOk { name, .. }) if name == "Real")),
+            "the program behind the launcher must answer uci"
+        );
+        engine.terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launcher_that_names_a_missing_program_reports_exit_127() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The gnuchess case: the launcher names a program that is not there.
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("run_missing.sh");
+        std::fs::write(&wrapper, "#!/bin/sh\n/no/such/folder/gnuchess --uci\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let engine = EngineProcess::spawn(&wrapper).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !engine.has_exited() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let report = engine.diagnosis();
+        assert!(report.contains("exit status: 127"), "{report}");
+        engine.terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_engine_reports_its_last_message_with_the_exit_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("complains.sh");
+        std::fs::write(&script, "#!/bin/sh\necho 'boom: data file missing' >&2\nexit 3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let engine = EngineProcess::spawn(&script).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !engine.has_exited() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let report = engine.diagnosis();
+        assert!(report.contains("exit status: 3"), "{report}");
+        assert!(report.contains("boom: data file missing"), "{report}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

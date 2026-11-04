@@ -213,6 +213,12 @@ impl EngineHost {
         self.analysis.has_handshaken()
     }
 
+    /// What the engine has said about its own failure: its exit status and
+    /// last message, for the status line.
+    pub fn failure_detail(&self) -> String {
+        self.process.diagnosis()
+    }
+
     /// The file the engine was started from, so it can be started again.
     pub fn binary_path(&self) -> PathBuf {
         self.process.binary().to_path_buf()

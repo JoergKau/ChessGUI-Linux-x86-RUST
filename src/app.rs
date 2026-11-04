@@ -74,7 +74,7 @@ const RESTART_LIMIT: usize = 3;
 
 /// How long a started engine may take to answer `uci` before it is declared
 /// not to be a UCI engine.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long after the last panel/window resize the settings are written.
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -843,10 +843,17 @@ impl SiliconBoardApp {
             let timed_out = self.engine_started[slot].is_some_and(|t| t.elapsed() > HANDSHAKE_TIMEOUT);
             let failure = match self.engines[slot].as_mut() {
                 Some(host) if host.status() == AnalysisStatus::Starting => {
+                    // The failure report names the exit status and the engine's last
+                    // message, which is usually the reason (a missing file, a
+                    // missing interpreter, a missing data file).
                     let reason = if host.has_exited() {
-                        Some("it exited before answering `uci`")
+                        Some(format!("it exited before answering `uci`; {}", host.failure_detail()))
                     } else if timed_out {
-                        Some("it did not answer `uci` within 10 seconds")
+                        Some(format!(
+                            "it did not answer `uci` within {} seconds; {}",
+                            HANDSHAKE_TIMEOUT.as_secs(),
+                            host.failure_detail()
+                        ))
                     } else {
                         None
                     };
