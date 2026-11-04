@@ -48,8 +48,8 @@ SiliconBoard does **not** ship an opening book. If a PolyGlot book named
 `books/gm2001.bin` (exactly that file name) exists in a folder above the
 executable, it is loaded at start-up; `$SILICONBOARD_BOOK` overrides the
 path. *Engine → Load PolyGlot book…* replaces the current book at run time
-(a loaded book is not kept in the settings). Download sources for books will
-be listed here.
+(a loaded book is not kept in the settings). For a book to download, we
+recommend the [PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).
 
 ## Release as a macOS `.app` bundle
 
@@ -112,7 +112,9 @@ codesign --force --deep --sign - SiliconBoard.app
    `SiliconBoard.app/books/gm2001.bin` (the start-up search walks the
    folders above the executable), set `$SILICONBOARD_BOOK` before launch,
    or load it each session via *Engine → Load PolyGlot book…* — like the
-   engines, books are not distributed and need to be downloaded separately.
+   engines, books are not distributed and need to be downloaded separately,
+   for example from the
+   [PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).
 
 ## Development
 
