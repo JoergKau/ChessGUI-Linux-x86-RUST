@@ -23,6 +23,7 @@ pub struct Settings {
     /// The time control for play modes, or `None` for no clock.
     pub time_control: Option<TimeControl>,
     /// Whether engines in a play mode answer with opening-book moves.
+    /// Off by default; it becomes relevant when a book is loaded.
     pub book_in_games: bool,
     /// The PolyGlot book the user loaded last (Engine → Load PolyGlot
     /// book…), restored at start-up. No book is loaded without it: there
@@ -72,11 +73,12 @@ pub struct PanelSizes {
 }
 
 impl Default for Settings {
-    /// No clock, book play on, no saved engine options.
+    /// No clock, book play off (the menu item waits for a loaded book, which
+    /// only the user loads — there is no default book), no saved engine options.
     fn default() -> Self {
         Self {
             time_control: None,
-            book_in_games: true,
+            book_in_games: false,
             book_path: None,
             session_log: true,
             engine_options: BTreeMap::new(),
@@ -214,12 +216,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let first = Settings {
-            book_in_games: false,
+            book_in_games: true,
             ..Settings::default()
         };
         save_sync(&path, &first).unwrap();
         save_sync(&path, &Settings::default()).unwrap();
-        assert!(load_sync(&path).unwrap().book_in_games, "the second save wins");
+        assert!(!load_sync(&path).unwrap().book_in_games, "the second save wins");
         assert!(!path.with_extension("json.tmp").exists(), "no temporary file is left");
     }
 
@@ -339,7 +341,7 @@ mod tests {
     fn missing_fields_take_their_defaults() {
         let settings = parse("{}").unwrap();
         assert_eq!(settings, Settings::default());
-        assert!(settings.book_in_games, "book play is on unless turned off");
+        assert!(!settings.book_in_games, "book play is off until a book is loaded");
     }
 
     #[test]

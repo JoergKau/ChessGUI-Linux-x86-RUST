@@ -645,7 +645,7 @@ impl SiliconBoardApp {
             mode: GameMode::Analysis,
             clock: None,
             time_dialog: None,
-            book_in_games: true,
+            book_in_games: false,
             book_picker: BookPicker::default(),
             restarting: [None, None],
             restart_times: [Vec::new(), Vec::new()],
@@ -4114,6 +4114,7 @@ mod game_flow_tests {
         let book = PolyglotBook::open(std::path::Path::new("../books/gm2001.bin"))
             .expect("the workspace fixture books/gm2001.bin must be present");
         app.book = Some(("gm2001.bin".to_string(), book));
+        app.book_in_games = true; // the user switched book play on
         app.mode = GameMode::EngineVsEngine;
         app.game_started = true;
         assert!(!app.book_choices().is_empty(), "the book answers the first move");
