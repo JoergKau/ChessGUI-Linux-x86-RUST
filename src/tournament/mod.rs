@@ -745,13 +745,26 @@ fn color_index(color: PieceColor) -> usize {
     }
 }
 
-/// A score for the tournament window, from the engine's point of view.
+/// Display text for a score that is already from White's point of view.
 pub fn score_label(score: Score) -> String {
     match score {
         Score::Cp(cp) => format!("{:+.2}", f64::from(cp) / 100.0),
         Score::Mate(plies) if plies > 0 => format!("#{}", plies),
         Score::Mate(plies) => format!("#-{}", -plies),
     }
+}
+
+/// The score of the side that just moved, for the tournament window. `score`
+/// is the mover's own score, from the search before its move (the side to move
+/// then). The window shows White's point of view, as every GUI evaluation does:
+/// a Black engine that is ahead shows as a negative number.
+pub fn white_score_label(score: Score, mover: PieceColor) -> String {
+    let from_white = match (score, mover) {
+        (score, PieceColor::White) => score,
+        (Score::Cp(cp), PieceColor::Black) => Score::Cp(-cp),
+        (Score::Mate(plies), PieceColor::Black) => Score::Mate(-plies),
+    };
+    score_label(from_white)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1313,5 +1326,14 @@ mod tests {
         draft = config();
         draft.pgn_path = PathBuf::new();
         assert!(draft.validate().unwrap_err().contains("PGN"));
+    }
+
+    #[test]
+    fn the_tournament_window_shows_the_mover_score_from_whites_side() {
+        let ahead = Score::Cp(150);
+        assert_eq!(white_score_label(ahead, PieceColor::White), "+1.50");
+        assert_eq!(white_score_label(ahead, PieceColor::Black), "-1.50", "Black ahead shows negative");
+        assert_eq!(white_score_label(Score::Mate(3), PieceColor::Black), "#-3");
+        assert_eq!(white_score_label(Score::Mate(3), PieceColor::White), "#3");
     }
 }
