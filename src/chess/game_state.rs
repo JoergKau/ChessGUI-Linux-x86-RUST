@@ -30,6 +30,8 @@
 //! This shape was chosen over a "single live `Chess` + replay" model so the
 //! PGN panel can paint faster than `O(ply)` per click.
 
+use std::cell::RefCell;
+
 use shakmaty::{
     san::SanPlus, zobrist::Zobrist64, Board, CastlingMode, Chess, Color, EnPassantMode, File,
     FromSetup, Move, Position, Role, Square,
@@ -167,6 +169,13 @@ pub struct GameState {
     /// Bumped whenever the recorded history changes, so derived views (the PGN
     /// move list) can cache their result.
     revision: u64,
+    /// The FEN of the displayed position, with the revision and cursor it was
+    /// made for. Formatting it clones the position, and the UI asks several
+    /// times per frame (BUG-7-18).
+    fen_memo: RefCell<Option<(u64, usize, String)>>,
+    /// Whether the displayed position is a threefold repetition, with the
+    /// revision and cursor it was counted for.
+    repetition_memo: RefCell<Option<(u64, usize, bool)>>,
 }
 
 impl Default for GameState {
@@ -191,6 +200,8 @@ impl GameState {
             history: Vec::new(),
             cur_ply: 0,
             revision: 0,
+            fen_memo: RefCell::new(None),
+            repetition_memo: RefCell::new(None),
         }
     }
 
@@ -295,9 +306,17 @@ impl GameState {
         ply.move_.from().map(|from| (from, target_square(ply.move_)))
     }
 
-    /// Current FEN.
+    /// Current FEN. Kept until the history or the cursor changes.
     pub fn fen(&self) -> String {
-        shakmaty::fen::Fen::from_position(&self.position(), EnPassantMode::Legal).to_string()
+        let key = (self.revision, self.cur_ply);
+        if let Some((revision, ply, fen)) = self.fen_memo.borrow().as_ref() {
+            if (*revision, *ply) == key {
+                return fen.clone();
+            }
+        }
+        let fen = shakmaty::fen::Fen::from_position(&self.position(), EnPassantMode::Legal).to_string();
+        *self.fen_memo.borrow_mut() = Some((key.0, key.1, fen.clone()));
+        fen
     }
 
     // ── Game-state queries ──────────────────────────────────────────────
@@ -338,7 +357,15 @@ impl GameState {
     /// position counts once at the start of a game (or at the FEN it began
     /// from), so two returns are enough to make the third occurrence.
     pub fn is_threefold_repetition(&self) -> bool {
-        self.repetition_count_at(self.cur_ply) >= 3
+        let key = (self.revision, self.cur_ply);
+        if let Some((revision, ply, repeated)) = *self.repetition_memo.borrow() {
+            if (revision, ply) == key {
+                return repeated;
+            }
+        }
+        let repeated = self.repetition_count_at(self.cur_ply) >= 3;
+        *self.repetition_memo.borrow_mut() = Some((key.0, key.1, repeated));
+        repeated
     }
 
     /// `true` iff checkmate, stalemate, or any other terminal condition.
@@ -1193,5 +1220,38 @@ mod tests {
         assert_eq!(lines.len(), 3, "every move stays listed while browsing");
         assert_eq!(lines[2].white.as_ref().map(|m| m.ply), Some(5));
         assert_eq!(g.cur_ply(), 2, "listing must not move the cursor");
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+
+    #[test]
+    fn the_remembered_fen_follows_the_cursor_and_new_moves() {
+        let mut game = GameState::new();
+        let start = game.fen();
+        game.play_squares(
+            shakmaty::Square::from_ascii(b"e2").unwrap(),
+            shakmaty::Square::from_ascii(b"e4").unwrap(),
+            None,
+        )
+        .unwrap();
+        let after = game.fen();
+        assert_ne!(start, after);
+        assert_eq!(game.fen(), after, "a repeated call gives the same text");
+        game.goto_start();
+        assert_eq!(game.fen(), start, "moving the cursor changes the FEN");
+        game.goto_end();
+        assert_eq!(game.fen(), after);
+        game.undo();
+        game.play_squares(
+            shakmaty::Square::from_ascii(b"d2").unwrap(),
+            shakmaty::Square::from_ascii(b"d4").unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_ne!(game.fen(), after, "a new move replaces the remembered text");
+        assert!(!game.is_threefold_repetition());
     }
 }
