@@ -61,9 +61,13 @@ const EVALUATION_MS: u64 = 1_000;
 /// opening only. Same default as en-croissant's game setting.
 const BOOK_MAX_PLIES: usize = 40;
 
-/// An engine that stalls again within this long after a restart is left
-/// offline instead of being restarted, so a broken engine cannot loop.
-const RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// Restarts of one engine slot are counted over this window. Once an engine has
+/// been restarted [`RESTART_LIMIT`] times within it, the next failure leaves it
+/// offline, so a broken engine cannot loop (BUG-7-10).
+const RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// Restarts allowed within [`RESTART_WINDOW`] before an engine is left offline.
+const RESTART_LIMIT: usize = 3;
 
 /// How long a started engine may take to answer `uci` before it is declared
 /// not to be a UCI engine.
@@ -456,8 +460,8 @@ pub struct SiliconBoardApp {
     book_picker: BookPicker,
     /// For each slot being restarted after a stall: whether analysis was on.
     restarting: [Option<bool>; 2],
-    /// When each slot was last restarted after a stall.
-    restarted_at: [Option<Instant>; 2],
+    /// When each slot was restarted after a stall or an exit, newest last.
+    restart_times: [Vec<Instant>; 2],
     /// Whether an unexpected exit in this slot should be restarted. Cleared
     /// when an engine fails its handshake or keeps failing, until a new engine
     /// is loaded.
@@ -625,7 +629,7 @@ impl SiliconBoardApp {
             book_in_games: true,
             book_picker: BookPicker::default(),
             restarting: [None, None],
-            restarted_at: [None, None],
+            restart_times: [Vec::new(), Vec::new()],
             engine_auto_restart: [false, false],
             ending: None,
             game_started: false,
@@ -905,7 +909,7 @@ impl SiliconBoardApp {
                                 // A different engine: its own saved values apply, not the old engine's.
                                 self.engine_settings[slot] =
                                     self.settings.engine_options.get(&binary).cloned().unwrap_or_default();
-                                self.restarted_at[slot] = None;
+                                self.restart_times[slot].clear();
                                 self.close_options_dialog(slot);
                                 self.settings.engines[slot] = Some(path);
                                 self.save_settings();
@@ -1318,8 +1322,9 @@ impl SiliconBoardApp {
 
     /// Replace an engine that has stopped answering `isready`. Its process is
     /// quit and the same file is started again, and the game continues from
-    /// the displayed position. A second stall within [`RESTART_WINDOW`] leaves
-    /// the engine offline instead.
+    /// the displayed position. Once the slot has used up its restarts
+    /// ([`RESTART_LIMIT`] within [`RESTART_WINDOW`]), the engine stays offline
+    /// instead, and a tournament match stops.
     fn report_stalled_engines(&mut self) {
         for slot in 0..2 {
             let stalled = self.engine_live(slot) && self.engines[slot].as_ref().is_some_and(EngineHost::is_stalled);
@@ -1342,25 +1347,27 @@ impl SiliconBoardApp {
             self.engine_status[slot] = None;
             self.engine_started[slot] = None;
 
-            let recently_restarted = self.restarted_at[slot].is_some_and(|at| at.elapsed() < RESTART_WINDOW);
-            if recently_restarted {
+            if !self.may_restart(slot) {
                 self.engine_auto_restart[slot] = false;
-                self.restarted_at[slot] = None;
+                self.restart_times[slot].clear();
                 log::error!(
-                    "engine {} stalled again within the restart window ({}); leaving it offline",
+                    "engine {} stalled ({}) after {} restarts in {} minutes; leaving it offline",
                     binary.display(),
-                    reason
+                    reason,
+                    RESTART_LIMIT,
+                    RESTART_WINDOW.as_secs() / 60
                 );
                 self.set_status(
                     StatusLevel::Error,
                     format!(
-                        "Engine {} stalled again ({}). It is offline; load it to try once more.",
+                        "Engine {} stalled again ({}). It has been restarted {} times, so it is offline; load it to try once more.",
                         slot_letter(slot),
-                        reason
+                        reason,
+                        RESTART_LIMIT
                     ),
                 );
             } else {
-                self.restarted_at[slot] = Some(Instant::now());
+                self.note_restart(slot);
                 self.engines[slot] = None;
                 log::warn!(
                     "engine {} stalled ({}); restarting it from the same file",
@@ -1381,8 +1388,9 @@ impl SiliconBoardApp {
     }
 
     /// Replace an engine whose process ended on its own after a successful
-    /// handshake. Crashes are treated like stalls: restart once, and leave the
-    /// engine offline if it fails again within [`RESTART_WINDOW`].
+    /// handshake. Crashes are treated like stalls: restarted, and left offline
+    /// once the slot has used up its restarts ([`RESTART_LIMIT`] within
+    /// [`RESTART_WINDOW`]).
     fn report_exited_engines(&mut self) {
         for slot in 0..2 {
             let Some(host) = self.engines[slot].as_mut() else {
@@ -1406,24 +1414,25 @@ impl SiliconBoardApp {
             self.engine_status[slot] = None;
             self.engine_started[slot] = None;
 
-            let recently_restarted =
-                self.restarted_at[slot].is_some_and(|at| at.elapsed() < RESTART_WINDOW);
-            if recently_restarted {
+            if !self.may_restart(slot) {
                 self.engine_auto_restart[slot] = false;
-                self.restarted_at[slot] = None;
+                self.restart_times[slot].clear();
                 log::error!(
-                    "engine {} exited again within the restart window; leaving it offline",
-                    binary.display()
+                    "engine {} exited after {} restarts in {} minutes; leaving it offline",
+                    binary.display(),
+                    RESTART_LIMIT,
+                    RESTART_WINDOW.as_secs() / 60
                 );
                 self.set_status(
                     StatusLevel::Error,
                     format!(
-                        "Engine {} stopped again. It is offline; load it to try once more.",
-                        slot_letter(slot)
+                        "Engine {} stopped again. It has been restarted {} times, so it is offline; load it to try once more.",
+                        slot_letter(slot),
+                        RESTART_LIMIT
                     ),
                 );
             } else {
-                self.restarted_at[slot] = Some(Instant::now());
+                self.note_restart(slot);
                 log::warn!(
                     "engine {} exited unexpectedly; restarting it from the same file",
                     binary.display()
@@ -1490,6 +1499,18 @@ impl SiliconBoardApp {
         if self.options_dialog.as_ref().is_some_and(|dialog| dialog.slot() == slot) {
             self.options_dialog = None;
         }
+    }
+
+    /// Whether `slot` may be restarted now: fewer than [`RESTART_LIMIT`] restarts
+    /// within [`RESTART_WINDOW`]. Older restarts are forgotten.
+    fn may_restart(&mut self, slot: usize) -> bool {
+        self.restart_times[slot].retain(|at| at.elapsed() < RESTART_WINDOW);
+        self.restart_times[slot].len() < RESTART_LIMIT
+    }
+
+    /// Count a restart of `slot` for [`Self::may_restart`].
+    fn note_restart(&mut self, slot: usize) {
+        self.restart_times[slot].push(Instant::now());
     }
 
     /// Start the engine in `slot` again from `binary` (runs on the Tokio runtime).
@@ -4493,7 +4514,7 @@ mod game_flow_tests {
             .unwrap()
             .set_analysis(true, &app.game.fen(), SearchGoal::Analyse);
         assert!(
-            run_until(&mut app, &ctx, |a| a.restarted_at[0].is_some()),
+            run_until(&mut app, &ctx, |a| !a.restart_times[0].is_empty()),
             "an exited engine must trigger a restart"
         );
         assert!(
@@ -4503,5 +4524,19 @@ mod game_flow_tests {
             "the replacement engine must complete its handshake"
         );
         assert!(app.engine_auto_restart[0], "one restart is allowed");
+    }
+
+    #[test]
+    fn a_slot_may_restart_three_times_in_ten_minutes_and_no_more() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        for _ in 0..RESTART_LIMIT {
+            assert!(app.may_restart(0));
+            app.note_restart(0);
+        }
+        assert!(!app.may_restart(0), "the fourth restart within the window is refused");
+        assert!(app.may_restart(1), "the other slot is not affected");
+        app.restart_times[0] = vec![Instant::now() - RESTART_WINDOW - Duration::from_secs(1); RESTART_LIMIT];
+        assert!(app.may_restart(0), "restarts older than the window no longer count");
     }
 }
