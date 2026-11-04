@@ -1330,6 +1330,10 @@ impl SiliconBoardApp {
                 continue;
             };
             let binary = host.binary_path();
+            let reason = host.stall_reason().map_or_else(
+                || "it stopped answering".to_string(),
+                |reason| reason.to_string(),
+            );
             let was_analysing = self.analysis_on[slot];
             let process = host.shutdown();
             self.close_options_dialog(slot);
@@ -1343,27 +1347,34 @@ impl SiliconBoardApp {
                 self.engine_auto_restart[slot] = false;
                 self.restarted_at[slot] = None;
                 log::error!(
-                    "engine {} stalled again within the restart window; leaving it offline",
-                    binary.display()
+                    "engine {} stalled again within the restart window ({}); leaving it offline",
+                    binary.display(),
+                    reason
                 );
                 self.set_status(
                     StatusLevel::Error,
                     format!(
-                        "Engine {} stopped answering again. It is offline; load it to try once more.",
-                        slot_letter(slot)
+                        "Engine {} stalled again ({}). It is offline; load it to try once more.",
+                        slot_letter(slot),
+                        reason
                     ),
                 );
             } else {
                 self.restarted_at[slot] = Some(Instant::now());
                 self.engines[slot] = None;
                 log::warn!(
-                    "engine {} stalled; restarting it from the same file",
-                    binary.display()
+                    "engine {} stalled ({}); restarting it from the same file",
+                    binary.display(),
+                    reason
                 );
                 self.restart_engine(slot, binary, was_analysing);
                 self.set_status(
                     StatusLevel::Warning,
-                    format!("Engine {} stopped answering. Restarting it.", slot_letter(slot)),
+                    format!(
+                        "Engine {} stalled ({}). Restarting it.",
+                        slot_letter(slot),
+                        reason
+                    ),
                 );
             }
         }
@@ -3173,6 +3184,14 @@ impl SiliconBoardApp {
             } else {
                 self.analysis_on[slot] = false;
             }
+        }
+        if enabled && self.engines.iter().flatten().any(EngineHost::is_stopping) {
+            // The engine answers `stop` with `bestmove` first; the new search
+            // starts then, or the stall deadline restarts the engine.
+            return self.set_status(
+                StatusLevel::Warning,
+                "An engine is still stopping its last search. The new search starts when it has stopped.".to_string(),
+            );
         }
         let text = match (enabled, playing, live) {
             (true, true, _) if !self.live_play() => {
