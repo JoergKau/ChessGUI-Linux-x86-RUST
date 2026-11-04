@@ -32,8 +32,10 @@ pub enum MenuAction {
     ClaimThreefold,
     /// Engine → Engine A options… / B options… (`0` = A, `1` = B).
     OpenEngineOptions(usize),
-    /// Engine → Session log: switch writing `logs/siliconboard.log` on or off.
+    /// Engine → Session log: switch the session log file on or off.
     ToggleSessionLog,
+    /// Help → About SiliconBoard.
+    About,
     /// File → Open PGN…
     OpenPgn,
     /// File → PGN games…: reopen the multi-game list window.
@@ -384,6 +386,13 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 .on_disabled_hover_text("No tournament has been run yet.");
             if show.clicked() {
                 action = Some(MenuAction::ShowTournament);
+                ui.close();
+            }
+        });
+
+        ui.menu_button("Help", |ui| {
+            if ui.button("About SiliconBoard").clicked() {
+                action = Some(MenuAction::About);
                 ui.close();
             }
         });

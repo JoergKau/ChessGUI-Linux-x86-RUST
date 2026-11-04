@@ -37,7 +37,7 @@ use crate::gui::tournament_dialog::{
 };
 use crate::settings::{self, Settings, SettingsError};
 use crate::gui::time_control::{self, ClockFace, DialogOutcome, PlayerBar, TimeControlDialog};
-use crate::gui::{pgn_panel, theme};
+use crate::gui::{about, pgn_panel, theme};
 use crate::tournament::{
     self, book_kind, find_book_path, game_headers, schedule_games, score_label, Adjudication,
     Adjudicator, BookKind, CurrentGame, EngineSpec, EpdBook, ScheduledGame, TournamentBook,
@@ -563,10 +563,15 @@ pub struct SiliconBoardApp {
     /// `Termination` reason from the loaded PGN, shown next to the result in
     /// the bottom move list.
     pgn_termination: Option<String>,
+    /// The `White` and `Black` names of the loaded PGN, shown on the player
+    /// bars in analysis. Cleared by anything that starts a game of its own.
+    pgn_players: Option<(String, String)>,
     /// Whether the PGN games list window is visible.
     pgn_browser_window_open: bool,
     /// Whether the tournament window is visible.
     tournament_window_open: bool,
+    /// Whether the About window is open.
+    about_open: bool,
     /// Whether the small result pop-up should be shown.
     tournament_finished_popup: bool,
 }
@@ -686,8 +691,10 @@ impl SiliconBoardApp {
             pgn_collection: None,
             pgn_browser_selected: 0,
             pgn_termination: None,
+            pgn_players: None,
             pgn_browser_window_open: false,
             tournament_window_open: false,
+            about_open: false,
             tournament_finished_popup: false,
         }
     }
@@ -1231,6 +1238,7 @@ impl SiliconBoardApp {
                 self.game = GameState::new();
                 self.ending = None;
                 self.pgn_termination = None;
+                self.pgn_players = None;
                 self.game_started = false;
                 self.reset_clock();
                 self.view.clear_selection();
@@ -1296,6 +1304,7 @@ impl SiliconBoardApp {
                     self.game = game;
                     self.ending = None;
                     self.pgn_termination = None;
+                    self.pgn_players = None;
                     self.game_started = false;
                     self.reset_clock();
                     self.view.clear_selection();
@@ -1315,6 +1324,7 @@ impl SiliconBoardApp {
                 self.tournament_finished_popup = false;
             }
             MenuAction::ToggleSessionLog => self.toggle_session_log(),
+            MenuAction::About => self.about_open = true,
         }
     }
 
@@ -2148,6 +2158,7 @@ impl SiliconBoardApp {
         self.game = game;
         self.ending = None;
         self.pgn_termination = None;
+        self.pgn_players = None;
         self.game_started = true;
         self.mode = GameMode::EngineVsEngine;
         self.clock = Some(Clock::new(control, self.game.turn()));
@@ -2712,6 +2723,8 @@ impl SiliconBoardApp {
     ) {
         let result = import.result;
         let termination = import.termination.trim().to_string();
+        let (white, black) = import.players.clone();
+        self.pgn_players = (!(white.is_empty() && black.is_empty())).then_some((white, black));
         let mut game = import.game;
         let position_over = game.is_game_over();
         game.goto_start();
@@ -3190,6 +3203,16 @@ impl SiliconBoardApp {
         [self.player_bar(top), self.player_bar(bottom)]
     }
 
+    /// The name of the player of `color` in the loaded PGN, when it has one.
+    fn pgn_player_name(&self, color: PieceColor) -> Option<String> {
+        let (white, black) = self.pgn_players.as_ref()?;
+        let name = match color {
+            PieceColor::White => white,
+            PieceColor::Black => black,
+        };
+        (!name.is_empty()).then(|| name.clone())
+    }
+
     /// One side's bar. The name is the engine's own name (as its handshake
     /// gives it), `You` for the human, or the colour in analysis mode.
     fn player_bar(&self, color: PieceColor) -> PlayerBar {
@@ -3198,7 +3221,7 @@ impl SiliconBoardApp {
                 self.engine_name(session.slot_for_color(color))
             }
             _ => match self.mode {
-                GameMode::Analysis => colour_name(color).to_string(),
+                GameMode::Analysis => self.pgn_player_name(color).unwrap_or_else(|| colour_name(color).to_string()),
                 _ => match self.mode.seat(color) {
                     Seat::Human => "You".to_string(),
                     Seat::Engine(slot) => self.engine_name(slot),
@@ -3230,6 +3253,10 @@ impl SiliconBoardApp {
     /// is named in the status line. The clocks start from full time.
     fn set_mode(&mut self, mode: GameMode) {
         self.mode = mode;
+        if mode != GameMode::Analysis {
+            // A game against an engine or between engines has its own names.
+            self.pgn_players = None;
+        }
         self.game_started = false;
         // A tournament's adjudication result belongs to the finished match.
         // Leaving the match for a play mode should not keep the board blocked.
@@ -3683,6 +3710,10 @@ impl eframe::App for SiliconBoardApp {
                 Some(ProgressAction::None) => {}
                 None => self.tournament_window_open = false,
             }
+        }
+
+        if self.about_open {
+            about::show(&ctx, &mut self.about_open);
         }
 
         if self.tournament_finished_popup {
@@ -4670,5 +4701,18 @@ mod game_flow_tests {
         if cores < 5 {
             assert!(app.option_warning(0, "Threads", "2").is_some(), "the other engine's threads count too");
         }
+    }
+
+    #[test]
+    fn a_loaded_pgn_shows_its_players_on_the_bars_until_a_new_game() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        let import = pgn::parse_pgn_with_report("[White \"Karpov, Anatoly\"]\n[Black \"Kasparov, Garry\"]\n\n1. e4 e5 *\n").unwrap();
+        app.load_pgn_game("game.pgn", import, None);
+        let names: Vec<String> = app.player_bars().iter().map(|bar| bar.name.clone()).collect();
+        assert_eq!(names, vec!["Kasparov, Garry".to_string(), "Karpov, Anatoly".to_string()], "top first: Black, then White");
+        app.perform(MenuAction::NewGame, &egui::Context::default());
+        let names: Vec<String> = app.player_bars().iter().map(|bar| bar.name.clone()).collect();
+        assert_eq!(names, vec!["Black".to_string(), "White".to_string()], "a new game drops the PGN names");
     }
 }
