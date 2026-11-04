@@ -322,6 +322,13 @@ impl AnalysisSession {
         self.name.as_deref()
     }
 
+    /// `true` once the engine has answered its initial `uci` with `uciok`.
+    /// An engine that exits before this is not restartable: it never proved
+    /// that it speaks UCI.
+    pub fn has_handshaken(&self) -> bool {
+        self.uciok_seen
+    }
+
     /// The commands queued while a search was running, in order.
     fn take_pending(&mut self) -> Vec<EngineCommand> {
         std::mem::take(&mut self.pending)

@@ -213,10 +213,15 @@ impl GameState {
 
     /// The position currently visible to the user. O(1) Rc clone.
     pub fn position(&self) -> Chess {
-        if self.cur_ply == 0 {
+        self.position_at(self.cur_ply)
+    }
+
+    /// The position after `ply` half-moves (`0` = the starting position).
+    fn position_at(&self, ply: usize) -> Chess {
+        if ply == 0 {
             self.start.clone()
         } else {
-            self.history[self.cur_ply - 1].after.clone()
+            self.history[ply - 1].after.clone()
         }
     }
 
@@ -312,7 +317,35 @@ impl GameState {
         self.position().is_stalemate()
     }
 
+    /// How many times the position at `ply` has occurred up to that ply,
+    /// including the occurrence itself.
+    ///
+    /// Two positions are the same for repetition purposes when the pieces,
+    /// side to move, castling rights and legal en-passant square match.
+    /// shakmaty's `Chess` equality implements exactly that rule.
+    fn repetition_count_at(&self, ply: usize) -> usize {
+        let current = self.position_at(ply);
+        let mut count = usize::from(self.start == current);
+        for record in &self.history[..ply] {
+            if record.after == current {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// `true` when the displayed position has occurred three times. The
+    /// position counts once at the start of a game (or at the FEN it began
+    /// from), so two returns are enough to make the third occurrence.
+    pub fn is_threefold_repetition(&self) -> bool {
+        self.repetition_count_at(self.cur_ply) >= 3
+    }
+
     /// `true` iff checkmate, stalemate, or any other terminal condition.
+    ///
+    /// Threefold repetition is deliberately **not** included: under FIDE
+    /// Article 9.2 it must be claimed by the player to move. Fivefold
+    /// repetition and the 75-move rule are automatic and come from shakmaty.
     pub fn is_game_over(&self) -> bool {
         self.position().is_game_over()
     }
@@ -330,7 +363,7 @@ impl GameState {
         } else if pos.is_insufficient_material() {
             "Draw by insufficient material".to_string()
         } else if pos.is_game_over() {
-            // Fallback for rare terminal cases (75-move, fivefold repetition).
+            // Another terminal position condition shakmaty models.
             "Draw".to_string()
         } else {
             "Unfinished".to_string()
@@ -635,6 +668,21 @@ pub enum Ending {
     },
     /// Both sides agreed to a draw.
     DrawAgreed,
+    /// The player to move claimed a draw because the position occurred three
+    /// times (FIDE Article 9.2).
+    ThreefoldRepetition,
+    /// A tournament adjudicator awarded the game to `winner`.
+    AdjudicatedWin {
+        /// The side the adjudicator declared the winner.
+        winner: PieceColor,
+    },
+    /// A tournament adjudicator declared the game drawn.
+    AdjudicatedDraw,
+    /// The result came from a PGN file and has no reason attached.
+    FromPgn {
+        /// The winning side, or `None` for a draw.
+        winner: Option<PieceColor>,
+    },
     /// `loser` ran out of time.
     OnTime {
         /// The side whose clock ran out.
@@ -650,7 +698,18 @@ impl Ending {
                 PieceColor::White => "0-1",
                 PieceColor::Black => "1-0",
             },
-            Ending::DrawAgreed => "1/2-1/2",
+            Ending::AdjudicatedWin { winner } => match winner {
+                PieceColor::White => "1-0",
+                PieceColor::Black => "0-1",
+            },
+            Ending::FromPgn { winner } => match winner {
+                Some(PieceColor::White) => "1-0",
+                Some(PieceColor::Black) => "0-1",
+                None => "1/2-1/2",
+            },
+            Ending::DrawAgreed
+            | Ending::ThreefoldRepetition
+            | Ending::AdjudicatedDraw => "1/2-1/2",
         }
     }
 
@@ -661,7 +720,16 @@ impl Ending {
                 format!("{} wins by resignation", piece_color_label_local(loser.opposite()))
             }
             Ending::OnTime { loser } => format!("{} wins on time", piece_color_label_local(loser.opposite())),
+            Ending::AdjudicatedWin { winner } => {
+                format!("{} wins by adjudication", piece_color_label_local(winner))
+            }
+            Ending::FromPgn { winner } => match winner {
+                Some(winner) => format!("{} won (from PGN)", piece_color_label_local(winner)),
+                None => "Draw (from PGN)".to_string(),
+            },
             Ending::DrawAgreed => "Draw agreed".to_string(),
+            Ending::AdjudicatedDraw => "Draw by adjudication".to_string(),
+            Ending::ThreefoldRepetition => "Draw by repetition".to_string(),
         }
     }
 }
@@ -811,6 +879,33 @@ mod tests {
         assert!(g.redo());
         assert!(g.redo());
         assert_eq!(g.cur_ply(), 2);
+    }
+
+    #[test]
+    fn threefold_repetition_is_detected_but_not_automatic() {
+        let mut g = GameState::new();
+        let cycle = ["g1f3", "g8f6", "f3g1", "f6g8"];
+
+        for uci in cycle {
+            g.apply_uci(uci).unwrap();
+        }
+        assert!(
+            !g.is_threefold_repetition(),
+            "the starting position has occurred twice, not three times"
+        );
+
+        for uci in cycle {
+            g.apply_uci(uci).unwrap();
+        }
+        assert!(
+            g.is_threefold_repetition(),
+            "the starting position has now occurred three times"
+        );
+        assert!(
+            !g.is_game_over(),
+            "threefold repetition must be claimed; it is not automatic"
+        );
+        assert_eq!(g.outcome(), "Unfinished");
     }
 
     #[test]
@@ -1043,9 +1138,19 @@ mod tests {
         assert_eq!(Ending::Resigned { loser: PieceColor::Black }.result_token(), "1-0");
         assert_eq!(Ending::OnTime { loser: PieceColor::White }.result_token(), "0-1");
         assert_eq!(Ending::DrawAgreed.result_token(), "1/2-1/2");
+        assert_eq!(Ending::ThreefoldRepetition.result_token(), "1/2-1/2");
+        assert_eq!(Ending::AdjudicatedWin { winner: PieceColor::White }.result_token(), "1-0");
+        assert_eq!(Ending::AdjudicatedDraw.result_token(), "1/2-1/2");
+        assert_eq!(Ending::FromPgn { winner: Some(PieceColor::Black) }.result_token(), "0-1");
+        assert_eq!(Ending::FromPgn { winner: None }.result_token(), "1/2-1/2");
         assert_eq!(Ending::Resigned { loser: PieceColor::White }.description(), "Black wins by resignation");
         assert_eq!(Ending::OnTime { loser: PieceColor::Black }.description(), "White wins on time");
+        assert_eq!(Ending::AdjudicatedWin { winner: PieceColor::Black }.description(), "Black wins by adjudication");
+        assert_eq!(Ending::AdjudicatedDraw.description(), "Draw by adjudication");
+        assert_eq!(Ending::FromPgn { winner: Some(PieceColor::White) }.description(), "White won (from PGN)");
+        assert_eq!(Ending::FromPgn { winner: None }.description(), "Draw (from PGN)");
         assert_eq!(Ending::DrawAgreed.description(), "Draw agreed");
+        assert_eq!(Ending::ThreefoldRepetition.description(), "Draw by repetition");
     }
 
     #[test]

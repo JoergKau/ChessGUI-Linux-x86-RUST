@@ -1,7 +1,7 @@
 //! Settings that survive a restart: the time control, whether engines play
-//! book moves, the UCI option values chosen for each engine file, the board
-//! theme, the piece set, the two figurine switches, and the window and panel
-//! sizes.
+//! book moves, the session-log switch, the UCI option values chosen for each
+//! engine file, the board theme, the piece set, the two figurine switches, the
+//! window and panel sizes, and the last tournament configuration.
 //!
 //! The file is JSON, kept under `~/Library/Application Support/SiliconBoard/`.
 //! `SILICONBOARD_SETTINGS` overrides the path. A missing file means the
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::chess::clock::TimeControl;
+use crate::tournament::TournamentConfig;
 
 /// Everything kept between runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -23,6 +24,9 @@ pub struct Settings {
     pub time_control: Option<TimeControl>,
     /// Whether engines in a play mode answer with opening-book moves.
     pub book_in_games: bool,
+    /// Whether the app writes the session log (`logs/siliconboard.log`). On by
+    /// default; Engine → Session log switches it.
+    pub session_log: bool,
     /// Option values per engine file (the path as text), by option name.
     pub engine_options: BTreeMap<String, BTreeMap<String, String>>,
     /// The engine file last loaded into each slot (A, B). Loaded again at start-up.
@@ -39,6 +43,9 @@ pub struct Settings {
     pub figurines_move_list: bool,
     /// Draw engine PV piece letters as figurines. Off by default.
     pub figurines_eval: bool,
+    /// The last tournament configuration, so the dialog opens where the user
+    /// left it.
+    pub tournament: Option<TournamentConfig>,
 }
 
 /// The window's inner size in points.
@@ -66,6 +73,7 @@ impl Default for Settings {
         Self {
             time_control: None,
             book_in_games: true,
+            session_log: true,
             engine_options: BTreeMap::new(),
             engines: [None, None],
             window_size: None,
@@ -74,6 +82,7 @@ impl Default for Settings {
             piece_set: None,
             figurines_move_list: true,
             figurines_eval: false,
+            tournament: None,
         }
     }
 }
@@ -203,6 +212,14 @@ mod tests {
     }
 
     #[test]
+    fn session_logging_is_on_by_default_and_round_trips() {
+        let settings = Settings::default();
+        assert!(settings.session_log, "session logging is on unless turned off");
+        assert!(parse(&to_json(&settings)).unwrap().session_log);
+        assert!(!parse(r#"{"session_log":false}"#).unwrap().session_log);
+    }
+
+    #[test]
     fn the_window_size_round_trips() {
         let settings = Settings {
             window_size: Some(WindowSize {
@@ -260,6 +277,23 @@ mod tests {
         let restored = parse(&to_json(&settings)).unwrap();
         assert_eq!(restored.board_theme.as_deref(), Some("wood2.jpg"));
         assert_eq!(Settings::default().board_theme, None, "no theme chosen yet");
+    }
+
+    #[test]
+    fn the_tournament_configuration_round_trips() {
+        let config = crate::tournament::TournamentConfig {
+            white: crate::tournament::EngineSpec::from_path(PathBuf::from("/opt/stockfish")),
+            black: crate::tournament::EngineSpec::from_path(PathBuf::from("/opt/triumviratus")),
+            games: 20,
+            ..crate::tournament::TournamentConfig::default()
+        };
+        let settings = Settings {
+            tournament: Some(config),
+            ..Settings::default()
+        };
+        let restored = parse(&to_json(&settings)).unwrap();
+        assert_eq!(restored.tournament, settings.tournament);
+        assert_eq!(Settings::default().tournament, None, "no tournament saved yet");
     }
 
     #[test]

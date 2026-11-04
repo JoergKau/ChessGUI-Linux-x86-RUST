@@ -16,12 +16,48 @@ use std::fmt::Write;
 use shakmaty::{fen::Fen, san::SanPlus, Color, EnPassantMode, Position};
 
 use crate::chess::game_state::{Ending, FenError, GameState};
+use crate::chess::PieceColor;
 
 /// Movetext is wrapped before this many columns.
 const LINE_WIDTH: usize = 80;
 
 /// FEN of the standard starting position.
 const STANDARD_START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+/// The seven mandatory PGN tag pairs, plus any extra tags a caller wants
+/// (for example the tournament's `TimeControl` and `Termination` tags).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PgnHeaders {
+    /// `Event` tag.
+    pub event: String,
+    /// `Site` tag.
+    pub site: String,
+    /// `Date` tag.
+    pub date: String,
+    /// `Round` tag.
+    pub round: String,
+    /// `White` tag.
+    pub white: String,
+    /// `Black` tag.
+    pub black: String,
+    /// Additional tags written after the mandatory seven.
+    pub extra_tags: Vec<(String, String)>,
+}
+
+impl Default for PgnHeaders {
+    /// The headers of a game saved from the board.
+    fn default() -> Self {
+        Self {
+            event: "SiliconBoard game".to_string(),
+            site: "?".to_string(),
+            date: "????.??.??".to_string(),
+            round: "?".to_string(),
+            white: "?".to_string(),
+            black: "?".to_string(),
+            extra_tags: Vec::new(),
+        }
+    }
+}
 
 /// Result token for the game: the ending when the game loop decided it
 /// (resignation, agreed draw, flag), otherwise the final position's result.
@@ -48,15 +84,25 @@ pub fn result_token(game: &GameState, ending: Option<Ending>) -> &'static str {
 /// The result tag comes from `ending`, or from the final position when the
 /// game loop did not end the game.
 pub fn to_pgn(game: &GameState, ending: Option<Ending>) -> String {
+    to_pgn_with_headers(game, result_token(game, ending), &PgnHeaders::default())
+}
+
+/// Render a game with explicit headers and a result token. Tournament games
+/// use this so each game carries its event, round, player names, time control
+/// and termination reason.
+pub fn to_pgn_with_headers(game: &GameState, result: &str, headers: &PgnHeaders) -> String {
     let start = game.start_position();
     let mut out = String::new();
-    push_tag(&mut out, "Event", "SiliconBoard game");
-    push_tag(&mut out, "Site", "?");
-    push_tag(&mut out, "Date", "????.??.??");
-    push_tag(&mut out, "Round", "?");
-    push_tag(&mut out, "White", "?");
-    push_tag(&mut out, "Black", "?");
-    push_tag(&mut out, "Result", result_token(game, ending));
+    push_tag(&mut out, "Event", &headers.event);
+    push_tag(&mut out, "Site", &headers.site);
+    push_tag(&mut out, "Date", &headers.date);
+    push_tag(&mut out, "Round", &headers.round);
+    push_tag(&mut out, "White", &headers.white);
+    push_tag(&mut out, "Black", &headers.black);
+    push_tag(&mut out, "Result", result);
+    for (name, value) in &headers.extra_tags {
+        push_tag(&mut out, name, value);
+    }
     let start_fen = Fen::from_position(&start, EnPassantMode::Legal).to_string();
     if start_fen != STANDARD_START_FEN {
         push_tag(&mut out, "SetUp", "1");
@@ -81,7 +127,7 @@ pub fn to_pgn(game: &GameState, ending: Option<Ending>) -> String {
         }
         tokens.push(ply.san.to_string());
     }
-    tokens.push(result_token(game, ending).to_string());
+    tokens.push(result.to_string());
 
     let mut line = String::new();
     for token in tokens {
@@ -127,6 +173,16 @@ pub fn parse_pgn_with_report(text: &str) -> Result<PgnImport, PgnError> {
     if tags.is_empty() && movetext.trim().is_empty() {
         return Err(PgnError::Empty);
     }
+    let result = tags
+        .iter()
+        .find(|(name, _)| name == "Result")
+        .and_then(|(_, value)| PgnResult::parse(value))
+        .or_else(|| result_from_movetext(&movetext));
+    let termination = tags
+        .iter()
+        .find(|(name, _)| name == "Termination")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
     let mut game = match tags.iter().find(|(name, _)| name == "FEN") {
         Some((_, fen)) => GameState::from_fen(fen).map_err(PgnError::Fen)?,
         None => GameState::new(),
@@ -157,7 +213,59 @@ pub fn parse_pgn_with_report(text: &str) -> Result<PgnImport, PgnError> {
             comments,
             games: extra_games,
         },
+        result,
+        termination,
     })
+}
+
+/// The result token at the end of the movetext, when the `Result` tag is
+/// missing or `*`.
+fn result_from_movetext(movetext: &str) -> Option<PgnResult> {
+    movetext
+        .split_whitespace()
+        .rev()
+        .find_map(PgnResult::parse)
+}
+
+/// The result token of a PGN game, when the file states one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PgnResult {
+    /// `1-0`.
+    WhiteWin,
+    /// `0-1`.
+    BlackWin,
+    /// `1/2-1/2`.
+    Draw,
+}
+
+impl PgnResult {
+    /// Parse a PGN result token. `*` and anything else give `None`.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token.trim() {
+            "1-0" => Some(Self::WhiteWin),
+            "0-1" => Some(Self::BlackWin),
+            "1/2-1/2" => Some(Self::Draw),
+            _ => None,
+        }
+    }
+
+    /// The winning side, or `None` for a draw.
+    pub fn winner(self) -> Option<PieceColor> {
+        match self {
+            Self::WhiteWin => Some(PieceColor::White),
+            Self::BlackWin => Some(PieceColor::Black),
+            Self::Draw => None,
+        }
+    }
+
+    /// The PGN result token.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::WhiteWin => "1-0",
+            Self::BlackWin => "0-1",
+            Self::Draw => "1/2-1/2",
+        }
+    }
 }
 
 /// A parsed PGN game together with the content that was skipped.
@@ -167,6 +275,128 @@ pub struct PgnImport {
     pub game: GameState,
     /// What was skipped while reading it.
     pub ignored: IgnoredContent,
+    /// The result the file states, if any.
+    pub result: Option<PgnResult>,
+    /// `Termination` tag, when the file gives a reason such as
+    /// `Black wins on time` or `Draw by repetition`.
+    pub termination: String,
+}
+
+/// One game in a multi-game PGN file. The moves are kept as text and parsed
+/// only when the user selects the game.
+#[derive(Clone, Debug)]
+pub struct PgnGameEntry {
+    /// 1-based game number.
+    pub number: usize,
+    /// `White` tag.
+    pub white: String,
+    /// `Black` tag.
+    pub black: String,
+    /// `Event` tag.
+    pub event: String,
+    /// `Date` tag.
+    pub date: String,
+    /// `Termination` tag, when the game states why it ended, e.g.
+    /// `Black wins on time` or `Draw by repetition`.
+    pub termination: String,
+    /// Result token, when the game states one.
+    pub result: Option<PgnResult>,
+    /// The full PGN text of this game, parsed on selection.
+    pub text: String,
+}
+
+/// All games found in a PGN file.
+#[derive(Clone, Debug)]
+pub struct PgnCollection {
+    /// File name, for the browser heading.
+    pub name: String,
+    /// Games in file order.
+    pub games: Vec<PgnGameEntry>,
+}
+
+impl PgnCollection {
+    /// Parse one selected game fully.
+    pub fn load_game(&self, index: usize) -> Result<PgnImport, PgnError> {
+        let entry = self.games.get(index).ok_or(PgnError::Empty)?;
+        parse_pgn_with_report(&entry.text)
+    }
+
+    /// Whether the file holds more than one game.
+    pub fn is_multi_game(&self) -> bool {
+        self.games.len() > 1
+    }
+}
+
+/// Split a PGN text into games and read only their headers. Move text is kept
+/// for [`PgnCollection::load_game`], so opening a file with thousands of games
+/// stays fast.
+pub fn parse_pgn_collection(text: &str) -> Result<PgnCollection, PgnError> {
+    let slices = split_games(text);
+    if slices.is_empty() {
+        return Err(PgnError::Empty);
+    }
+    let mut games = Vec::with_capacity(slices.len());
+    for slice in slices {
+        let (tags, movetext, _) = split_tags_and_movetext(slice);
+        if tags.is_empty() && movetext.trim().is_empty() {
+            continue;
+        }
+        let tag = |name: &str| {
+            tags.iter()
+                .find(|(tag_name, _)| tag_name == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        let result = tags
+            .iter()
+            .find(|(name, _)| name == "Result")
+            .and_then(|(_, value)| PgnResult::parse(value))
+            .or_else(|| result_from_movetext(&movetext));
+        games.push(PgnGameEntry {
+            number: games.len() + 1,
+            white: tag("White"),
+            black: tag("Black"),
+            event: tag("Event"),
+            date: tag("Date"),
+            termination: tag("Termination"),
+            result,
+            text: slice.to_string(),
+        });
+    }
+    if games.is_empty() {
+        return Err(PgnError::Empty);
+    }
+    Ok(PgnCollection {
+        name: String::new(),
+        games,
+    })
+}
+
+/// Split a PGN text at the tag section of each following game.
+fn split_games(text: &str) -> Vec<&str> {
+    let mut games = Vec::new();
+    let mut start = 0usize;
+    let mut offset = 0usize;
+    let mut in_movetext = false;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let trimmed = line.trim();
+        let is_tag = trimmed.starts_with('[');
+        if is_tag && in_movetext {
+            if line_start > start {
+                games.push(&text[start..line_start]);
+            }
+            start = line_start;
+            in_movetext = false;
+        } else if !is_tag && !trimmed.is_empty() {
+            in_movetext = true;
+        }
+    }
+    if start < text.len() {
+        games.push(&text[start..]);
+    }
+    games
 }
 
 /// Counts of PGN content the importer does not keep.
@@ -506,9 +736,51 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_game_pgn_is_split_into_headers_and_loads_on_demand() {
+        let text = "[Event \"One\"]\n[White \"A\"]\n[Black \"B\"]\n[Result \"1-0\"]\n[Termination \"White wins on time\"]\n\n1. e4 e5 1-0\n\n[Event \"Two\"]\n[White \"C\"]\n[Black \"D\"]\n[Result \"0-1\"]\n\n1. d4 d5 0-1\n";
+        let collection = parse_pgn_collection(text).unwrap();
+        assert_eq!(collection.games.len(), 2);
+        assert_eq!(collection.games[0].number, 1);
+        assert_eq!(collection.games[0].white, "A");
+        assert_eq!(collection.games[0].result, Some(PgnResult::WhiteWin));
+        assert_eq!(collection.games[0].termination, "White wins on time");
+        assert_eq!(collection.games[1].white, "C");
+        assert_eq!(collection.games[1].result, Some(PgnResult::BlackWin));
+        assert_eq!(collection.games[1].termination, "");
+        let first = collection.load_game(0).unwrap();
+        assert_eq!(first.game.total_plies(), 2);
+        assert_eq!(first.result, Some(PgnResult::WhiteWin));
+    }
+
+    #[test]
+    fn the_real_karpov_file_lists_all_games() {
+        let text = workspace_pgn("Karpov.pgn");
+        let collection = parse_pgn_collection(&text).unwrap();
+        assert_eq!(collection.games.len(), 3529);
+        assert_eq!(collection.games[0].white, "Karpov, Anatoly");
+        assert_eq!(collection.games[0].result, Some(PgnResult::WhiteWin));
+        let import = collection.load_game(0).unwrap();
+        assert!(import.game.total_plies() > 0);
+    }
+
+    #[test]
     fn clean_game_reports_nothing_ignored() {
         let import = parse_pgn_with_report("1. e4 e5 *").unwrap();
         assert_eq!(import.ignored.summary(), None);
+    }
+
+    #[test]
+    fn the_pgn_result_is_read_from_the_tag_or_the_final_token() {
+        let import = parse_pgn_with_report("[Result \"1-0\"]\n\n1. e4 e5 1-0\n").unwrap();
+        assert_eq!(import.result, Some(PgnResult::WhiteWin));
+        let import = parse_pgn_with_report("1. e4 e5 0-1\n").unwrap();
+        assert_eq!(import.result, Some(PgnResult::BlackWin));
+        let import = parse_pgn_with_report("1. e4 e5 1/2-1/2\n").unwrap();
+        assert_eq!(import.result, Some(PgnResult::Draw));
+        let import = parse_pgn_with_report("[Result \"*\"]\n\n1. e4 *\n").unwrap();
+        assert_eq!(import.result, None);
+        let import = parse_pgn_with_report("[Result \"0-1\"]\n\n1. e4\n").unwrap();
+        assert_eq!(import.result, Some(PgnResult::BlackWin));
     }
 
     #[test]
@@ -547,8 +819,9 @@ mod tests {
             .join("..")
             .join("PGN")
             .join(name);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("fixture {} must be readable: {}", path.display(), err))
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("fixture {} must be readable: {}", path.display(), err));
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     #[test]

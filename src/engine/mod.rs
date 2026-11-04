@@ -130,7 +130,7 @@ impl EngineProcess {
         let mut cmd = Command::new(binary);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
 
         let mut child = cmd.spawn().map_err(|source| EngineError::SpawnFailed {
@@ -145,6 +145,12 @@ impl EngineProcess {
             source: std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "missing stdout pipe",
+            ),
+        })?;
+        let stderr = child.stderr.take().ok_or(EngineError::Io {
+            source: std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "missing stderr pipe",
             ),
         })?;
 
@@ -162,14 +168,32 @@ impl EngineProcess {
         // ── Reader task ──
         let events_for_reader = events.clone();
         let reader_exited = Arc::clone(&exited);
+        let reader_binary = binary.to_path_buf();
         tokio::spawn(async move {
-            run_reader(stdout, events_for_reader, line_tx, reader_exited, wake).await;
+            run_reader(
+                stdout,
+                events_for_reader,
+                line_tx,
+                reader_exited,
+                reader_binary,
+                wake,
+            )
+            .await;
+        });
+
+        // ── Stderr task ──
+        // Engines report crashes and internal errors on stderr; the session
+        // log keeps them so an engine that goes offline can be diagnosed.
+        let stderr_binary = binary.to_path_buf();
+        tokio::spawn(async move {
+            run_stderr(stderr, stderr_binary).await;
         });
 
         // ── Supervisor task ──
         let supervisor_exited = Arc::clone(&exited);
+        let supervisor_binary = binary.to_path_buf();
         tokio::spawn(async move {
-            run_supervisor(child, &mut kill_rx, supervisor_exited).await;
+            run_supervisor(child, &mut kill_rx, supervisor_exited, supervisor_binary).await;
         });
 
         Ok(Self {
@@ -297,6 +321,7 @@ async fn run_reader(
     events: broadcast::Sender<ParsedUciLine>,
     lines: mpsc::UnboundedSender<ParsedUciLine>,
     exited: Arc<AtomicBool>,
+    binary: PathBuf,
     wake: Option<EngineWake>,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -314,20 +339,25 @@ async fn run_reader(
                 if trimmed.is_empty() {
                     continue;
                 }
-                log::trace!("engine → {}", trimmed);
+                log::trace!("{} -> {}", binary.display(), trimmed);
                 let message = match parse_line(trimmed) {
                     Ok(ev) => acc.fold(ev).map(ParsedUciLine::Event).unwrap_or_else(|| {
                         // Mid-handshake line — the consolidated UciOk
                         // arrives at `uciok`.
-                        log::trace!("engine handshake: {}", trimmed);
+                        log::trace!("{} handshake: {}", binary.display(), trimmed);
                         ParsedUciLine::Unknown(trimmed.to_string())
                     }),
                     Err(UciParseError::UnknownLine { line }) => {
-                        log::debug!("engine noise: {}", line);
+                        log::debug!("{} noise: {}", binary.display(), line);
                         ParsedUciLine::Unknown(line)
                     }
                     Err(source) => {
-                        log::warn!("engine parse error `{}`: {}", trimmed, source);
+                        log::warn!(
+                            "{} parse error `{}`: {}",
+                            binary.display(),
+                            trimmed,
+                            source
+                        );
                         ParsedUciLine::ParseError {
                             line: trimmed.to_string(),
                             source,
@@ -349,11 +379,12 @@ async fn run_reader(
                 }
             }
             Err(source) => {
-                log::warn!("engine stdout read failed: {}", source);
+                log::warn!("{} stdout read failed: {}", binary.display(), source);
                 break;
             }
         }
     }
+    log::debug!("{} stdout closed", binary.display());
     // Tell subscribers the engine is gone so the UI can show it as offline.
     exited.store(true, Ordering::Release);
     let terminated = ParsedUciLine::Event(EngineEvent::Terminated);
@@ -364,6 +395,28 @@ async fn run_reader(
     }
 }
 
+/// Reader task for the engine's stderr. Some engines print warnings or crash
+/// details there, and they are invisible otherwise. Lines go to the session
+/// log at debug level (the file's default filter includes them).
+async fn run_stderr(stderr: tokio::process::ChildStderr, binary: PathBuf) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    log::debug!("{} stderr: {}", binary.display(), line);
+                }
+            }
+            Ok(None) => break,
+            Err(source) => {
+                log::debug!("{} stderr read failed: {}", binary.display(), source);
+                break;
+            }
+        }
+    }
+}
+
 /// Supervisor task: waits on either `kill_rx` (UI-driven termination) or
 /// `child.wait()` (engine exited on its own). The first one to fire wins;
 /// the supervisor then ensures the child is dead before returning.
@@ -371,12 +424,25 @@ async fn run_supervisor(
     mut child: tokio::process::Child,
     kill_rx: &mut mpsc::Receiver<()>,
     exited: Arc<AtomicBool>,
+    binary: PathBuf,
 ) {
-    tokio::select! {
+    let status = tokio::select! {
         _ = kill_rx.recv() => {
             let _ = child.kill().await;
+            child.wait().await.ok()
         }
-        _ = child.wait() => {}
+        status = child.wait() => status.ok(),
+    };
+    match status {
+        Some(status) if status.success() => {
+            log::info!("{} exited ({status})", binary.display());
+        }
+        Some(status) => {
+            log::warn!("{} exited unexpectedly ({status})", binary.display());
+        }
+        None => {
+            log::warn!("{} exit status unavailable", binary.display());
+        }
     }
     exited.store(true, Ordering::Release);
 }

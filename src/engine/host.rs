@@ -122,12 +122,25 @@ impl EngineHost {
         // subscribed, whose `Terminated` event was therefore never delivered.
         let before = self.analysis.status();
         if self.process.has_exited() {
+            if before != AnalysisStatus::Offline {
+                log::warn!("{} has exited; marking it offline", self.process.binary().display());
+            }
             self.analysis.mark_offline();
         }
         let mut changed = before != self.analysis.status();
         loop {
-            match self.events.try_recv() {
-                Ok(ParsedUciLine::Event(event)) => {
+            let line = match self.events.try_recv() {
+                Ok(line) => line,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.analysis.mark_offline();
+                    changed = true;
+                    break;
+                }
+            };
+            self.watchdog.note_output(Instant::now());
+            match line {
+                ParsedUciLine::Event(event) => {
                     changed = true;
                     if event == EngineEvent::ReadyOk {
                         self.watchdog.answered();
@@ -135,22 +148,16 @@ impl EngineHost {
                     let commands = self.analysis.on_event(&event);
                     self.dispatch(commands);
                 }
-                Ok(ParsedUciLine::Unknown(line)) => {
+                ParsedUciLine::Unknown(line) => {
                     log::trace!("{}: unhandled line `{}`", self.process.binary().display(), line);
                 }
-                Ok(ParsedUciLine::ParseError { line, source }) => {
+                ParsedUciLine::ParseError { line, source } => {
                     log::debug!(
                         "{}: could not parse `{}`: {}",
                         self.process.binary().display(),
                         line,
                         source
                     );
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.analysis.mark_offline();
-                    changed = true;
-                    break;
                 }
             }
         }
@@ -159,12 +166,14 @@ impl EngineHost {
     }
 
     /// Ping the engine when the watchdog says so. Returns `true` when the
-    /// engine has just been found stalled. Nothing is pinged before the
-    /// handshake is done, or after the engine is offline.
+    /// engine has just been found stalled. Only a running search is watched:
+    /// an idle engine needs no heartbeat, so a finished game leaves it quiet.
     fn check_watchdog(&mut self) -> bool {
-        if self.watchdog.is_stalled()
-            || matches!(self.analysis.status(), AnalysisStatus::Starting | AnalysisStatus::Offline)
-        {
+        if self.watchdog.is_stalled() {
+            return false;
+        }
+        if self.analysis.status() != AnalysisStatus::Thinking {
+            self.watchdog.idle();
             return false;
         }
         match self.watchdog.check(Instant::now()) {
@@ -184,6 +193,12 @@ impl EngineHost {
     /// shuts the host down and starts the engine again.
     pub fn is_stalled(&self) -> bool {
         self.watchdog.is_stalled()
+    }
+
+    /// `true` once the engine answered the UCI handshake. Only such an
+    /// engine is restarted automatically after it exits.
+    pub fn has_handshaken(&self) -> bool {
+        self.analysis.has_handshaken()
     }
 
     /// The file the engine was started from, so it can be started again.
@@ -222,7 +237,13 @@ impl EngineHost {
     /// queue is logged; the analysis state recovers at the next position change.
     fn dispatch(&self, commands: Vec<EngineCommand>) {
         for command in commands {
-            log::debug!("{} <- {}", self.process.binary().display(), command.to_wire_string());
+            // Heartbeats are frequent but uninteresting; the session log keeps
+            // them only at trace so an idle engine cannot fill the file.
+            if matches!(command, EngineCommand::IsReady) {
+                log::trace!("{} <- {}", self.process.binary().display(), command.to_wire_string());
+            } else {
+                log::debug!("{} <- {}", self.process.binary().display(), command.to_wire_string());
+            }
             if let Err(error) = self.process.try_send(command.clone()) {
                 log::warn!(
                     "could not send `{}` to {}: {}",
@@ -351,6 +372,10 @@ mod tests {
         host.set_analysis(true, &GameState::new().fen(), SearchGoal::Analyse);
         host.pump();
         assert_eq!(host.view().status, AnalysisStatus::Offline);
+        assert!(
+            !host.has_handshaken(),
+            "an engine that never answered uci must not be auto-restarted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -364,6 +389,7 @@ mod tests {
             pump_until(&mut host, Duration::from_secs(20), |v| v.status == AnalysisStatus::Ready),
             "handshake"
         );
+        assert!(host.has_handshaken(), "the ready engine completed its handshake");
         assert!(
             host.options().iter().any(|option| option.name == "Hash"),
             "the engine must declare the Hash option"
@@ -412,6 +438,9 @@ mod tests {
             "the mute engine must complete the handshake"
         );
 
+        // The watchdog only watches a running search now; an idle engine is
+        // not pinged. Ask it to search, then let it go mute.
+        host.set_analysis(true, &GameState::new().fen(), SearchGoal::Analyse);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !host.is_stalled() && Instant::now() < deadline {
             host.pump();

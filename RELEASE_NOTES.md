@@ -3,7 +3,8 @@
 ## v0.1.0 — unreleased (Phase 7 in progress)
 
 A native macOS (Apple Silicon) UCI chess GUI in Rust: board on the left, live
-engine analysis on the right, move list along the bottom.
+engine analysis on the right, move list along the bottom, and a flat
+MD-Viewer-style toolbar across the top.
 
 ### What works
 
@@ -17,18 +18,54 @@ engine analysis on the right, move list along the bottom.
   player bars above and below the board; flags end the game.
 - **Opening book:** PolyGlot (`.bin`), loaded at start-up from
   `books/gm2001.bin`; weighted-random book replies in games, switchable. The
-  book box labels the current opening by name (ECO table) when it is known.
-- **Games:** resign and draw by agreement, with the result written to the PGN.
+  book box labels the current opening by name (ECO table) and keeps the last
+  known name after the line leaves the book.
+- **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
+  (Game → Claim draw (threefold)), with the result written to the PGN.
+- **Tournaments:** Tournament → New tournament… opens a two-engine match
+  window (engines, Hash/Nalimov cache, 4+1 clock, games, reverse colours, an
+  EPD start book and/or PolyGlot `.bin` move book, resign/draw adjudication and
+  a PGN path). Start plays the match on the main board, one game after another, with
+  the live move list, clocks and engine cards. EPD books record their start
+  position as `SetUp`/`FEN`; a `.bin` move book is replayed from move 1 when it
+  contains the line to that position, so the opening moves are in the PGN too. The movable Tournament window shows the head-to-head score in standard chess
+  notation (`A vs B: 2½–3½`, draws count half a point) and the results of
+  finished games; the end-of-match result pop-up lists them too.
 - **Files:** open and save PGN (mainline), copy PGN, copy/save FEN.
+- **Multi-game PGN:** opening a file with more than one game opens a movable
+  **PGN games** window with a scrollable list (#, White, Black, Result, Date,
+  Event, plus the PGN `Termination` reason next to the result when the file
+  provides it). Every row spans the full window width and the columns are
+  distributed across it. Click anywhere in a row to load that game into the
+  normal bottom move list; the window
+  stays open so another can be picked, even after choosing a game mode. The
+  bottom move list shows the result and the PGN `Termination` reason next to
+  it. Close it
+  with the top Close button or the title-bar X; File → PGN games… reopens it.
 - **Board themes:** View → Board theme picks any PNG/JPEG board from
   `public/images/board/`; the choice is remembered between launches.
+- **Window layout:** the main window has a minimum width derived from the saved
+  right-panel width plus a 320-point board, so the board can no longer be
+  squeezed out of view. The saved layout (right panel 917, window 1246) is the
+  minimum for that configuration.
 - **Piece sets:** View → Piece set picks any complete cburnett-family set from
   `public/piece/` (41 here); the choice is remembered between launches.
 - **Figurine notation:** View → Figurines in move list (on by default) and
   Figurines in engine evaluation (off by default). Saved and copied PGN files
   always stay standard SAN.
 - **Engines:** UCI handshake and options, a watchdog that restarts a stalled
-  engine, loaded engines remembered between launches.
+  or exited engine, loaded engines remembered between launches. Recent engine
+  output counts as proof of life, so a busy search is not mistaken for a stall;
+  a second failure within 60 s leaves the engine offline to avoid loops. The
+  Engine A/B options window is a grouped settings page: engine header, dashed
+  sections, labeled fields in two columns, and a Default button that resets
+  every option.
+- **Diagnostics:** one `logs/siliconboard.log` per run, truncated at start-up.
+  It records lifecycle messages, UCI commands, engine stderr and process exit
+  status, which is what is needed to diagnose an engine that goes offline.
+  Engine → Session log switches the file on or off (on by default, remembered
+  between launches). Idle engines are no longer pinged, so a finished match
+  leaves the log and the CPU alone.
 - **Settings:** time control, book play, engine option values, window size and
   panel sizes survive a restart.
 - **Performance:** engine output wakes the window directly, coalesced to about

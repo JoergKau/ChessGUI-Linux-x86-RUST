@@ -7,6 +7,7 @@
 //! [`AppEvent`], which [`SiliconBoardApp::drain_app_events`] picks up each frame.
 
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use crate::chess::clock::{Clock, TimeControl};
 use crate::chess::game_state::{Ending, MoveLine};
 use crate::chess::opening_book::BookPicker;
 use crate::chess::openings::{OpeningError, OpeningNames};
-use crate::chess::pgn::{self, PgnError, PgnImport};
+use crate::chess::pgn::{self, PgnCollection, PgnError, PgnImport};
 use crate::chess::players::{accepts_draw, GameMode, Seat};
 use crate::chess::{BookError, GameState, PieceColor, PolyglotBook};
 use crate::engine::protocol::GoControl;
@@ -29,10 +30,18 @@ use crate::engine::{AnalysisStatus, EngineError, EngineHost, EngineProcess, Engi
 use crate::gui::board_view::{self, BoardAction, BoardView};
 use crate::gui::eval_panel::{self, EvalCard, EvalSummary};
 use crate::gui::menu_bar::{self, MenuAction, MenuState};
-use crate::gui::options_dialog::{OptionsAction, OptionsDialog};
+use crate::gui::options_dialog::{default_value, OptionsAction, OptionsDialog};
+use crate::gui::tournament_dialog::{
+    self, ProgressAction, TournamentAction, TournamentDialog, TournamentSide,
+};
 use crate::settings::{self, Settings, SettingsError};
 use crate::gui::time_control::{self, ClockFace, DialogOutcome, PlayerBar, TimeControlDialog};
 use crate::gui::{pgn_panel, theme};
+use crate::tournament::{
+    self, book_kind, find_book_path, game_headers, schedule_games, score_label, Adjudication,
+    Adjudicator, BookKind, CurrentGame, EngineSpec, EpdBook, ScheduledGame, TournamentBook,
+    TournamentConfig, TournamentStatus,
+};
 use shakmaty::Move;
 
 /// How long engines get to quit on their own at app exit before they are killed.
@@ -285,7 +294,7 @@ enum AppEvent {
     },
     /// A PGN file was read and parsed.
     PgnOpened {
-        outcome: Option<Result<(String, PgnImport), OpenPgnError>>,
+        outcome: Option<Result<(String, PgnCollection), OpenPgnError>>,
     },
     /// File was written.
     FileSaved {
@@ -305,6 +314,22 @@ enum AppEvent {
     /// The settings file was written.
     SettingsSaved {
         outcome: Result<(), SettingsError>,
+    },
+    /// The tournament dialog asked for an engine file.
+    TournamentEnginePicked {
+        side: TournamentSide,
+        outcome: Option<EngineSpec>,
+    },
+    /// The tournament dialog asked for an EPD opening book.
+    TournamentBookPicked { outcome: Option<PathBuf> },
+    /// The tournament dialog asked for a PolyGlot `.bin` move book.
+    TournamentMoveBookPicked { outcome: Option<PathBuf> },
+    /// The tournament dialog asked for a PGN destination.
+    TournamentPgnPicked { outcome: Option<PathBuf> },
+    /// The tournament's opening book was indexed.
+    TournamentBookLoaded {
+        generation: u64,
+        outcome: Result<TournamentBook, String>,
     },
 }
 
@@ -342,6 +367,69 @@ impl std::error::Error for OpenPgnError {
     }
 }
 
+/// Where a GUI tournament is in its life cycle.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TournamentPhase {
+    /// Reading and indexing the EPD opening book.
+    LoadingBook,
+    /// Waiting for the two engines to finish their handshakes.
+    LoadingEngines,
+    /// The previous game is on screen; the next one starts shortly.
+    BetweenGames,
+    /// The current game is being played on the board.
+    Playing,
+    /// Every game is finished, or the user stopped the match.
+    Finished,
+}
+
+/// A tournament driven by the app's normal game loop: one game at a time on
+/// the main board, with the move list, clocks and engine cards live.
+struct TournamentSession {
+    /// The match configuration.
+    config: TournamentConfig,
+    /// Where the session is.
+    phase: TournamentPhase,
+    /// The opening book, once loaded.
+    book: Option<TournamentBook>,
+    /// One entry per game, built after the book is loaded.
+    schedule: Vec<ScheduledGame>,
+    /// 1-based number of the game being played (or about to be played).
+    game_number: u32,
+    /// Slot that plays White in the current game.
+    white_slot: usize,
+    /// Resign/draw adjudication for the current game.
+    adjudicator: Adjudicator,
+    /// Destination for finished games. Opened and truncated at start.
+    pgn_file: std::fs::File,
+    /// Progress and the final tally.
+    status: TournamentStatus,
+    /// When the next game may start, during [`TournamentPhase::BetweenGames`].
+    next_game_due: Option<Instant>,
+    /// Identifies this run, so a late book-load result cannot land in a newer
+    /// tournament.
+    generation: u64,
+}
+
+impl TournamentSession {
+    /// Whether the tournament still owns the board.
+    fn active(&self) -> bool {
+        self.phase != TournamentPhase::Finished
+    }
+
+    /// Whether a game is on the board right now.
+    fn is_playing(&self) -> bool {
+        self.phase == TournamentPhase::Playing
+    }
+
+    /// The engine slot that plays `color` in the current game.
+    fn slot_for_color(&self, color: PieceColor) -> usize {
+        match color {
+            PieceColor::White => self.white_slot,
+            PieceColor::Black => 1 - self.white_slot,
+        }
+    }
+}
+
 /// The application state shared by every panel.
 pub struct SiliconBoardApp {
     /// Tokio runtime for engines, file dialogs and background I/O.
@@ -370,6 +458,10 @@ pub struct SiliconBoardApp {
     restarting: [Option<bool>; 2],
     /// When each slot was last restarted after a stall.
     restarted_at: [Option<Instant>; 2],
+    /// Whether an unexpected exit in this slot should be restarted. Cleared
+    /// when an engine fails its handshake or keeps failing, until a new engine
+    /// is loaded.
+    engine_auto_restart: [bool; 2],
     /// How the game ended by resignation or agreement. A flag is read from the clock.
     ending: Option<Ending>,
     /// `true` from Start until Abort, a game end, or a new game. A play-mode
@@ -407,6 +499,10 @@ pub struct SiliconBoardApp {
     book: Option<(String, PolyglotBook)>,
     /// ECO opening names, keyed by position.
     opening_names: Option<OpeningNames>,
+    /// The most recent ECO name at or before the displayed position. Kept
+    /// after the line leaves the named part of the table, so the last opening
+    /// stays on screen.
+    opening_name: Option<String>,
     /// Book moves for the displayed position, heaviest first.
     book_moves: Vec<(String, u16)>,
     /// FEN the engines and book were last synchronised to.
@@ -437,6 +533,25 @@ pub struct SiliconBoardApp {
     frame_timer: Option<FrameTimer>,
     /// When this frame's `logic` began, so `ui` can report the frame cost.
     frame_started: Option<Instant>,
+    /// The tournament configuration window, while it is open.
+    tournament_dialog: Option<TournamentDialog>,
+    /// The running (or last) tournament.
+    tournament: Option<TournamentSession>,
+    /// Counter used to reject late results from an older tournament.
+    tournament_generation: u64,
+    /// A multi-game PGN whose games are listed in the bottom panel.
+    pgn_collection: Option<PgnCollection>,
+    /// Selected game in `pgn_collection` (zero-based).
+    pgn_browser_selected: usize,
+    /// `Termination` reason from the loaded PGN, shown next to the result in
+    /// the bottom move list.
+    pgn_termination: Option<String>,
+    /// Whether the PGN games list window is visible.
+    pgn_browser_window_open: bool,
+    /// Whether the tournament window is visible.
+    tournament_window_open: bool,
+    /// Whether the small result pop-up should be shown.
+    tournament_finished_popup: bool,
 }
 
 impl SiliconBoardApp {
@@ -511,6 +626,7 @@ impl SiliconBoardApp {
             book_picker: BookPicker::default(),
             restarting: [None, None],
             restarted_at: [None, None],
+            engine_auto_restart: [false, false],
             ending: None,
             game_started: false,
             engine_settings: [BTreeMap::new(), BTreeMap::new()],
@@ -529,6 +645,7 @@ impl SiliconBoardApp {
             analysis_on: [false, false],
             book: None,
             opening_names: None,
+            opening_name: None,
             book_moves: Vec::new(),
             synced_fen: String::new(),
             last_ply: 0,
@@ -544,6 +661,15 @@ impl SiliconBoardApp {
             pgn_galleys: None,
             frame_timer: std::env::var_os("SILICONBOARD_PERF").map(|_| FrameTimer::new_at(Instant::now())),
             frame_started: None,
+            tournament_dialog: None,
+            tournament: None,
+            tournament_generation: 0,
+            pgn_collection: None,
+            pgn_browser_selected: 0,
+            pgn_termination: None,
+            pgn_browser_window_open: false,
+            tournament_window_open: false,
+            tournament_finished_popup: false,
         }
     }
 
@@ -578,9 +704,16 @@ impl SiliconBoardApp {
             ctx.request_repaint();
         }
         // Engine output wakes the window from the reader task, so a frame runs
-        // as soon as there is new analysis. The tick below only keeps the
-        // watchdog and the handshake timeout alive while an engine is silent.
-        if (0..2).any(|slot| self.engine_live(slot)) {
+        // as soon as there is new analysis. The tick below only covers a
+        // starting handshake and the watchdog of a running search. An idle
+        // loaded engine costs no frames.
+        let engine_tick_needed = self.engines.iter().flatten().any(|host| {
+            matches!(
+                host.view().status,
+                AnalysisStatus::Starting | AnalysisStatus::Thinking
+            )
+        });
+        if engine_tick_needed {
             ctx.request_repaint_after(ENGINE_TICK);
         }
         self.report_stalled_engines();
@@ -598,6 +731,8 @@ impl SiliconBoardApp {
         self.game_was_live = live;
         self.sync_clock(ctx);
         self.report_engine_start_up();
+        self.report_exited_engines();
+        self.tournament_tick(ctx);
         self.sync_position(false);
         self.handle_navigation_keys(ctx);
     }
@@ -661,6 +796,7 @@ impl SiliconBoardApp {
             match self.game.apply_uci(&uci) {
                 Ok(san) => {
                     self.view.clear_selection();
+                    self.tournament_observe_move(slot);
                     let mut text = format!("Engine {} played {}.", slot_letter(slot), san);
                     if let Some(result) = self.result_text() {
                         text.push_str(&format!(" {}.", result));
@@ -701,9 +837,16 @@ impl SiliconBoardApp {
             };
             if let Some((process, binary, reason)) = failure {
                 self.quit_processes(vec![process]);
+                self.engine_auto_restart[slot] = false;
                 self.engine_status[slot] = Some(AnalysisStatus::Offline);
                 self.engine_started[slot] = None;
                 self.analysis_on[slot] = false;
+                log::error!(
+                    "engine {} is not a UCI engine: {} ({})",
+                    letter,
+                    binary,
+                    reason
+                );
                 self.set_status(StatusLevel::Error, format!("Engine {} is not a UCI engine: {} ({}).", letter, binary, reason));
                 continue;
             }
@@ -721,6 +864,12 @@ impl SiliconBoardApp {
             if before == Some(AnalysisStatus::Starting)
                 && matches!(now.status, AnalysisStatus::Ready | AnalysisStatus::Thinking)
             {
+                log::info!(
+                    "engine {} ready: {} ({})",
+                    letter,
+                    now.name.as_deref().unwrap_or(&now.binary_name),
+                    now.binary_name
+                );
                 self.set_status(
                     StatusLevel::Info,
                     format!(
@@ -756,6 +905,7 @@ impl SiliconBoardApp {
                                 // A different engine: its own saved values apply, not the old engine's.
                                 self.engine_settings[slot] =
                                     self.settings.engine_options.get(&binary).cloned().unwrap_or_default();
+                                self.restarted_at[slot] = None;
                                 self.close_options_dialog(slot);
                                 self.settings.engines[slot] = Some(path);
                                 self.save_settings();
@@ -764,6 +914,7 @@ impl SiliconBoardApp {
                                 process,
                                 self.engine_settings[slot].clone(),
                             ));
+                            self.engine_auto_restart[slot] = true;
                             self.engine_status[slot] = None;
                             self.engine_started[slot] = Some(Instant::now());
                             let playing = self.mode.engine_slots().contains(&slot);
@@ -803,25 +954,37 @@ impl SiliconBoardApp {
                     Ok(names) => {
                         log::info!("opening names indexed: {} positions", names.len());
                         self.opening_names = Some(names);
+                        self.opening_name = self.opening_name_for_display();
                     }
                     Err(err) => log::warn!("opening names not loaded: {}", err),
                 },
                 AppEvent::PgnOpened { outcome } => match outcome {
                     None => self.set_status(StatusLevel::Info, "Open cancelled.".to_string()),
-                    Some(Ok((name, import))) => {
-                        let mut game = import.game;
-                        game.goto_start();
-                        self.game = game;
-                        self.ending = None;
-                        self.game_started = false;
-                        self.reset_clock();
-                        self.view.clear_selection();
-                        match import.ignored.summary() {
-                            Some(note) => self.set_status(
-                                StatusLevel::Warning,
-                                format!("Opened {} ({})", name, note),
-                            ),
-                            None => self.set_status(StatusLevel::Info, format!("Opened {}", name)),
+                    Some(Ok((name, mut collection))) => {
+                        collection.name = name.clone();
+                        if collection.is_multi_game() {
+                            let total = collection.games.len();
+                            self.pgn_collection = Some(collection);
+                            self.pgn_browser_selected = 0;
+                            self.pgn_browser_window_open = true;
+                            self.select_pgn_game(0);
+                            self.set_status(
+                                StatusLevel::Info,
+                                format!(
+                                    "Opened {} — {} games. Pick a game in the PGN games window.",
+                                    name, total
+                                ),
+                            );
+                        } else {
+                            self.pgn_collection = None;
+                            self.pgn_browser_selected = 0;
+                            self.pgn_browser_window_open = false;
+                            match collection.load_game(0) {
+                                Ok(import) => self.load_pgn_game(&name, import, None),
+                                Err(err) => {
+                                    self.set_status(StatusLevel::Error, err.to_string())
+                                }
+                            }
                         }
                     }
                     Some(Err(err)) => {
@@ -885,6 +1048,69 @@ impl SiliconBoardApp {
                         self.set_status(StatusLevel::Error, format!("Could not save {}: {}", what, err));
                     }
                 },
+                AppEvent::TournamentEnginePicked { side, outcome } => match outcome {
+                    None => self.set_status(
+                        StatusLevel::Info,
+                        format!("{} engine selection cancelled.", side.label()),
+                    ),
+                    Some(spec) => {
+                        if let Some(dialog) = self.tournament_dialog.as_mut() {
+                            dialog.set_engine(side, spec.clone());
+                        }
+                        self.set_status(
+                            StatusLevel::Info,
+                            format!("{} engine: {}.", side.label(), spec.name),
+                        );
+                    }
+                },
+                AppEvent::TournamentBookPicked { outcome } => match outcome {
+                    None => self.set_status(
+                        StatusLevel::Info,
+                        "Opening-book selection cancelled.".to_string(),
+                    ),
+                    Some(path) => {
+                        if let Some(dialog) = self.tournament_dialog.as_mut() {
+                            dialog.set_book_path(path.clone());
+                        }
+                        self.set_status(
+                            StatusLevel::Info,
+                            format!("Opening book: {}.", path.display()),
+                        );
+                    }
+                },
+                AppEvent::TournamentMoveBookPicked { outcome } => match outcome {
+                    None => self.set_status(
+                        StatusLevel::Info,
+                        "Move-book selection cancelled.".to_string(),
+                    ),
+                    Some(path) => {
+                        if let Some(dialog) = self.tournament_dialog.as_mut() {
+                            dialog.set_move_book_path(path.clone());
+                        }
+                        self.set_status(
+                            StatusLevel::Info,
+                            format!("Move book: {}.", path.display()),
+                        );
+                    }
+                },
+                AppEvent::TournamentPgnPicked { outcome } => match outcome {
+                    None => self.set_status(
+                        StatusLevel::Info,
+                        "PGN destination selection cancelled.".to_string(),
+                    ),
+                    Some(path) => {
+                        if let Some(dialog) = self.tournament_dialog.as_mut() {
+                            dialog.set_pgn_path(path.clone());
+                        }
+                        self.set_status(
+                            StatusLevel::Info,
+                            format!("Tournament PGN: {}.", path.display()),
+                        );
+                    }
+                },
+                AppEvent::TournamentBookLoaded { generation, outcome } => {
+                    self.handle_tournament_book_loaded(generation, outcome);
+                }
             }
         }
         if received {
@@ -909,8 +1135,24 @@ impl SiliconBoardApp {
             Some((_, book)) => self.game.book_suggestions(book),
             None => Vec::new(),
         };
+        self.opening_name = self.opening_name_for_display();
         self.fen_input = fen.clone();
         self.synced_fen = fen;
+    }
+
+    /// The latest ECO name at or before the displayed position. Scanning back
+    /// keeps the last opening name when the line leaves the part of the table
+    /// that has names, which is what the book box shows.
+    fn opening_name_for_display(&self) -> Option<String> {
+        let names = self.opening_names.as_ref()?;
+        for ply in self.game.active_history().iter().rev() {
+            if let Some(name) = names.name_for(&ply.after) {
+                return Some(name.to_string());
+            }
+        }
+        names
+            .name_for(&self.game.start_position())
+            .map(str::to_string)
     }
 
     /// ← / → step through the game; Home / End jump to the ends.
@@ -944,10 +1186,20 @@ impl SiliconBoardApp {
 
     /// Perform a menu or FEN-bar action.
     fn perform(&mut self, action: MenuAction, ctx: &egui::Context) {
+        if self.tournament.as_ref().is_some_and(TournamentSession::active)
+            && action_conflicts_with_tournament(action)
+        {
+            self.set_status(
+                StatusLevel::Warning,
+                "Stop the tournament before changing the game or the engines.".to_string(),
+            );
+            return;
+        }
         match action {
             MenuAction::NewGame => {
                 self.game = GameState::new();
                 self.ending = None;
+                self.pgn_termination = None;
                 self.game_started = false;
                 self.reset_clock();
                 self.view.clear_selection();
@@ -973,10 +1225,21 @@ impl SiliconBoardApp {
             MenuAction::Resign => self.resign(),
             MenuAction::OpenEngineOptions(slot) => self.open_engine_options(slot),
             MenuAction::OfferDraw => self.offer_draw(),
+            MenuAction::ClaimThreefold => self.claim_threefold(),
             MenuAction::OpenTimeControl => {
                 self.time_dialog = Some(TimeControlDialog::new(self.clock.as_ref().map(Clock::control)));
             }
             MenuAction::OpenPgn => self.open_pgn(),
+            MenuAction::ShowPgnGames => {
+                if self.pgn_collection.is_some() {
+                    self.pgn_browser_window_open = true;
+                } else {
+                    self.set_status(
+                        StatusLevel::Warning,
+                        "Open a PGN with more than one game first.".to_string(),
+                    );
+                }
+            }
             MenuAction::SavePgn => {
                 let text = pgn::to_pgn(&self.game, self.current_ending());
                 self.save_text("PGN", text, "game.pgn", "PGN", &["pgn"]);
@@ -1001,6 +1264,7 @@ impl SiliconBoardApp {
                 Ok(game) => {
                     self.game = game;
                     self.ending = None;
+                    self.pgn_termination = None;
                     self.game_started = false;
                     self.reset_clock();
                     self.view.clear_selection();
@@ -1013,6 +1277,13 @@ impl SiliconBoardApp {
             MenuAction::SetPieceSet(index) => self.set_piece_set(index),
             MenuAction::ToggleFigurinesMoveList => self.toggle_figurines(false),
             MenuAction::ToggleFigurinesEval => self.toggle_figurines(true),
+            MenuAction::OpenTournament => self.open_tournament_dialog(),
+            MenuAction::StopTournament => self.stop_tournament(),
+            MenuAction::ShowTournament => {
+                self.tournament_window_open = true;
+                self.tournament_finished_popup = false;
+            }
+            MenuAction::ToggleSessionLog => self.toggle_session_log(),
         }
     }
 
@@ -1069,7 +1340,12 @@ impl SiliconBoardApp {
 
             let recently_restarted = self.restarted_at[slot].is_some_and(|at| at.elapsed() < RESTART_WINDOW);
             if recently_restarted {
+                self.engine_auto_restart[slot] = false;
                 self.restarted_at[slot] = None;
+                log::error!(
+                    "engine {} stalled again within the restart window; leaving it offline",
+                    binary.display()
+                );
                 self.set_status(
                     StatusLevel::Error,
                     format!(
@@ -1080,10 +1356,71 @@ impl SiliconBoardApp {
             } else {
                 self.restarted_at[slot] = Some(Instant::now());
                 self.engines[slot] = None;
+                log::warn!(
+                    "engine {} stalled; restarting it from the same file",
+                    binary.display()
+                );
                 self.restart_engine(slot, binary, was_analysing);
                 self.set_status(
                     StatusLevel::Warning,
                     format!("Engine {} stopped answering. Restarting it.", slot_letter(slot)),
+                );
+            }
+        }
+    }
+
+    /// Replace an engine whose process ended on its own after a successful
+    /// handshake. Crashes are treated like stalls: restart once, and leave the
+    /// engine offline if it fails again within [`RESTART_WINDOW`].
+    fn report_exited_engines(&mut self) {
+        for slot in 0..2 {
+            let Some(host) = self.engines[slot].as_mut() else {
+                continue;
+            };
+            if !self.engine_auto_restart[slot]
+                || !host.has_exited()
+                || !host.has_handshaken()
+                || host.is_stalled()
+            {
+                continue;
+            }
+
+            let binary = host.binary_path();
+            let was_analysing = self.analysis_on[slot];
+            let process = host.shutdown();
+            self.close_options_dialog(slot);
+            self.quit_processes(vec![process]);
+            self.engines[slot] = None;
+            self.analysis_on[slot] = false;
+            self.engine_status[slot] = None;
+            self.engine_started[slot] = None;
+
+            let recently_restarted =
+                self.restarted_at[slot].is_some_and(|at| at.elapsed() < RESTART_WINDOW);
+            if recently_restarted {
+                self.engine_auto_restart[slot] = false;
+                self.restarted_at[slot] = None;
+                log::error!(
+                    "engine {} exited again within the restart window; leaving it offline",
+                    binary.display()
+                );
+                self.set_status(
+                    StatusLevel::Error,
+                    format!(
+                        "Engine {} stopped again. It is offline; load it to try once more.",
+                        slot_letter(slot)
+                    ),
+                );
+            } else {
+                self.restarted_at[slot] = Some(Instant::now());
+                log::warn!(
+                    "engine {} exited unexpectedly; restarting it from the same file",
+                    binary.display()
+                );
+                self.restart_engine(slot, binary, was_analysing);
+                self.set_status(
+                    StatusLevel::Warning,
+                    format!("Engine {} stopped unexpectedly. Restarting it.", slot_letter(slot)),
                 );
             }
         }
@@ -1095,10 +1432,14 @@ impl SiliconBoardApp {
             self.set_status(StatusLevel::Warning, format!("Engine {} is not loaded.", slot_letter(slot)));
             return;
         };
+        let view = host.view();
         let options = host.options().to_vec();
+        let engine_name = view.name.unwrap_or_else(|| view.binary_name.clone());
         self.options_dialog = Some(OptionsDialog::new(
             slot,
             slot_letter(slot),
+            engine_name,
+            view.binary_name,
             options,
             &self.engine_settings[slot],
         ));
@@ -1180,6 +1521,51 @@ impl SiliconBoardApp {
             StatusLevel::Info,
             format!("Engine {}: {} back to its default ({}).", slot_letter(slot), name, default),
         );
+    }
+
+    /// Set every option on the engine in `slot` back to the engine's default,
+    /// and forget the values saved for that engine file.
+    fn reset_all_engine_options(&mut self, slot: usize) {
+        let Some(host) = self.engines[slot].as_mut() else {
+            self.set_status(
+                StatusLevel::Warning,
+                format!("Engine {} is not loaded.", slot_letter(slot)),
+            );
+            return;
+        };
+        let defaults: Vec<(String, String)> = host
+            .options()
+            .iter()
+            .filter(|option| !matches!(option.kind, crate::engine::protocol::UciOptionKind::Button))
+            .map(|option| (option.name.clone(), default_value(option)))
+            .collect();
+        for (name, value) in &defaults {
+            host.set_option(name, value);
+        }
+        let file = host.binary_path().display().to_string();
+        self.engine_settings[slot].clear();
+        if let Some(saved) = self.settings.engine_options.get_mut(&file) {
+            saved.clear();
+        }
+        self.save_settings();
+        self.set_status(
+            StatusLevel::Info,
+            format!("Engine {}: all options back to their defaults.", slot_letter(slot)),
+        );
+    }
+
+    /// Switch session-file logging on or off and keep the choice.
+    fn toggle_session_log(&mut self) {
+        self.settings.session_log = !self.settings.session_log;
+        crate::logging::set_file_enabled(self.settings.session_log);
+        self.save_settings();
+        let text = if self.settings.session_log {
+            "Session log: on (logs/siliconboard.log).".to_string()
+        } else {
+            "Session log: off.".to_string()
+        };
+        log::info!("{}", text);
+        self.set_status(StatusLevel::Info, text);
     }
 
     /// Show the file picker for an engine and spawn the chosen binary.
@@ -1312,6 +1698,773 @@ impl SiliconBoardApp {
         );
     }
 
+    /// Show the tournament configuration window, starting from the saved
+    /// configuration and the engines the app already knows.
+    fn open_tournament_dialog(&mut self) {
+        if self.tournament.as_ref().is_some_and(TournamentSession::active) {
+            self.set_status(
+                StatusLevel::Warning,
+                "A tournament is already running. Stop it before starting another.".to_string(),
+            );
+            return;
+        }
+        let choices = self.engine_choices();
+        let mut config = self.settings.tournament.clone().unwrap_or_default();
+        if !config.white.is_set() {
+            if let Some(first) = choices.first() {
+                config.white = first.clone();
+            }
+        }
+        if !config.black.is_set() {
+            if let Some(second) = choices.get(1).or_else(|| choices.first()) {
+                config.black = second.clone();
+            }
+        }
+        if config.pgn_path.as_os_str().is_empty() {
+            config.pgn_path = tournament::default_pgn_path();
+        }
+        self.tournament_dialog = Some(TournamentDialog::new(config, choices));
+        self.tournament_finished_popup = false;
+    }
+
+    /// Engines offered in the tournament dialog: the loaded A/B slots, then the
+    /// files used last time. Paths are unique.
+    fn engine_choices(&self) -> Vec<EngineSpec> {
+        let mut choices: Vec<EngineSpec> = Vec::new();
+        for slot in 0..2 {
+            let spec = match &self.engines[slot] {
+                Some(host) => EngineSpec {
+                    path: host.binary_path(),
+                    name: self.engine_name(slot),
+                },
+                None => match &self.settings.engines[slot] {
+                    Some(path) => EngineSpec::from_path(path.clone()),
+                    None => continue,
+                },
+            };
+            if spec.is_set() && !choices.iter().any(|choice| choice.path == spec.path) {
+                choices.push(spec);
+            }
+        }
+        choices
+    }
+
+    /// Perform what the configuration window asked for.
+    fn handle_tournament_action(&mut self, action: TournamentAction) {
+        match action {
+            TournamentAction::None => {}
+            TournamentAction::Cancel => self.tournament_dialog = None,
+            TournamentAction::Start(config) => {
+                self.tournament_dialog = None;
+                self.start_tournament(*config);
+            }
+            TournamentAction::BrowseEngine(side) => self.pick_tournament_engine(side),
+            TournamentAction::BrowseBook => self.pick_tournament_book(),
+            TournamentAction::BrowseMoveBook => self.pick_tournament_move_book(),
+            TournamentAction::BrowsePgn => self.pick_tournament_pgn(),
+        }
+    }
+
+    /// Start the match. The games are played on the main board, one after the
+    /// other, using the normal game loop.
+    fn start_tournament(&mut self, config: TournamentConfig) {
+        if let Err(message) = config.validate() {
+            self.set_status(StatusLevel::Error, message);
+            return;
+        }
+        self.clear_pgn_browser();
+        let pgn_file = match open_tournament_pgn(&config.pgn_path) {
+            Ok(file) => file,
+            Err(message) => {
+                self.set_status(StatusLevel::Error, message);
+                return;
+            }
+        };
+        self.settings.tournament = Some(config.clone());
+        self.save_settings();
+
+        let phase = if config.opening_book.is_some() || config.move_book.is_some() {
+            TournamentPhase::LoadingBook
+        } else {
+            TournamentPhase::LoadingEngines
+        };
+        let mut status = TournamentStatus {
+            total_games: config.games,
+            pgn_path: config.pgn_path.clone(),
+            engines: [config.white.name.clone(), config.black.name.clone()],
+            running: true,
+            ..TournamentStatus::default()
+        };
+        status.message = Some(if phase == TournamentPhase::LoadingBook {
+            "Loading opening book…".to_string()
+        } else {
+            "Loading engines…".to_string()
+        });
+        self.tournament_generation = self.tournament_generation.wrapping_add(1);
+        let generation = self.tournament_generation;
+        self.tournament = Some(TournamentSession {
+            adjudicator: Adjudicator::new(&config),
+            config: config.clone(),
+            phase,
+            book: None,
+            schedule: Vec::new(),
+            game_number: 1,
+            white_slot: 0,
+            pgn_file,
+            status,
+            next_game_due: None,
+            generation,
+        });
+        self.tournament_window_open = true;
+        self.tournament_finished_popup = false;
+        // The board stays quiet while the engines and the book are loaded.
+        self.mode = GameMode::Analysis;
+        self.game_started = false;
+        for slot in 0..2 {
+            self.set_engine_analysis(slot, false);
+        }
+        self.sync_position(true);
+
+        let primary = match &config.opening_book {
+            Some(book) => match book_kind(&book.path) {
+                Ok(kind) => Some((book.path.clone(), kind)),
+                Err(message) => {
+                    self.fail_tournament(message);
+                    return;
+                }
+            },
+            None => None,
+        };
+        let move_book = config.move_book.clone();
+        if primary.is_some() || move_book.is_some() {
+            let tx = self.events_tx.clone();
+            self.spawn(async move {
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let mut start = None;
+                    let mut moves = None;
+                    if let Some((path, kind)) = primary {
+                        match kind {
+                            BookKind::Epd => {
+                                let book = EpdBook::load(&path).map_err(|err| err.to_string())?;
+                                if book.is_empty() {
+                                    return Err(format!(
+                                        "The EPD book {} has no positions.",
+                                        path.display()
+                                    ));
+                                }
+                                start = Some(book);
+                            }
+                            BookKind::Polyglot => {
+                                let book =
+                                    PolyglotBook::open(&path).map_err(|err| err.to_string())?;
+                                if book.is_empty() {
+                                    return Err(format!(
+                                        "The PolyGlot book {} has no moves.",
+                                        path.display()
+                                    ));
+                                }
+                                moves = Some(book);
+                            }
+                        }
+                    }
+                    if let Some(path) = move_book {
+                        let book = PolyglotBook::open(&path).map_err(|err| err.to_string())?;
+                        if book.is_empty() {
+                            return Err(format!(
+                                "The PolyGlot move book {} has no moves.",
+                                path.display()
+                            ));
+                        }
+                        moves = Some(book);
+                    }
+                    if start.is_none() && moves.is_none() {
+                        return Err("The opening book has no content.".to_string());
+                    }
+                    Ok(TournamentBook { start, moves })
+                })
+                .await
+                .map_err(|join| format!("opening-book task failed: {}", join))
+                .and_then(|result| result);
+                tx.send(AppEvent::TournamentBookLoaded {
+                    generation,
+                    outcome,
+                });
+            });
+        } else {
+            if let Some(session) = &mut self.tournament {
+                session.schedule = schedule_games(&session.config, 0);
+            }
+            self.load_tournament_engines();
+        }
+        self.set_status(
+            StatusLevel::Info,
+            format!("Tournament started: {} games.", config.games),
+        );
+    }
+
+    /// Make sure the two configured engines are in slots A and B. A slot that
+    /// already holds the right file is kept.
+    fn load_tournament_engines(&mut self) {
+        let Some(session) = &self.tournament else {
+            return;
+        };
+        let specs = [session.config.white.clone(), session.config.black.clone()];
+        for (slot, spec) in specs.iter().enumerate() {
+            let already = self.engines[slot].as_ref().is_some_and(|host| {
+                host.binary_path() == spec.path
+                    && host.view().status != AnalysisStatus::Offline
+            });
+            if !already {
+                self.spawn_engine_file(slot, spec.path.clone());
+            }
+        }
+        if let Some(session) = &mut self.tournament {
+            session.phase = TournamentPhase::LoadingEngines;
+            session.status.message = Some("Loading engines…".to_string());
+        }
+    }
+
+    /// The EPD index finished on a blocking thread.
+    fn handle_tournament_book_loaded(
+        &mut self,
+        generation: u64,
+        outcome: Result<TournamentBook, String>,
+    ) {
+        if self.tournament.as_ref().is_none_or(|session| {
+            session.generation != generation || session.phase != TournamentPhase::LoadingBook
+        }) {
+            return;
+        }
+        match outcome {
+            Ok(book) if book.is_empty() => {
+                self.fail_tournament("The opening book has no usable entries.".to_string());
+            }
+            Ok(book) => {
+                let count = book.opening_count();
+                if let Some(session) = &mut self.tournament {
+                    session.schedule = schedule_games(&session.config, count);
+                    session.book = Some(book);
+                    session.phase = TournamentPhase::LoadingEngines;
+                    session.status.message = Some("Loading engines…".to_string());
+                }
+                self.load_tournament_engines();
+            }
+            Err(message) => self.fail_tournament(message),
+        }
+    }
+
+    /// Set up the next scheduled game on the main board.
+    fn start_tournament_game(&mut self) {
+        let prepared = {
+            let Some(session) = self.tournament.as_ref() else {
+                return;
+            };
+            if session.phase == TournamentPhase::Finished {
+                return;
+            }
+            let index = session.game_number.saturating_sub(1) as usize;
+            let Some(scheduled) = session.schedule.get(index).cloned() else {
+                return self.fail_tournament("The tournament schedule is empty.".to_string());
+            };
+            let start_fen = match (
+                session.book.as_ref().and_then(TournamentBook::epd),
+                scheduled.opening,
+            ) {
+                (Some(book), Some(opening)) => match book.fen_at(opening) {
+                    Ok(Some(fen)) => Some(fen),
+                    Ok(None) => {
+                        return self.fail_tournament(format!(
+                            "EPD position {} has no FEN.",
+                            opening + 1
+                        ))
+                    }
+                    Err(err) => return self.fail_tournament(err.to_string()),
+                },
+                _ => None,
+            };
+            let target = match &start_fen {
+                Some(fen) => match GameState::from_fen(fen) {
+                    Ok(game) => game,
+                    Err(err) => {
+                        return self.fail_tournament(format!(
+                            "The opening position is not a legal FEN: {}",
+                            err
+                        ))
+                    }
+                },
+                None => GameState::new(),
+            };
+            // If a PolyGlot move book can reach the EPD position, replay that
+            // line so the PGN starts at move 1 and contains the book moves.
+            let game = if start_fen.is_some() {
+                let move_book = session
+                    .book
+                    .as_ref()
+                    .and_then(TournamentBook::polyglot)
+                    .or_else(|| self.book.as_ref().map(|(_, book)| book));
+                let path = move_book.and_then(|book| find_book_path(book, &target.position()));
+                match path {
+                    Some(path) => {
+                        let mut game = GameState::new();
+                        if path.iter().all(|uci| game.apply_uci(uci).is_ok()) {
+                            game
+                        } else {
+                            target.clone()
+                        }
+                    }
+                    None => target.clone(),
+                }
+            } else {
+                target
+            };
+            if game.is_game_over() {
+                return self.fail_tournament(
+                    "An opening position is already finished.".to_string(),
+                );
+            }
+            let white_slot = if scheduled.white_is_first { 0 } else { 1 };
+            let white_name = self.engine_name(white_slot);
+            let black_name = self.engine_name(1 - white_slot);
+            (
+                game,
+                white_slot,
+                white_name,
+                black_name,
+                session.game_number,
+                session.config.games,
+                session.config.time_control,
+                session.config.engine_options(),
+            )
+        };
+
+        let (game, white_slot, white_name, black_name, number, total, control, options) = prepared;
+        self.game = game;
+        self.ending = None;
+        self.pgn_termination = None;
+        self.game_started = true;
+        self.mode = GameMode::EngineVsEngine;
+        self.clock = Some(Clock::new(control, self.game.turn()));
+        self.view.clear_selection();
+        // Apply the tournament's Hash and Nalimov values before the first
+        // search. They are kept in the per-slot settings, so a watchdog
+        // restart sends them again.
+        for slot in 0..2 {
+            for (name, value) in &options {
+                self.engine_settings[slot].insert(name.clone(), value.clone());
+                if let Some(host) = self.engines[slot].as_mut() {
+                    host.set_option(name, value);
+                }
+            }
+        }
+        let engine_names = [self.engine_name(0), self.engine_name(1)];
+        if let Some(session) = &mut self.tournament {
+            session.white_slot = white_slot;
+            session.phase = TournamentPhase::Playing;
+            session.adjudicator = Adjudicator::new(&session.config);
+            session.next_game_due = None;
+            session.status.message = None;
+            session.status.engines = engine_names;
+            session.status.current = vec![CurrentGame {
+                number,
+                white: white_name.clone(),
+                black: black_name.clone(),
+                ply: 0,
+                fullmove: self.game.fullmove_number(),
+                score: None,
+            }];
+        }
+        for slot in 0..2 {
+            if let Some(host) = self.engines[slot].as_mut() {
+                host.new_game();
+            }
+        }
+        for slot in 0..2 {
+            self.set_engine_analysis(slot, true);
+        }
+        self.sync_position(true);
+        self.set_status(
+            StatusLevel::Info,
+            format!(
+                "Tournament game {} of {}: {} vs {}.",
+                number, total, white_name, black_name
+            ),
+        );
+    }
+
+    /// Advance the tournament once per frame.
+    fn tournament_tick(&mut self, ctx: &egui::Context) {
+        let Some(phase) = self.tournament.as_ref().map(|session| session.phase) else {
+            return;
+        };
+        match phase {
+            TournamentPhase::LoadingBook => {
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+            TournamentPhase::LoadingEngines => {
+                // Engine results wake the window, but a tick keeps a slow
+                // handshake from stalling the match.
+                ctx.request_repaint_after(Duration::from_millis(200));
+                let ready = (0..2).all(|slot| {
+                    self.engines[slot].as_ref().is_some_and(|host| {
+                        matches!(
+                            host.view().status,
+                            AnalysisStatus::Ready | AnalysisStatus::Thinking
+                        )
+                    })
+                });
+                let loading = self.engine_loading.iter().any(|loading| *loading);
+                let failed = (0..2).any(|slot| {
+                    self.engines[slot]
+                        .as_ref()
+                        .is_none_or(|host| host.view().status == AnalysisStatus::Offline)
+                });
+                if ready {
+                    self.start_tournament_game();
+                } else if failed && !loading {
+                    self.fail_tournament(
+                        "A tournament engine could not be started.".to_string(),
+                    );
+                }
+            }
+            TournamentPhase::BetweenGames => {
+                let due = self
+                    .tournament
+                    .as_ref()
+                    .and_then(|session| session.next_game_due);
+                if let Some(due) = due {
+                    let remaining = due.saturating_duration_since(Instant::now());
+                    ctx.request_repaint_after(remaining.max(Duration::from_millis(16)));
+                    if remaining.is_zero() {
+                        self.start_tournament_game();
+                    }
+                }
+            }
+            TournamentPhase::Playing => {
+                // Browsing an earlier move pauses the tournament; it resumes
+                // when the cursor returns to the live position.
+                if self.game.cur_ply() != self.game.total_plies() {
+                    return;
+                }
+                if self.game.is_threefold_repetition() && self.ending.is_none() {
+                    self.ending = Some(Ending::ThreefoldRepetition);
+                }
+                if self.current_ending().is_some() || self.game.is_game_over() {
+                    self.finish_tournament_game();
+                    // The next game starts after a pause; make sure a frame
+                    // runs even though both engines are now quiet.
+                    ctx.request_repaint_after(Duration::from_millis(16));
+                } else if (0..2).any(|slot| {
+                    !self.engine_loading[slot]
+                        && self.engines[slot]
+                            .as_ref()
+                            .is_none_or(|host| host.view().status == AnalysisStatus::Offline)
+                }) {
+                    self.fail_tournament(
+                        "A tournament engine stopped during the game.".to_string(),
+                    );
+                }
+            }
+            TournamentPhase::Finished => {}
+        }
+    }
+
+    /// A book move has no engine score; it resets the adjudication counters,
+    /// as cutechess does for forced/book moves.
+    fn tournament_observe_book_move(&mut self) {
+        let Some(session) = self.tournament.as_mut() else {
+            return;
+        };
+        if !session.is_playing() {
+            return;
+        }
+        let mover = self.game.turn().opposite();
+        let fullmove = self.game.fullmove_number();
+        let last_move = self.game.history().last().map(|ply| &ply.move_);
+        let _ = session
+            .adjudicator
+            .observe(mover, None, last_move, fullmove);
+        let ply = self.game.total_plies();
+        if let Some(game) = session.status.current.first_mut() {
+            game.ply = ply;
+            game.fullmove = fullmove;
+            game.score = None;
+        }
+    }
+
+    /// Observe the score of the engine that just moved and adjudicate.
+    fn tournament_observe_move(&mut self, slot: usize) {        let Some(session) = self.tournament.as_ref() else {
+            return;
+        };
+        if !session.is_playing() {
+            return;
+        }
+        let white_slot = session.white_slot;
+        let mover = if slot == white_slot {
+            PieceColor::White
+        } else {
+            PieceColor::Black
+        };
+        let score = self.engines[slot]
+            .as_ref()
+            .and_then(|host| host.view().stats.score);
+        let fullmove = self.game.fullmove_number();
+        let last_move = self.game.history().last().map(|ply| &ply.move_);
+        let adjudication = self
+            .tournament
+            .as_mut()
+            .expect("the tournament exists")
+            .adjudicator
+            .observe(mover, score, last_move, fullmove);
+        let ply = self.game.total_plies();
+        let score_text = score.map(score_label);
+        if let Some(session) = &mut self.tournament {
+            if let Some(game) = session.status.current.first_mut() {
+                game.ply = ply;
+                game.fullmove = fullmove;
+                game.score = score_text;
+            }
+        }
+        match adjudication {
+            Adjudication::None => {}
+            Adjudication::Draw => self.ending = Some(Ending::AdjudicatedDraw),
+            Adjudication::Resign(loser) => {
+                self.ending = Some(Ending::AdjudicatedWin {
+                    winner: loser.opposite(),
+                });
+            }
+        }
+    }
+
+    /// Write the finished game, update the tally, and start the next one.
+    fn finish_tournament_game(&mut self) {
+        let (number, white_slot, config) = {
+            let Some(session) = self.tournament.as_ref() else {
+                return;
+            };
+            (
+                session.game_number,
+                session.white_slot,
+                session.config.clone(),
+            )
+        };
+        let ending = if self.game.is_game_over() {
+            None
+        } else {
+            self.current_ending()
+        };
+        let token = ending.map_or_else(
+            || pgn::result_token(&self.game, None).to_string(),
+            |ending| ending.result_token().to_string(),
+        );
+        let reason = ending.map_or_else(
+            || self.game.outcome(),
+            |ending| ending.description(),
+        );
+        if self.game.is_game_over() {
+            // A mate or stalemate wins over any adjudication on the same move.
+            self.ending = None;
+        }
+        let white_name = self.engine_name(white_slot);
+        let black_name = self.engine_name(1 - white_slot);
+        let headers = game_headers(
+            &config,
+            number,
+            &white_name,
+            &black_name,
+            &reason,
+            self.game.total_plies(),
+        );
+        let text = pgn::to_pgn_with_headers(&self.game, &token, &headers);
+        let write_result = {
+            let session = self
+                .tournament
+                .as_mut()
+                .expect("the tournament exists");
+            session
+                .pgn_file
+                .write_all(text.as_bytes())
+                .and_then(|()| session.pgn_file.write_all(b"\n"))
+                .and_then(|()| session.pgn_file.flush())
+        };
+        if let Err(err) = write_result {
+            self.fail_tournament(format!("Could not write the PGN file: {}", err));
+            return;
+        }
+
+        let total = config.games;
+        let summary = {
+            let session = self
+                .tournament
+                .as_mut()
+                .expect("the tournament exists");
+            session.status.completed_games += 1;
+            match token.as_str() {
+                "1-0" => *session.status.wins.entry(white_name.clone()).or_default() += 1,
+                "0-1" => *session.status.wins.entry(black_name.clone()).or_default() += 1,
+                "1/2-1/2" => session.status.draws += 1,
+                _ => session.status.failed_games += 1,
+            }
+            let result_line = format!("Game {}: {} ({})", number, token, reason);
+            session.status.results.push(result_line);
+            session.status.current.clear();
+            session.game_number += 1;
+            if session.game_number > total {
+                session.phase = TournamentPhase::Finished;
+                session.status.running = false;
+                session.status.message = None;
+                session.book = None;
+            } else {
+                session.phase = TournamentPhase::BetweenGames;
+                session.status.message = Some("Next game…".to_string());
+                session.next_game_due = Some(Instant::now() + Duration::from_secs(1));
+            }
+            session.status.summary()
+        };
+
+        self.game_started = false;
+        if let Some(clock) = self.clock.as_mut() {
+            clock.pause();
+        }
+        for slot in 0..2 {
+            self.set_engine_analysis(slot, false);
+        }
+        self.sync_position(true);
+        if self
+            .tournament
+            .as_ref()
+            .is_some_and(|session| session.phase == TournamentPhase::Finished)
+        {
+            self.tournament_window_open = false;
+            self.tournament_finished_popup = true;
+            self.set_status(StatusLevel::Info, summary);
+        } else {
+            self.set_status(
+                StatusLevel::Info,
+                format!(
+                    "Tournament game {} finished: {} ({}). Next game…",
+                    number, token, reason
+                ),
+            );
+        }
+    }
+
+    /// Stop the match because of an error.
+    fn fail_tournament(&mut self, message: String) {
+        if let Some(session) = &mut self.tournament {
+            session.phase = TournamentPhase::Finished;
+            session.status.running = false;
+            session.status.failed = true;
+            session.status.message = Some(message.clone());
+            session.status.current.clear();
+            session.book = None;
+        }
+        self.game_started = false;
+        if let Some(clock) = self.clock.as_mut() {
+            clock.pause();
+        }
+        for slot in 0..2 {
+            self.set_engine_analysis(slot, false);
+        }
+        self.sync_position(true);
+        self.tournament_window_open = false;
+        self.tournament_finished_popup = true;
+        self.set_status(
+            StatusLevel::Error,
+            format!("Tournament failed: {}", message),
+        );
+    }
+
+    /// Stop the running tournament now. Completed games stay in the PGN.
+    fn stop_tournament(&mut self) {
+        let Some(session) = &mut self.tournament else {
+            self.set_status(
+                StatusLevel::Warning,
+                "No tournament is running.".to_string(),
+            );
+            return;
+        };
+        if session.phase == TournamentPhase::Finished {
+            self.set_status(
+                StatusLevel::Warning,
+                "No tournament is running.".to_string(),
+            );
+            return;
+        }
+        session.phase = TournamentPhase::Finished;
+        session.status.running = false;
+        session.status.cancelled = true;
+        session.status.message = None;
+        session.status.current.clear();
+        session.book = None;
+        self.game_started = false;
+        if let Some(clock) = self.clock.as_mut() {
+            clock.pause();
+        }
+        for slot in 0..2 {
+            self.set_engine_analysis(slot, false);
+        }
+        self.sync_position(true);
+        self.tournament_window_open = false;
+        self.tournament_finished_popup = true;
+        self.set_status(StatusLevel::Warning, "Tournament stopped.".to_string());
+    }
+
+    /// File picker for one tournament engine.
+    fn pick_tournament_engine(&mut self, side: TournamentSide) {
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Choose a UCI engine")
+                .pick_file()
+                .await;
+            let outcome = picked.map(|handle| EngineSpec::from_path(handle.path().to_path_buf()));
+            tx.send(AppEvent::TournamentEnginePicked { side, outcome });
+        });
+    }
+
+    /// File picker for the EPD opening book.
+    fn pick_tournament_book(&mut self) {
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Choose an EPD or PolyGlot opening book")
+                .add_filter("Opening book", &["epd", "bin"])
+                .pick_file()
+                .await;
+            let outcome = picked.map(|handle| handle.path().to_path_buf());
+            tx.send(AppEvent::TournamentBookPicked { outcome });
+        });
+    }
+
+    /// File picker for the additional PolyGlot move book.
+    fn pick_tournament_move_book(&mut self) {
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Choose a PolyGlot move book")
+                .add_filter("PolyGlot book", &["bin"])
+                .pick_file()
+                .await;
+            let outcome = picked.map(|handle| handle.path().to_path_buf());
+            tx.send(AppEvent::TournamentMoveBookPicked { outcome });
+        });
+    }
+
+    /// Save dialog for the tournament PGN.
+    fn pick_tournament_pgn(&mut self) {
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Choose the tournament PGN file")
+                .set_file_name("engine-match.pgn")
+                .add_filter("PGN", &["pgn"])
+                .save_file()
+                .await;
+            let outcome = picked.map(|handle| handle.path().to_path_buf());
+            tx.send(AppEvent::TournamentPgnPicked { outcome });
+        });
+    }
+
     /// Show the file picker for a PolyGlot book and read it off the UI thread.
     fn load_book(&mut self) {
         self.set_status(StatusLevel::Info, "Choose a PolyGlot book…".to_string());
@@ -1424,6 +2577,78 @@ impl SiliconBoardApp {
         });
     }
 
+    /// Load one parsed PGN game onto the board. `game_number` is set when it
+    /// came from a multi-game file, for the status line.
+    fn load_pgn_game(
+        &mut self,
+        name: &str,
+        import: PgnImport,
+        game_number: Option<(usize, usize)>,
+    ) {
+        let result = import.result;
+        let termination = import.termination.trim().to_string();
+        let mut game = import.game;
+        let position_over = game.is_game_over();
+        game.goto_start();
+        self.game = game;
+        self.pgn_termination = (!termination.is_empty()).then_some(termination);
+        self.ending = if position_over {
+            None
+        } else {
+            result.map(|result| Ending::FromPgn {
+                winner: result.winner(),
+            })
+        };
+        self.game_started = false;
+        self.reset_clock();
+        self.view.clear_selection();
+        let base = match game_number {
+            Some((index, total)) => {
+                format!("Opened {} — game {} of {}", name, index + 1, total)
+            }
+            None => format!("Opened {}", name),
+        };
+        let base = match import.ignored.summary() {
+            Some(note) => format!("{} ({})", base, note),
+            None => base,
+        };
+        let text = match self.result_text() {
+            Some(result) => format!("{} — {}.", base, result),
+            None => base,
+        };
+        self.set_status(StatusLevel::Info, text);
+    }
+
+    /// Load the game at `index` from the multi-game PGN browser.
+    fn select_pgn_game(&mut self, index: usize) {
+        let Some(collection) = &self.pgn_collection else {
+            return;
+        };
+        let Some(entry) = collection.games.get(index) else {
+            return;
+        };
+        let name = collection.name.clone();
+        let total = collection.games.len();
+        let text = entry.text.clone();
+        match pgn::parse_pgn_with_report(&text) {
+            Ok(import) => {
+                self.pgn_browser_selected = index;
+                self.load_pgn_game(&name, import, Some((index, total)));
+            }
+            Err(err) => self.set_status(
+                StatusLevel::Error,
+                format!("Game {} could not be loaded: {}", index + 1, err),
+            ),
+        }
+    }
+
+    /// Leave the multi-game PGN browser and show the normal move list again.
+    fn clear_pgn_browser(&mut self) {
+        self.pgn_collection = None;
+        self.pgn_browser_selected = 0;
+        self.pgn_browser_window_open = false;
+    }
+
     /// Show the file picker for a PGN file, then read and parse it.
     fn open_pgn(&mut self) {
         self.set_status(StatusLevel::Info, "Choose a PGN file…".to_string());
@@ -1490,11 +2715,28 @@ impl SiliconBoardApp {
         }
     }
 
+    /// The engine slot that is on move, if any. During a tournament this uses
+    /// the game's colour mapping instead of the normal mode seats.
+    fn engine_slot_to_move(&self) -> Option<usize> {
+        if let Some(session) = &self.tournament {
+            if session.active() {
+                if session.is_playing() {
+                    return Some(session.slot_for_color(self.game.turn()));
+                }
+                return None;
+            }
+        }
+        match self.mode.seat(self.game.turn()) {
+            Seat::Engine(slot) => Some(slot),
+            Seat::Human => None,
+        }
+    }
+
     /// What `slot` should do with the displayed position. An engine is asked
     /// for a move only when it is on the move at the live end of a game that
     /// is still running. Browsing an earlier position never asks for a move.
     fn goal_for(&self, slot: usize) -> SearchGoal {
-        let on_move = self.mode.seat(self.game.turn()) == Seat::Engine(slot);
+        let on_move = self.engine_slot_to_move() == Some(slot);
         if self.live_play() && on_move {
             if self.book_choices().is_empty() {
                 return SearchGoal::Move(self.engine_go());
@@ -1504,7 +2746,9 @@ impl SiliconBoardApp {
         }
         // In a play mode an engine thinks only when it is to move, as in
         // en-croissant: nothing is searched on the other side's time.
-        if self.mode == GameMode::Analysis {
+        if self.mode == GameMode::Analysis
+            && !self.tournament.as_ref().is_some_and(TournamentSession::active)
+        {
             SearchGoal::Analyse
         } else {
             SearchGoal::Rest
@@ -1513,10 +2757,23 @@ impl SiliconBoardApp {
 
     /// Book moves the engine on the move plays instead of searching. Empty
     /// unless book play is on, a play mode is live, an engine is on the move,
-    /// and the position is in the book.
+    /// and the position is in the book. A tournament may combine its EPD start
+    /// positions with the PolyGlot book's opening moves.
     fn book_choices(&self) -> Vec<(Move, u16)> {
-        let engine_to_move = matches!(self.mode.seat(self.game.turn()), Seat::Engine(_));
-        if !self.book_in_games || !self.live_play() || !engine_to_move || self.game.total_plies() >= BOOK_MAX_PLIES {
+        let engine_to_move = self.engine_slot_to_move().is_some();
+        if !self.live_play() || !engine_to_move || self.game.total_plies() >= BOOK_MAX_PLIES {
+            return Vec::new();
+        }
+        // A PolyGlot book chosen in the tournament dialog is the tournament's
+        // opening book. EPD books only supply start positions.
+        if let Some(session) = &self.tournament {
+            if session.active() {
+                if let Some(book) = session.book.as_ref().and_then(TournamentBook::polyglot) {
+                    return self.game.book_moves(book);
+                }
+            }
+        }
+        if !self.book_in_games {
             return Vec::new();
         }
         match &self.book {
@@ -1537,7 +2794,7 @@ impl SiliconBoardApp {
         let Some(&(m, _)) = choices.get(index) else {
             return;
         };
-        let Seat::Engine(slot) = self.mode.seat(self.game.turn()) else {
+        let Some(slot) = self.engine_slot_to_move() else {
             return;
         };
         match self.game.apply_move(m) {
@@ -1549,6 +2806,7 @@ impl SiliconBoardApp {
                     .map(|ply| ply.san.to_string())
                     .unwrap_or_default();
                 self.view.clear_selection();
+                self.tournament_observe_book_move();
                 let mut text = format!("Engine {} played {} from the book.", slot_letter(slot), san);
                 if let Some(result) = self.result_text() {
                     text.push_str(&format!(" {}.", result));
@@ -1594,6 +2852,15 @@ impl SiliconBoardApp {
         matches!(self.mode, GameMode::HumanVsEngine { .. }) && self.live_play()
     }
 
+    /// `true` when the human may claim a threefold-repetition draw now. FIDE
+    /// gives that right to the player to move, so the engine's turn does not
+    /// enable the menu item.
+    fn can_claim_threefold(&self) -> bool {
+        self.vs_engine_live()
+            && self.human_colour() == Some(self.game.turn())
+            && self.game.is_threefold_repetition()
+    }
+
     /// The colour the human plays, in a game against an engine.
     fn human_colour(&self) -> Option<PieceColor> {
         match self.mode {
@@ -1613,6 +2880,26 @@ impl SiliconBoardApp {
         }
         let text = format!("You resigned. {}.", self.current_ending().map_or_else(String::new, Ending::description));
         self.set_status(StatusLevel::Info, text);
+        self.sync_position(true);
+    }
+
+    /// The human claims a draw because the displayed position occurred three
+    /// times (FIDE Article 9.2). Only the player to move may claim.
+    fn claim_threefold(&mut self) {
+        if !self.can_claim_threefold() {
+            self.set_status(
+                StatusLevel::Warning,
+                "Threefold repetition can only be claimed on your turn in a running game."
+                    .to_string(),
+            );
+            return;
+        }
+        self.ending = Some(Ending::ThreefoldRepetition);
+        log::info!("draw claimed by threefold repetition");
+        self.set_status(
+            StatusLevel::Info,
+            "Draw claimed: the position occurred three times.".to_string(),
+        );
         self.sync_position(true);
     }
 
@@ -1766,11 +3053,16 @@ impl SiliconBoardApp {
     /// One side's bar. The name is the engine's own name (as its handshake
     /// gives it), `You` for the human, or the colour in analysis mode.
     fn player_bar(&self, color: PieceColor) -> PlayerBar {
-        let name = match self.mode {
-            GameMode::Analysis => colour_name(color).to_string(),
-            _ => match self.mode.seat(color) {
-                Seat::Human => "You".to_string(),
-                Seat::Engine(slot) => self.engine_name(slot),
+        let name = match &self.tournament {
+            Some(session) if session.active() => {
+                self.engine_name(session.slot_for_color(color))
+            }
+            _ => match self.mode {
+                GameMode::Analysis => colour_name(color).to_string(),
+                _ => match self.mode.seat(color) {
+                    Seat::Human => "You".to_string(),
+                    Seat::Engine(slot) => self.engine_name(slot),
+                },
             },
         };
         let clock = match (&self.clock, self.mode) {
@@ -1799,6 +3091,16 @@ impl SiliconBoardApp {
     fn set_mode(&mut self, mode: GameMode) {
         self.mode = mode;
         self.game_started = false;
+        // A tournament's adjudication result belongs to the finished match.
+        // Leaving the match for a play mode should not keep the board blocked.
+        if mode != GameMode::Analysis
+            && self
+                .tournament
+                .as_ref()
+                .is_some_and(|session| session.phase == TournamentPhase::Finished)
+        {
+            self.ending = None;
+        }
         self.view.clear_selection();
         self.reset_clock();
         let mut missing = Vec::new();
@@ -1876,7 +3178,7 @@ impl SiliconBoardApp {
             (true, true, _) if !self.live_play() => {
                 return self.set_status(
                     StatusLevel::Warning,
-                    "The game cannot go on from here: it is over, or the last move is not shown.".to_string(),
+                    "The game cannot go on from here: it is over, or the last move is not shown. Use Game → New game for a fresh game.".to_string(),
                 );
             }
             (true, true, _) => "Game started.".to_string(),
@@ -1976,24 +3278,28 @@ impl SiliconBoardApp {
                 view,
                 pv_san,
                 running,
-                toggle_enabled: playing_slot,
+                toggle_enabled: playing_slot
+                    && !self.tournament.as_ref().is_some_and(TournamentSession::active),
             }
         });
+        let tournament_active = self.tournament.as_ref().is_some_and(TournamentSession::active);
         EvalSummary {
             cards,
             white_to_move: self.game.turn() == PieceColor::White,
             fullmove: self.game.fullmove_number(),
             outcome: self.result_text().unwrap_or_else(|| self.game.outcome()),
-            book_moves: self.book_moves.clone(),
+            book_moves: if tournament_active {
+                Vec::new()
+            } else {
+                self.book_moves.clone()
+            },
             book_name: self.book.as_ref().map(|(name, _)| name.clone()),
-            opening_name: if self.book_in_games && !self.book_moves.is_empty() {
-                self.opening_names
-                    .as_ref()
-                    .and_then(|names| names.name_for(&self.game.position()).map(str::to_string))
+            opening_name: if !tournament_active && self.book_in_games && self.book.is_some() {
+                self.opening_name.clone()
             } else {
                 None
             },
-            book_in_games: self.book_in_games,
+            book_in_games: self.book_in_games && !tournament_active,
             figurines: self.settings.figurines_eval,
             status: self.status.clone(),
             status_level: self.status_level,
@@ -2015,7 +3321,9 @@ impl eframe::App for SiliconBoardApp {
             engine_loaded: [self.engines[0].is_some(), self.engines[1].is_some()],
             mode: self.mode,
             book_in_games: self.book_in_games,
+            session_log: self.settings.session_log,
             vs_engine_live: self.vs_engine_live(),
+            can_claim_threefold: self.can_claim_threefold(),
             options_ready: [0, 1].map(|slot| {
                 self.engine_live(slot)
                     && self.engines[slot]
@@ -2040,24 +3348,49 @@ impl eframe::App for SiliconBoardApp {
                     .unwrap_or(crate::assets::DEFAULT_PIECE_SET),
             ),
             ply_count: self.game.total_plies(),
+            tournament_running: self
+                .tournament
+                .as_ref()
+                .is_some_and(TournamentSession::active),
+            tournament_has_run: self.tournament.is_some(),
+            pgn_games_available: self.pgn_collection.is_some(),
         };
-        let human_to_move = match self.mode {
-            GameMode::Analysis => true,
-            _ => {
-                self.game_started
-                    && self.mode.seat(self.game.turn()) == Seat::Human
-                    && self.current_ending().is_none()
+        let human_to_move = if self
+            .tournament
+            .as_ref()
+            .is_some_and(TournamentSession::active)
+        {
+            false
+        } else {
+            match self.mode {
+                GameMode::Analysis => true,
+                _ => {
+                    self.game_started
+                        && self.mode.seat(self.game.turn()) == Seat::Human
+                        && self.current_ending().is_none()
+                }
             }
         };
         let bars = self.player_bars();
         let mut requested: Option<MenuAction> = None;
         let fen_input = &mut self.fen_input;
 
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            if let Some(action) = menu_bar::show(ui, &menu_state, fen_input) {
-                requested = Some(action);
-            }
-        });
+        egui::Panel::top("top_bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::TOOLBAR_BG)
+                    .inner_margin(egui::Margin {
+                        left: 10,
+                        right: 10,
+                        top: 5,
+                        bottom: 5,
+                    }),
+            )
+            .show(ui, |ui| {
+                if let Some(action) = menu_bar::show(ui, &menu_state, fen_input) {
+                    requested = Some(action);
+                }
+            });
 
         let follow = self.game.cur_ply() != self.last_ply;
         self.last_ply = self.game.cur_ply();
@@ -2104,6 +3437,17 @@ impl eframe::App for SiliconBoardApp {
             .settings
             .panels
             .map_or(DEFAULT_MOVE_LIST_HEIGHT, |sizes| sizes.bottom_height);
+        let result = self
+            .current_ending()
+            .map(|ending| ending.result_token().to_string())
+            .or_else(|| {
+                self.game
+                    .is_game_over()
+                    .then(|| pgn::result_token(&self.game, None).to_string())
+            });
+        // The bottom move list shows the result token; when the game came from
+        // a PGN with a `Termination` tag, show the reason next to it.
+        let result = result_label(result, self.pgn_termination.as_deref());
         let move_list = egui::Panel::bottom("move_list")
             .resizable(true)
             .default_size(move_list_height)
@@ -2116,7 +3460,8 @@ impl eframe::App for SiliconBoardApp {
                     &galleys,
                     follow,
                     figurines_move_list,
-                )
+                    result.as_deref(),
+                );
             });
         self.pgn_cache = Some((cached_revision, lines));
         self.pgn_galleys = Some((galley_revision, galley_figurines, galleys));
@@ -2151,6 +3496,7 @@ impl eframe::App for SiliconBoardApp {
                 OptionsAction::Close => self.options_dialog = None,
                 OptionsAction::Set { name, value } => self.set_engine_option(slot, &name, &value),
                 OptionsAction::Reset { name, value } => self.reset_engine_option(slot, &name, &value),
+                OptionsAction::ResetAll => self.reset_all_engine_options(slot),
                 OptionsAction::Press { name } => self.press_engine_button(slot, &name),
             }
         }
@@ -2163,6 +3509,57 @@ impl eframe::App for SiliconBoardApp {
                     self.time_dialog = None;
                     self.set_time_control(control);
                 }
+            }
+        }
+
+        let tournament_action = self
+            .tournament_dialog
+            .as_mut()
+            .map(|dialog| dialog.show(&ctx));
+        if let Some(action) = tournament_action {
+            self.handle_tournament_action(action);
+        }
+
+        if self.tournament_window_open {
+            let action = self
+                .tournament
+                .as_ref()
+                .map(|session| tournament_dialog::show_progress(&ctx, &session.status));
+            match action {
+                Some(ProgressAction::Stop) => self.stop_tournament(),
+                Some(ProgressAction::Close) => self.tournament_window_open = false,
+                Some(ProgressAction::None) => {}
+                None => self.tournament_window_open = false,
+            }
+        }
+
+        if self.tournament_finished_popup {
+            let closed = self
+                .tournament
+                .as_ref()
+                .is_some_and(|session| tournament_dialog::show_finished(&ctx, &session.status));
+            if closed || self.tournament.is_none() {
+                self.tournament_finished_popup = false;
+            }
+        }
+
+        if self.pgn_browser_window_open {
+            let action = self.pgn_collection.as_ref().map(|collection| {
+                pgn_panel::show_game_list_window(
+                    &ctx,
+                    collection,
+                    self.pgn_browser_selected,
+                )
+            });
+            match action {
+                Some(pgn_panel::GameListAction::Select(index)) => {
+                    self.select_pgn_game(index)
+                }
+                Some(pgn_panel::GameListAction::Close) => {
+                    self.pgn_browser_window_open = false
+                }
+                Some(pgn_panel::GameListAction::None) => {}
+                None => self.pgn_browser_window_open = false,
             }
         }
 
@@ -2216,6 +3613,40 @@ fn slot_letter(slot: usize) -> char {
     char::from(b'A' + slot as u8)
 }
 
+/// Combine a result token with a PGN `Termination` reason for the move list.
+fn result_label(result: Option<String>, termination: Option<&str>) -> Option<String> {
+    match (result, termination) {
+        (Some(token), Some(reason)) if !reason.is_empty() => {
+            Some(format!("{token} — {reason}"))
+        }
+        (Some(token), _) => Some(token),
+        (None, Some(reason)) if !reason.is_empty() => Some(reason.to_string()),
+        (None, _) => None,
+    }
+}
+
+/// Menu actions that would change the board or engines while a tournament
+/// owns them. Cosmetic actions, file copies and the engine options window are
+/// allowed.
+fn action_conflicts_with_tournament(action: MenuAction) -> bool {
+    matches!(
+        action,
+        MenuAction::NewGame
+            | MenuAction::SetMode(_)
+            | MenuAction::OpenTimeControl
+            | MenuAction::OpenPgn
+            | MenuAction::LoadFen
+            | MenuAction::LoadEngine(_)
+            | MenuAction::ToggleEngine(_)
+            | MenuAction::StartAnalysis
+            | MenuAction::StopAnalysis
+            | MenuAction::ToggleBookInGames
+            | MenuAction::Resign
+            | MenuAction::OfferDraw
+            | MenuAction::ClaimThreefold
+    )
+}
+
 /// `White` or `Black`, as shown to the user.
 fn colour_name(color: PieceColor) -> &'static str {
     match color {
@@ -2267,16 +3698,36 @@ fn file_name_of(path: &Path) -> String {
         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
+/// Open the tournament PGN for writing, creating its folder. The file is
+/// truncated so a new match starts with a clean game list.
+fn open_tournament_pgn(path: &Path) -> Result<std::fs::File, String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("Could not create {}: {}", parent.display(), err))?;
+        }
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|err| format!("Could not open {}: {}", path.display(), err))
+}
+
 /// Read and parse a PGN file (runs on the Tokio runtime).
-async fn read_pgn(path: &Path) -> Result<(String, PgnImport), OpenPgnError> {
-    let text = tokio::fs::read_to_string(path)
+async fn read_pgn(path: &Path) -> Result<(String, PgnCollection), OpenPgnError> {
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|source| OpenPgnError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-    let import = pgn::parse_pgn_with_report(&text).map_err(OpenPgnError::Parse)?;
-    Ok((file_name_of(path), import))
+    let text = String::from_utf8_lossy(&bytes);
+    let mut collection = pgn::parse_pgn_collection(&text).map_err(OpenPgnError::Parse)?;
+    let name = file_name_of(path);
+    collection.name = name.clone();
+    Ok((name, collection))
 }
 
 #[cfg(test)]
@@ -2358,6 +3809,7 @@ mod game_flow_tests {
     use crate::chess::clock::TimeControl;
     use crate::chess::opening_book::PolyglotBook;
     use crate::engine::{AnalysisStatus, EngineHost, EngineProcess, SearchGoal};
+    use crate::tournament::{BookOrder, OpeningBookConfig};
 
     /// An app with Stockfish in both slots and no book. It never reads or
     /// writes the user's settings file.
@@ -2523,5 +3975,514 @@ mod game_flow_tests {
         app.game_started = false;
         app.logic_frame(&ctx);
         assert!(!app.analysis_on[0], "a new game waits for Start");
+    }
+
+    #[test]
+    fn the_last_opening_name_stays_when_the_line_leaves_the_table() {
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            egui::Context::default(),
+        );
+        app.opening_names = Some(OpeningNames::parse(
+            "eco\tname\tpgn\nC20\tOpen Game\t1. e4 e5\n",
+        ));
+
+        app.game.apply_uci("e2e4").unwrap();
+        app.game.apply_uci("e7e5").unwrap();
+        app.sync_position(true);
+        assert_eq!(app.opening_name.as_deref(), Some("Open Game"));
+
+        // 2.Nf3 is not a named table row; the last name must stay.
+        app.game.apply_uci("g1f3").unwrap();
+        app.sync_position(true);
+        assert_eq!(
+            app.opening_name.as_deref(),
+            Some("Open Game"),
+            "leaving the named rows must not clear the opening name"
+        );
+
+        // A new game starts before any named position.
+        app.game = GameState::new();
+        app.sync_position(true);
+        assert_eq!(app.opening_name, None);
+    }
+
+    #[test]
+    fn a_human_can_claim_threefold_on_their_turn() {
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            egui::Context::default(),
+        );
+        app.mode = GameMode::HumanVsEngine {
+            human: PieceColor::White,
+            engine: 0,
+        };
+        app.game_started = true;
+        for _ in 0..2 {
+            for uci in ["g1f3", "g8f6", "f3g1", "f6g8"] {
+                app.game.apply_uci(uci).unwrap();
+            }
+        }
+
+        assert!(app.can_claim_threefold());
+        assert_eq!(app.game.outcome(), "Unfinished", "the claim is not automatic");
+        app.claim_threefold();
+        assert_eq!(app.ending, Some(Ending::ThreefoldRepetition));
+        assert_eq!(app.result_text().as_deref(), Some("Draw by repetition"));
+    }
+
+    #[test]
+    fn a_gui_tournament_plays_on_the_board_and_raises_the_finished_popup() {
+        let engine = crate::engine::test_engine_path();
+        let dir = tempfile::tempdir().unwrap();
+        let pgn = dir.path().join("match.pgn");
+        // A one-move PolyGlot book for White makes the book reply deterministic.
+        let book_path = dir.path().join("book.bin");
+        let key = GameState::new().zobrist();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&key.to_be_bytes());
+        bytes.extend_from_slice(&0x0210u16.to_be_bytes()); // a2-a3
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        std::fs::write(&book_path, &bytes).unwrap();
+        let config = TournamentConfig {
+            white: EngineSpec::from_path(engine.clone()),
+            black: EngineSpec::from_path(engine),
+            time_control: TimeControl::fischer(10_000, 100),
+            games: 2,
+            reverse_colors: true,
+            hash_mb: 16,
+            nalimov_cache_mb: 0,
+            pgn_path: pgn.clone(),
+            opening_book: Some(OpeningBookConfig {
+                path: book_path,
+                order: BookOrder::Random,
+            }),
+            move_book: None,
+            enable_adjudication: true,
+            resign_move_count: 2,
+            resign_score: 100,
+            draw_move_number: 1,
+            draw_move_count: 2,
+            draw_score: 100,
+            event_name: "App test match".to_string(),
+        };
+        let ctx = egui::Context::default();
+        let mut app = app_with_two_engines();
+        app.start_tournament(config);
+        assert!(app.tournament.is_some(), "the match starts at once");
+        assert!(app.tournament_window_open, "the tournament window opens");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !app.tournament_finished_popup {
+            app.logic_frame(&ctx);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            app.tournament_finished_popup,
+            "the result pop-up must appear when the match ends"
+        );
+        assert!(
+            app.game.total_plies() > 0,
+            "the tournament game must be played on the main board"
+        );
+        let status = &app.tournament.as_ref().unwrap().status;
+        assert_eq!(status.completed_games, 2);
+        assert!(!status.running);
+        assert!(!app.tournament_window_open, "the tournament window closes on finish");
+
+        let text = std::fs::read_to_string(&pgn).unwrap();
+        assert_eq!(
+            text.matches("[Event \"App test match\"]").count(),
+            2,
+            "both scheduled games must be written: {}",
+            text
+        );
+        assert!(text.contains("[Round \"1\"]"), "PGN: {}", text);
+        assert!(text.contains("[Round \"2\"]"), "PGN: {}", text);
+        assert!(text.contains("[Result \""), "PGN: {}", text);
+        assert!(
+            !text.contains("[PlyCount \"0\"]"),
+            "the engines must actually play moves: {}",
+            text
+        );
+        assert!(
+            text.contains("1. a3"),
+            "the PolyGlot book move must be in the tournament PGN: {}",
+            text
+        );
+
+        // After the tournament the board and engines must be usable again.
+        app.set_mode(GameMode::Analysis);
+        app.set_analysis(true);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut thinking = false;
+        while Instant::now() < deadline && !thinking {
+            app.logic_frame(&ctx);
+            thinking = app
+                .engines
+                .iter()
+                .flatten()
+                .any(|host| host.view().status == AnalysisStatus::Thinking);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            thinking,
+            "an engine must start analysing after the tournament ends"
+        );
+    }
+
+    #[test]
+    fn an_epd_tournament_records_the_start_position_in_the_pgn() {
+        let engine = crate::engine::test_engine_path();
+        let dir = tempfile::tempdir().unwrap();
+        let pgn = dir.path().join("epd-match.pgn");
+        let epd = dir.path().join("openings.epd");
+        std::fs::write(
+            &epd,
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2\n",
+        )
+        .unwrap();
+        // A one-move PolyGlot book for the EPD position: 2.h3.
+        let epd_game = GameState::from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        )
+        .unwrap();
+        let key = epd_game.zobrist();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&key.to_be_bytes());
+        bytes.extend_from_slice(&0x03d7u16.to_be_bytes()); // h2-h3
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        let move_book = dir.path().join("moves.bin");
+        std::fs::write(&move_book, &bytes).unwrap();
+        let config = TournamentConfig {
+            white: EngineSpec::from_path(engine.clone()),
+            black: EngineSpec::from_path(engine),
+            time_control: TimeControl::fischer(10_000, 100),
+            games: 1,
+            reverse_colors: false,
+            hash_mb: 16,
+            nalimov_cache_mb: 0,
+            pgn_path: pgn.clone(),
+            opening_book: Some(OpeningBookConfig {
+                path: epd,
+                order: BookOrder::Sequential,
+            }),
+            move_book: Some(move_book),
+            enable_adjudication: true,
+            resign_move_count: 2,
+            resign_score: 100,
+            draw_move_number: 1,
+            draw_move_count: 2,
+            draw_score: 100,
+            event_name: "EPD test match".to_string(),
+        };
+        let ctx = egui::Context::default();
+        let mut app = app_with_two_engines();
+        app.start_tournament(config);
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !app.tournament_finished_popup {
+            app.logic_frame(&ctx);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(app.tournament_finished_popup, "the EPD match must finish");
+
+        let text = std::fs::read_to_string(&pgn).unwrap();
+        assert!(text.contains("[SetUp \"1\"]"), "PGN: {}", text);
+        assert!(text.contains("[FEN \""), "PGN: {}", text);
+        assert!(
+            text.contains("4p3/4P3"),
+            "the EPD start position must be in the PGN: {}",
+            text
+        );
+        assert!(
+            text.contains("2. h3"),
+            "the PolyGlot move book must be in the PGN: {}",
+            text
+        );
+        assert!(
+            !text.contains("[PlyCount \"0\"]"),
+            "the engines must play moves from the EPD position: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn an_epd_start_with_a_move_book_replays_the_line_in_the_pgn() {
+        let engine = crate::engine::test_engine_path();
+        let dir = tempfile::tempdir().unwrap();
+        let pgn = dir.path().join("epd-path.pgn");
+        let epd = dir.path().join("openings.epd");
+        std::fs::write(
+            &epd,
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2\n",
+        )
+        .unwrap();
+        // The move book contains the line to the EPD position and one book
+        // move from there: 1.e4 e5 2.h3.
+        let start_key = GameState::new().zobrist();
+        let mut after_e4 = GameState::new();
+        after_e4.apply_uci("e2e4").unwrap();
+        let after_e4_key = after_e4.zobrist();
+        let after_e4_e5 = GameState::from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        )
+        .unwrap();
+        let after_e4_e5_key = after_e4_e5.zobrist();
+        let mut bytes = Vec::new();
+        for (key, encoded) in [
+            (start_key, 0x031cu16),        // e2-e4
+            (after_e4_key, 0x0d24u16),     // e7-e5
+            (after_e4_e5_key, 0x03d7u16),  // h2-h3
+        ] {
+            bytes.extend_from_slice(&key.to_be_bytes());
+            bytes.extend_from_slice(&encoded.to_be_bytes());
+            bytes.extend_from_slice(&1u16.to_be_bytes());
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+        }
+        let move_book = dir.path().join("moves.bin");
+        std::fs::write(&move_book, &bytes).unwrap();
+        let config = TournamentConfig {
+            white: EngineSpec::from_path(engine.clone()),
+            black: EngineSpec::from_path(engine),
+            time_control: TimeControl::fischer(10_000, 100),
+            games: 1,
+            reverse_colors: false,
+            hash_mb: 16,
+            nalimov_cache_mb: 0,
+            pgn_path: pgn.clone(),
+            opening_book: Some(OpeningBookConfig {
+                path: epd,
+                order: BookOrder::Sequential,
+            }),
+            move_book: Some(move_book),
+            enable_adjudication: true,
+            resign_move_count: 2,
+            resign_score: 100,
+            draw_move_number: 1,
+            draw_move_count: 2,
+            draw_score: 100,
+            event_name: "EPD path test".to_string(),
+        };
+        let ctx = egui::Context::default();
+        let mut app = app_with_two_engines();
+        app.start_tournament(config);
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !app.tournament_finished_popup {
+            app.logic_frame(&ctx);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(app.tournament_finished_popup, "the EPD path match must finish");
+
+        let text = std::fs::read_to_string(&pgn).unwrap();
+        assert!(
+            text.contains("1. e4 e5 2. h3"),
+            "the book line to the EPD position must be in the PGN: {}",
+            text
+        );
+        assert!(
+            !text.contains("[SetUp \"1\"]"),
+            "a reconstructed line starts from the standard position: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn a_multi_game_pgn_fills_the_browser_and_selects_games() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        let text = "[Event \"One\"]\n[White \"A\"]\n[Black \"B\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n\n[Event \"Two\"]\n[White \"C\"]\n[Black \"D\"]\n[Result \"0-1\"]\n\n1. d4 d5 0-1\n";
+        let collection = pgn::parse_pgn_collection(text).unwrap();
+        app.events_tx.send(AppEvent::PgnOpened {
+            outcome: Some(Ok(("multi.pgn".to_string(), collection))),
+        });
+        app.logic_frame(&ctx);
+        assert_eq!(
+            app.pgn_collection.as_ref().map(|c| c.games.len()),
+            Some(2)
+        );
+        assert_eq!(app.pgn_browser_selected, 0);
+        assert!(app.pgn_browser_window_open, "the PGN games window opens");
+        assert_eq!(app.game.total_plies(), 2, "the first game is loaded");
+        assert_eq!(
+            app.game.history()[0].san.to_string(),
+            "e4",
+            "the first game's move is on the board"
+        );
+
+        app.select_pgn_game(1);
+        assert_eq!(app.pgn_browser_selected, 1);
+        assert_eq!(app.game.total_plies(), 2);
+        assert_eq!(app.game.history()[0].san.to_string(), "d4");
+        assert_eq!(app.result_text().as_deref(), Some("Black won (from PGN)"));
+
+        app.set_mode(GameMode::Analysis);
+        assert!(
+            app.pgn_collection.is_some(),
+            "choosing a mode keeps the PGN browser open"
+        );
+        assert!(app.pgn_browser_window_open);
+    }
+
+    #[test]
+    fn opening_a_pgn_with_a_result_shows_the_result() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        let collection = pgn::parse_pgn_collection(
+            "[Result \"1-0\"]\n[Termination \"White wins on time\"]\n\n1. e4 e5 2. Nf3 Nc6 1-0\n",
+        )
+        .unwrap();
+        app.events_tx.send(AppEvent::PgnOpened {
+            outcome: Some(Ok(("result.pgn".to_string(), collection))),
+        });
+        app.logic_frame(&ctx);
+        assert!(
+            app.pgn_collection.is_none(),
+            "a single-game PGN keeps the normal move list"
+        );
+        assert_eq!(
+            app.ending,
+            Some(Ending::FromPgn {
+                winner: Some(PieceColor::White)
+            })
+        );
+        assert_eq!(app.pgn_termination.as_deref(), Some("White wins on time"));
+        assert_eq!(app.result_text().as_deref(), Some("White won (from PGN)"));
+        assert_eq!(
+            result_label(
+                Some("1-0".to_string()),
+                app.pgn_termination.as_deref()
+            )
+            .as_deref(),
+            Some("1-0 — White wins on time")
+        );
+        assert!(
+            app.status.contains("White won (from PGN)"),
+            "the status line should show the result: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn the_move_list_result_can_carry_a_termination_reason() {
+        assert_eq!(
+            result_label(Some("0-1".to_string()), Some("Black wins on time")).as_deref(),
+            Some("0-1 — Black wins on time")
+        );
+        assert_eq!(
+            result_label(Some("1/2-1/2".to_string()), Some("Draw by repetition")).as_deref(),
+            Some("1/2-1/2 — Draw by repetition")
+        );
+        assert_eq!(
+            result_label(Some("1-0".to_string()), None).as_deref(),
+            Some("1-0")
+        );
+        assert_eq!(result_label(None, None), None);
+    }
+
+    #[test]
+    fn a_between_games_pause_requests_a_repaint() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let pgn_file = std::fs::File::create(dir.path().join("pause.pgn")).unwrap();
+        let config = TournamentConfig::default();
+        app.tournament = Some(TournamentSession {
+            adjudicator: Adjudicator::new(&config),
+            config,
+            phase: TournamentPhase::BetweenGames,
+            book: None,
+            schedule: Vec::new(),
+            game_number: 2,
+            white_slot: 0,
+            pgn_file,
+            status: TournamentStatus {
+                running: true,
+                ..TournamentStatus::default()
+            },
+            next_game_due: Some(Instant::now() + Duration::from_secs(1)),
+            generation: 0,
+        });
+        app.tournament_tick(&ctx);
+        assert!(
+            ctx.has_requested_repaint(),
+            "the pause before the next game must schedule a frame"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_exits_after_handshake_is_restarted_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("restarted");
+        let script = dir.path().join("exits-on-go.sh");
+        let body = format!(
+            "#!/bin/sh\nmarker=\"{}\"\nif [ ! -f \"$marker\" ]; then\n  : > \"$marker\"\n  flaky=1\nelse\n  flaky=0\nfi\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Flaky'; echo 'option name Hash type spin default 16 min 1 max 1024'; echo uciok;;\n    isready) echo readyok;;\n    go*) if [ \"$flaky\" = 1 ]; then exit 3; fi; echo bestmove e2e4;;\n    quit) exit 0;;\n  esac\ndone\n",
+            marker.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap(),
+            ctx.clone(),
+        );
+        let process = app.runtime.block_on(EngineProcess::spawn(&script)).unwrap();
+        app.engines[0] = Some(EngineHost::attach_with_settings(process, BTreeMap::new()));
+        app.engine_auto_restart[0] = true;
+        app.engine_started[0] = Some(Instant::now());
+
+        assert!(
+            run_until(&mut app, &ctx, |a| a.engines[0]
+                .as_ref()
+                .is_some_and(|h| h.view().status == AnalysisStatus::Ready)),
+            "the flaky engine must finish its handshake"
+        );
+
+        // The first process exits as soon as it is asked to search.
+        app.engines[0]
+            .as_mut()
+            .unwrap()
+            .set_analysis(true, &app.game.fen(), SearchGoal::Analyse);
+        assert!(
+            run_until(&mut app, &ctx, |a| a.restarted_at[0].is_some()),
+            "an exited engine must trigger a restart"
+        );
+        assert!(
+            run_until(&mut app, &ctx, |a| a.engines[0]
+                .as_ref()
+                .is_some_and(|h| h.view().status == AnalysisStatus::Ready)),
+            "the replacement engine must complete its handshake"
+        );
+        assert!(app.engine_auto_restart[0], "one restart is allowed");
     }
 }

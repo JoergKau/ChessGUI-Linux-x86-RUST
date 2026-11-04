@@ -76,8 +76,9 @@ pub struct EvalSummary {
     pub book_moves: Vec<(String, u16)>,
     /// Name of the loaded opening book, if any.
     pub book_name: Option<String>,
-    /// Name of the opening that ends at the displayed position, when the
-    /// position is in the book and the ECO table knows it.
+    /// Most recent ECO opening name at or before the displayed position. It
+    /// stays after the line leaves the named part of the table, so the book
+    /// box keeps showing the last opening.
     pub opening_name: Option<String>,
     /// Whether engines answer with book moves in games (Game → Book moves in games).
     pub book_in_games: bool,

@@ -11,6 +11,7 @@
 //! ├── pgn_panel.rs  ← bottom panel: move list and navigation
 //! ├── menu_bar.rs   ← top menu bar and FEN bar
 //! ├── options_dialog.rs ← engine options window (UCI setoption)
+//! ├── tournament_dialog.rs ← engine-match config and tournament windows
 //! └── time_control.rs ← clock labels above the board and the time-control dialog
 //! ```
 
@@ -22,3 +23,4 @@ pub mod options_dialog;
 pub mod pgn_panel;
 pub mod theme;
 pub mod time_control;
+pub mod tournament_dialog;

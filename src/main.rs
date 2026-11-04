@@ -11,7 +11,9 @@ mod assets;
 mod chess;
 mod engine;
 mod gui;
+mod logging;
 mod settings;
+mod tournament;
 
 use app::SiliconBoardApp;
 
@@ -21,38 +23,82 @@ const APP_NAME: &str = "SiliconBoard";
 /// Initial window size (board, evaluation dashboard and move list).
 const INITIAL_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
 
-/// Smallest window that still shows the top bar, the board and both engine cards.
-const MIN_WINDOW_SIZE: [f32; 2] = [960.0, 640.0];
+/// Smallest board edge (in points) that the window may leave visible. This is
+/// the size the board has in the user's saved layout, so shrinking the window
+/// below it would make the board visibly smaller than the configured minimum.
+const MIN_BOARD_SIDE: f32 = 320.0;
+
+/// Space used by the separator between the board area and the right panel.
+const PANEL_GAP: f32 = 8.0;
+
+/// Width of the right panel before a panel layout has been saved.
+const DEFAULT_RIGHT_WIDTH: f32 = 520.0;
+
+/// Smallest window height, kept for the top bar, board and both engine cards.
+const MIN_WINDOW_HEIGHT: f32 = 640.0;
+
+/// Never allow the window to become narrower than this, even with a small
+/// right panel.
+const ABSOLUTE_MIN_WINDOW_WIDTH: f32 = 960.0;
+
+/// The smallest inner window size that still leaves a usable board next to the
+/// saved right panel. The board takes whatever the right panel leaves, so the
+/// minimum width is the saved panel width plus the smallest board plus the
+/// panel separator.
+fn min_inner_size(settings: &settings::Settings) -> [f32; 2] {
+    let right_width = settings
+        .panels
+        .map_or(DEFAULT_RIGHT_WIDTH, |panels| panels.right_width);
+    let width = (right_width + MIN_BOARD_SIDE + PANEL_GAP).max(ABSOLUTE_MIN_WINDOW_WIDTH);
+    [width, MIN_WINDOW_HEIGHT]
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .try_init();
+    // The settings are read before the logger and the window, because both the
+    // session-log switch and the window size are settings. The file is small,
+    // so this one read is done here.
+    let settings_file = settings::settings_path().ok();
+    let (settings, settings_error) = match &settings_file {
+        Some(path) => match settings::load_sync(path) {
+            Ok(settings) => (settings, None),
+            Err(err) => (settings::Settings::default(), Some(err)),
+        },
+        None => (settings::Settings::default(), None),
+    };
 
-    log::info!("SiliconBoard starting up — booting eframe on wgpu/Metal");
+    let log_file = logging::init(settings.session_log);
+
+    log::info!(
+        "SiliconBoard {} starting on {} {} — booting eframe on wgpu/Metal",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    if let Some(err) = settings_error {
+        log::warn!("{err}");
+    }
+    if let Some(path) = &log_file {
+        if logging::file_enabled() {
+            log::info!("session log: {}", path.display());
+        }
+    } else {
+        log::warn!("session log file unavailable; logging to the console only");
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("siliconboard-io")
         .build()?;
 
-    // The settings are read before the window exists, because the window size
-    // is one of them. The file is small, so this one read is done here.
-    let settings_file = settings::settings_path().ok();
-    let settings = match &settings_file {
-        Some(path) => settings::load_sync(path).unwrap_or_else(|err| {
-            log::warn!("{}", err);
-            settings::Settings::default()
-        }),
-        None => settings::Settings::default(),
-    };
+    let min_size = min_inner_size(&settings);
     let window_size = settings
         .window_size
-        .map(|size| [size.width.max(MIN_WINDOW_SIZE[0]), size.height.max(MIN_WINDOW_SIZE[1])])
+        .map(|size| [size.width.max(min_size[0]), size.height.max(min_size[1])])
         .unwrap_or(INITIAL_WINDOW_SIZE);
 
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
-        .with_min_inner_size(MIN_WINDOW_SIZE);
+        .with_min_inner_size(min_size);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -78,4 +124,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::PanelSizes;
+
+    #[test]
+    fn the_minimum_window_keeps_the_saved_board_size() {
+        let settings = settings::Settings {
+            panels: Some(PanelSizes {
+                right_width: 917.0,
+                bottom_height: 465.0,
+            }),
+            ..Default::default()
+        };
+        let [width, height] = min_inner_size(&settings);
+        assert_eq!(height, MIN_WINDOW_HEIGHT);
+        // 917 (right panel) + 320 (board) + 8 (separator) = 1245.
+        assert!(
+            (width - 1245.0).abs() < 0.01,
+            "the saved layout must allow a 320-point board, got {width}"
+        );
+        assert!(width - settings.panels.unwrap().right_width - PANEL_GAP >= MIN_BOARD_SIDE);
+    }
+
+    #[test]
+    fn the_default_minimum_never_goes_below_the_old_floor() {
+        let [width, _] = min_inner_size(&settings::Settings::default());
+        assert!(
+            width >= ABSOLUTE_MIN_WINDOW_WIDTH,
+            "a small right panel must not make the window narrower than the old floor"
+        );
+    }
 }
