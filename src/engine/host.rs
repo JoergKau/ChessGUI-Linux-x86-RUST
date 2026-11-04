@@ -7,13 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use crate::engine::analysis::{AnalysisSession, AnalysisStatus, SearchGoal};
-use crate::engine::protocol::{EngineCommand, EngineEvent, EngineStats, Score, UciOption};
-use crate::engine::watchdog::{Watchdog, WatchdogAction};
+use crate::engine::protocol::{EngineCommand, EngineEvent, EngineStats, GoControl, Score, UciOption};
+use crate::engine::watchdog::{StallReason, Watchdog, WatchdogAction};
 use crate::engine::{EngineProcess, ParsedUciLine};
 
 /// Read-only snapshot of an engine for drawing its card.
@@ -37,8 +37,11 @@ pub struct EngineHost {
     events: mpsc::UnboundedReceiver<ParsedUciLine>,
     /// Analysis state machine that decides which commands to send.
     analysis: AnalysisSession,
-    /// Pings the engine with `isready` and notices when it stops answering.
+    /// Pings the engine with `isready`, and enforces the deadlines of a search.
     watchdog: Watchdog,
+    /// Side to move in the last position sent, which decides the clock of a
+    /// clock search.
+    white_to_move: bool,
 }
 
 impl EngineHost {
@@ -60,6 +63,7 @@ impl EngineHost {
             events,
             analysis: AnalysisSession::with_settings(settings),
             watchdog,
+            white_to_move: true,
         };
         let handshake = host.analysis.handshake();
         host.dispatch(handshake);
@@ -138,13 +142,10 @@ impl EngineHost {
                     break;
                 }
             };
-            self.watchdog.note_output(Instant::now());
             match line {
                 ParsedUciLine::Event(event) => {
                     changed = true;
-                    if event == EngineEvent::ReadyOk {
-                        self.watchdog.answered();
-                    }
+                    self.observe(&event);
                     let commands = self.analysis.on_event(&event);
                     self.dispatch(commands);
                 }
@@ -165,9 +166,48 @@ impl EngineHost {
         changed
     }
 
-    /// Ping the engine when the watchdog says so. Returns `true` when the
-    /// engine has just been found stalled. Only a running search is watched:
-    /// an idle engine needs no heartbeat, so a finished game leaves it quiet.
+    /// Bookkeeping for one engine event: what the watchdog may count as a sign
+    /// of life, and the timing line of a `bestmove`.
+    fn observe(&mut self, event: &EngineEvent) {
+        let now = Instant::now();
+        match event {
+            EngineEvent::ReadyOk => {
+                log::debug!("{} -> readyok", self.process.binary().display());
+                self.watchdog.answered();
+                self.watchdog.note_output(now);
+            }
+            EngineEvent::UciOk { .. } => {
+                log::debug!("{} -> uciok", self.process.binary().display());
+                self.watchdog.note_output(now);
+            }
+            EngineEvent::Info(stats) if stats.depth.is_some() || stats.nodes.is_some() => {
+                self.watchdog.note_progress(now);
+            }
+            EngineEvent::BestMove { best_move, .. } => {
+                let since = match (self.watchdog.stop_age(now), self.watchdog.search_age(now)) {
+                    (Some(stop), _) => format!("{:.2} s after stop", stop.as_secs_f64()),
+                    (None, Some(search)) => format!("{:.2} s after go", search.as_secs_f64()),
+                    (None, None) => "no search running".to_string(),
+                };
+                log::debug!(
+                    "{} -> bestmove {} ({})",
+                    self.process.binary().display(),
+                    best_move.as_deref().unwrap_or("(none)"),
+                    since
+                );
+                self.watchdog.search_finished();
+                self.watchdog.note_output(now);
+            }
+            // Noise, unknown lines and `info` without depth or nodes are not
+            // evidence that the engine is working.
+            _ => {}
+        }
+    }
+
+    /// Ping the engine when the watchdog says so, and check the deadlines of
+    /// the running search. Returns `true` when the engine has just been found
+    /// stalled. Only a running search is watched: an idle engine needs no
+    /// heartbeat, so a finished game leaves it quiet.
     fn check_watchdog(&mut self) -> bool {
         if self.watchdog.is_stalled() {
             return false;
@@ -182,17 +222,55 @@ impl EngineHost {
                 self.dispatch(vec![EngineCommand::IsReady]);
                 false
             }
-            WatchdogAction::Stalled => {
-                log::warn!("{} did not answer isready in time", self.process.binary().display());
+            WatchdogAction::Stalled(reason) => {
+                let now = Instant::now();
+                log::warn!(
+                    "{} stalled: {} (search {:.1} s old, stop {} s old)",
+                    self.process.binary().display(),
+                    reason,
+                    self.watchdog.search_age(now).map_or(0.0, |age| age.as_secs_f64()),
+                    self.watchdog
+                        .stop_age(now)
+                        .map_or_else(|| "none".to_string(), |age| format!("{:.1}", age.as_secs_f64()))
+                );
                 true
             }
         }
     }
 
-    /// `true` once the engine has stopped answering `isready`. The app then
-    /// shuts the host down and starts the engine again.
+    /// `true` once the engine has been declared stalled. The app then shuts
+    /// the host down and starts the engine again.
     pub fn is_stalled(&self) -> bool {
         self.watchdog.is_stalled()
+    }
+
+    /// Why the engine was declared stalled, once it has been.
+    pub fn stall_reason(&self) -> Option<StallReason> {
+        self.watchdog.stall_reason()
+    }
+
+    /// `true` while a `stop` is waiting for its `bestmove`: the engine is
+    /// finishing its last search and will not start a new one until then.
+    pub fn is_stopping(&self) -> bool {
+        self.watchdog.stop_pending()
+    }
+
+    /// The deadline of a search for `control`, when the search has its own
+    /// time limit (a move search). An analysis has none and is watched for progress.
+    fn move_limit(&self, control: &GoControl) -> Option<Duration> {
+        match control {
+            GoControl::MoveTime(ms) => Some(Duration::from_millis(*ms)),
+            GoControl::Clock {
+                wtime,
+                btime,
+                movetime,
+                ..
+            } => {
+                let own = movetime.unwrap_or(if self.white_to_move { *wtime } else { *btime });
+                Some(Duration::from_millis(own))
+            }
+            _ => None,
+        }
     }
 
     /// `true` once the engine answered the UCI handshake. Only such an
@@ -235,8 +313,20 @@ impl EngineHost {
 
     /// Forward commands to the writer task without waiting. A full or closed
     /// queue is logged; the analysis state recovers at the next position change.
-    fn dispatch(&self, commands: Vec<EngineCommand>) {
+    fn dispatch(&mut self, commands: Vec<EngineCommand>) {
+        let now = Instant::now();
         for command in commands {
+            match &command {
+                EngineCommand::SetPosition { fen: Some(fen), .. } => {
+                    self.white_to_move = fen.split_whitespace().nth(1) != Some("b");
+                }
+                EngineCommand::Go(control) => {
+                    let limit = self.move_limit(control);
+                    self.watchdog.begin_search(now, limit);
+                }
+                EngineCommand::Stop => self.watchdog.note_stop(now),
+                _ => {}
+            }
             // Heartbeats are frequent but uninteresting; the session log keeps
             // them only at trace so an idle engine cannot fill the file.
             if matches!(command, EngineCommand::IsReady) {
@@ -265,7 +355,7 @@ mod tests {
     use super::*;
     use crate::chess::GameState;
     use crate::engine::protocol::{GoControl, Score};
-    use crate::engine::watchdog::Watchdog;
+    use crate::engine::watchdog::{StallReason, Timing, Watchdog};
     use std::time::{Duration, Instant};
 
     /// Same fixture order as the engine tests: env override, Homebrew Stockfish, Triumviratus.
@@ -534,5 +624,111 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10), "3 s on the clock must not take 10 s");
 
         host.shutdown().terminate().await.unwrap();
+    }
+
+    /// Writes an executable `sh` script for a fake engine.
+    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Deadlines short enough for a test: a stop or a move must end within
+    /// about 300 ms of its limit.
+    fn short_deadlines() -> Timing {
+        Timing {
+            ping_every: Duration::from_millis(50),
+            response_within: Duration::from_millis(300),
+            stop_within: Duration::from_millis(300),
+            move_grace: Duration::from_millis(300),
+            ..Timing::default()
+        }
+    }
+
+    /// A fake engine that completes the handshake, answers `isready` at all
+    /// times, starts an `info` line on `go`, and never sends `bestmove`.
+    fn stop_ignoring_engine(dir: &std::path::Path) -> PathBuf {
+        write_script(
+            dir,
+            "stop-ignorer.sh",
+            "while IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Fake'; echo uciok;;\n    isready) echo readyok;;\n    go*) echo 'info depth 1 score cp 0 pv e2e4';;\n    quit) exit 0;;\n  esac\ndone\n",
+        )
+    }
+
+    /// Pump until the host reports a stall (returning its reason) or 5 s pass.
+    fn pump_until_stalled(host: &mut EngineHost) -> Option<StallReason> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            host.pump();
+            if host.is_stalled() {
+                return host.stall_reason();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_without_bestmove_is_reported_as_a_stall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stop_ignoring_engine(dir.path());
+        let process = EngineProcess::spawn(&path).await.unwrap();
+        let mut host = EngineHost::attach_with(process, Watchdog::with_timing(short_deadlines()), BTreeMap::new());
+        assert!(pump_until(&mut host, Duration::from_secs(5), |v| v.status == AnalysisStatus::Ready));
+
+        let fen = GameState::new().fen();
+        host.set_analysis(true, &fen, SearchGoal::Analyse);
+        host.set_analysis(false, &fen, SearchGoal::Analyse);
+        assert!(host.is_stopping(), "the stop is waiting for its bestmove");
+        assert_eq!(
+            pump_until_stalled(&mut host),
+            Some(StallReason::StopNotAnswered),
+            "a healthy isready does not excuse a missing bestmove"
+        );
+        host.shutdown().terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_search_without_bestmove_is_reported_as_a_stall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stop_ignoring_engine(dir.path());
+        let process = EngineProcess::spawn(&path).await.unwrap();
+        let mut host = EngineHost::attach_with(process, Watchdog::with_timing(short_deadlines()), BTreeMap::new());
+        assert!(pump_until(&mut host, Duration::from_secs(5), |v| v.status == AnalysisStatus::Ready));
+
+        let fen = GameState::new().fen();
+        host.set_analysis(true, &fen, SearchGoal::Move(GoControl::MoveTime(200)));
+        assert_eq!(pump_until_stalled(&mut host), Some(StallReason::MoveNotAnswered));
+        assert!(host.take_engine_move().is_none(), "no move arrives from a stalled search");
+        host.shutdown().terminate().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_engine_that_only_prints_noise_is_reported_as_a_stall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_script(
+            dir.path(),
+            "noisy.sh",
+            "searching=0\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Fake'; echo uciok;;\n    isready) if [ \"$searching\" = 0 ]; then echo readyok; fi;;\n    go*) searching=1; ( while true; do echo 'info string still busy'; sleep 0.1; done ) & ;;\n    quit) exit 0;;\n  esac\ndone\n",
+        );
+        let process = EngineProcess::spawn(&path).await.unwrap();
+        let mut host = EngineHost::attach_with(process, Watchdog::with_timing(short_deadlines()), BTreeMap::new());
+        assert!(pump_until(&mut host, Duration::from_secs(5), |v| v.status == AnalysisStatus::Ready));
+
+        host.set_analysis(true, &GameState::new().fen(), SearchGoal::Analyse);
+        assert_eq!(
+            pump_until_stalled(&mut host),
+            Some(StallReason::NoReadyOk),
+            "output that is not progress must not keep a deaf engine alive"
+        );
+        host.shutdown().terminate().await.unwrap();
+    }
+
+    #[test]
+    fn stall_reasons_read_as_plain_sentences() {
+        assert_eq!(StallReason::StopNotAnswered.to_string(), "it sent no bestmove after stop");
+        assert_eq!(StallReason::MoveNotAnswered.to_string(), "it sent no move in time");
     }
 }
