@@ -28,10 +28,16 @@ pub enum MenuAction {
     Resign,
     /// Game → Offer draw: the engine accepts or declines.
     OfferDraw,
+    /// Game → Claim draw (threefold): the player to move claims the draw.
+    ClaimThreefold,
     /// Engine → Engine A options… / B options… (`0` = A, `1` = B).
     OpenEngineOptions(usize),
+    /// Engine → Session log: switch writing `logs/siliconboard.log` on or off.
+    ToggleSessionLog,
     /// File → Open PGN…
     OpenPgn,
+    /// File → PGN games…: reopen the multi-game list window.
+    ShowPgnGames,
     /// File → Save PGN…
     SavePgn,
     /// File → Copy PGN.
@@ -54,6 +60,12 @@ pub enum MenuAction {
     ToggleFigurinesMoveList,
     /// View → Figurines in engine evaluation: toggle `♘f3` in the PV.
     ToggleFigurinesEval,
+    /// Tournament → New tournament…: open the engine-match dialog.
+    OpenTournament,
+    /// Tournament → Stop tournament: stop the running match.
+    StopTournament,
+    /// Tournament → Show tournament: reopen the tournament window.
+    ShowTournament,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
     /// Abort: stop all searches. Engines stay loaded and can be started again.
@@ -71,9 +83,13 @@ pub struct MenuState<'a> {
     pub mode: GameMode,
     /// Whether engines play opening-book moves in games.
     pub book_in_games: bool,
+    /// Whether the session log file is being written.
+    pub session_log: bool,
     /// `true` while a game against an engine is running, so the human can
     /// resign or offer a draw.
     pub vs_engine_live: bool,
+    /// `true` when the human may claim a draw by threefold repetition now.
+    pub can_claim_threefold: bool,
     /// Whether each slot's engine has answered its handshake, so its options are known.
     pub options_ready: [bool; 2],
     /// File name of the loaded opening book, if any.
@@ -92,6 +108,49 @@ pub struct MenuState<'a> {
     pub figurines_eval: bool,
     /// Number of moves played, shown in the Game menu.
     pub ply_count: usize,
+    /// Whether a tournament is currently playing games.
+    pub tournament_running: bool,
+    /// Whether a tournament result is available to show.
+    pub tournament_has_run: bool,
+    /// Whether a multi-game PGN is loaded, so the games window can be opened.
+    pub pgn_games_available: bool,
+}
+
+/// The flat, MD-Viewer-style toolbar look: padded outlined buttons, a slightly
+/// lighter bar background and a compact 15 pt label. Submenus keep the normal
+/// app style.
+fn style_menu_bar(style: &mut egui::Style) {
+    style.spacing.button_padding = egui::vec2(11.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(5.0, 0.0);
+    style.spacing.interact_size.y = 28.0;
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, FontId::proportional(15.0));
+
+    let widgets = &mut style.visuals.widgets;
+    widgets.inactive.weak_bg_fill = theme::TOOLBAR_BUTTON_BG;
+    widgets.inactive.bg_fill = theme::TOOLBAR_BUTTON_BG;
+    widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::TOOLBAR_STROKE);
+    widgets.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT);
+    widgets.inactive.corner_radius = egui::CornerRadius::same(4);
+
+    widgets.hovered.weak_bg_fill = theme::TOOLBAR_HOVER;
+    widgets.hovered.bg_fill = theme::TOOLBAR_HOVER;
+    widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::TOOLBAR_STROKE);
+    widgets.hovered.fg_stroke = egui::Stroke::new(1.2, theme::TEXT);
+    widgets.hovered.corner_radius = egui::CornerRadius::same(4);
+
+    widgets.active.weak_bg_fill = theme::TOOLBAR_ACTIVE;
+    widgets.active.bg_fill = theme::TOOLBAR_ACTIVE;
+    widgets.active.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
+    widgets.active.fg_stroke = egui::Stroke::new(1.2, theme::NEON_CYAN);
+    widgets.active.corner_radius = egui::CornerRadius::same(4);
+
+    widgets.open.weak_bg_fill = theme::TOOLBAR_ACTIVE;
+    widgets.open.bg_fill = theme::TOOLBAR_ACTIVE;
+    widgets.open.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
+    widgets.open.fg_stroke = egui::Stroke::new(1.2, theme::TEXT);
+    widgets.open.corner_radius = egui::CornerRadius::same(4);
 }
 
 /// Draw the top bar. `fen_input` is the FEN text shown in the field; the user
@@ -99,7 +158,7 @@ pub struct MenuState<'a> {
 /// in the field as in any text box. Returns the action chosen this frame.
 pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<MenuAction> {
     let mut action = None;
-    egui::MenuBar::new().ui(ui, |ui| {
+    egui::MenuBar::new().style(style_menu_bar).ui(ui, |ui| {
         ui.menu_button("Game", |ui| {
             if ui.button("New game").clicked() {
                 action = Some(MenuAction::NewGame);
@@ -139,6 +198,19 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 action = Some(MenuAction::OfferDraw);
                 ui.close();
             }
+            if ui
+                .add_enabled(
+                    state.can_claim_threefold,
+                    egui::Button::new("Claim draw (threefold)"),
+                )
+                .on_disabled_hover_text(
+                    "Available on your turn when the position has occurred three times.",
+                )
+                .clicked()
+            {
+                action = Some(MenuAction::ClaimThreefold);
+                ui.close();
+            }
             ui.separator();
             let book_available = state.book_name.is_some();
             let book = ui
@@ -157,6 +229,16 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         ui.menu_button("File", |ui| {
             if ui.button("Open PGN…").clicked() {
                 action = Some(MenuAction::OpenPgn);
+                ui.close();
+            }
+            let games = ui
+                .add_enabled(
+                    state.pgn_games_available,
+                    egui::Button::new("PGN games…"),
+                )
+                .on_disabled_hover_text("Open a PGN with more than one game first.");
+            if games.clicked() {
+                action = Some(MenuAction::ShowPgnGames);
                 ui.close();
             }
             if ui.button("Save PGN…").clicked() {
@@ -200,6 +282,14 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                     action = Some(MenuAction::OpenEngineOptions(slot));
                     ui.close();
                 }
+            }
+            ui.separator();
+            let session_log = ui
+                .add(egui::Button::selectable(state.session_log, "Session log"))
+                .on_hover_text("Write logs/siliconboard.log for this session");
+            if session_log.clicked() {
+                action = Some(MenuAction::ToggleSessionLog);
+                ui.close();
             }
             ui.separator();
             let book_label = match state.book_name {
@@ -265,6 +355,38 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 ui.close();
             }
         });
+        ui.menu_button("Tournament", |ui| {
+            let new = ui
+                .add_enabled(
+                    !state.tournament_running,
+                    egui::Button::new("New tournament…"),
+                )
+                .on_disabled_hover_text("Stop the running tournament first.");
+            if new.clicked() {
+                action = Some(MenuAction::OpenTournament);
+                ui.close();
+            }
+            let stop = ui
+                .add_enabled(
+                    state.tournament_running,
+                    egui::Button::new("Stop tournament"),
+                )
+                .on_disabled_hover_text("No tournament is running.");
+            if stop.clicked() {
+                action = Some(MenuAction::StopTournament);
+                ui.close();
+            }
+            let show = ui
+                .add_enabled(
+                    state.tournament_has_run,
+                    egui::Button::new("Show tournament"),
+                )
+                .on_disabled_hover_text("No tournament has been run yet.");
+            if show.clicked() {
+                action = Some(MenuAction::ShowTournament);
+                ui.close();
+            }
+        });
 
         ui.separator();
         let start = egui::Button::new(RichText::new("Start").color(Color32::BLACK).strong())
@@ -279,12 +401,12 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         }
 
         ui.separator();
-        ui.label(RichText::new("FEN").color(theme::MUTED));
+        ui.label(RichText::new("FEN").color(theme::MUTED).size(14.0));
         let field = ui
             .add(
                 egui::TextEdit::singleline(fen_input)
                     .font(FontId::monospace(15.0))
-                    .desired_width(ui.available_width().max(200.0))
+                    .desired_width(ui.available_width().max(120.0))
                     .hint_text("paste a FEN and press Enter"),
             )
             .on_hover_text("Enter loads this position");

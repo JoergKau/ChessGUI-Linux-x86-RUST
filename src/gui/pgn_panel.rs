@@ -10,6 +10,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Align, Galley, RichText, Ui, WidgetText};
 
 use crate::chess::game_state::MoveLine;
+use crate::chess::pgn::{PgnCollection, PgnResult};
 use crate::chess::GameState;
 use crate::gui::{figurines, theme};
 
@@ -17,6 +18,7 @@ use crate::gui::{figurines, theme};
 /// sets it on the frame the cursor moved. `lines` is the cached move list for
 /// the current history revision; `galleys[ply]` is its cached SAN layout.
 /// `figurines` draws `♘f3` instead of `Nf3` when the View setting is on.
+/// `result` is the PGN result token, shown after the last move when known.
 pub fn show(
     ui: &mut Ui,
     game: &mut GameState,
@@ -24,6 +26,7 @@ pub fn show(
     galleys: &[Option<Arc<Galley>>],
     follow: bool,
     figurines: bool,
+    result: Option<&str>,
 ) {
     ui.horizontal(|ui| {
         if ui.button("|<").on_hover_text("Start of game").clicked() {
@@ -82,6 +85,14 @@ pub fn show(
                     }
                     ui.add_space(10.0);
                 }
+                if let Some(result) = result {
+                    ui.label(
+                        RichText::new(result)
+                            .color(theme::NEON_CYAN)
+                            .monospace()
+                            .strong(),
+                    );
+                }
             });
             if lines.is_empty() {
                 ui.label(RichText::new("No moves yet — play one on the board.").color(theme::MUTED));
@@ -92,6 +103,229 @@ pub fn show(
         game.goto_ply(ply);
     }
 }
+
+/// What the PGN games window asked for this frame.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GameListAction {
+    /// Nothing changed.
+    None,
+    /// Load the game at this zero-based index.
+    Select(usize),
+    /// The user closed the window.
+    Close,
+}
+
+/// A movable window listing every game in a multi-game PGN. Clicking a row
+/// loads that game into the normal bottom move list; the window stays open so
+/// another game can be picked.
+pub fn show_game_list_window(
+    ctx: &egui::Context,
+    collection: &PgnCollection,
+    selected: usize,
+) -> GameListAction {
+    let mut action = GameListAction::None;
+    let mut open = true;
+    let mut close_clicked = false;
+    egui::Window::new("PGN games")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(900.0)
+        .min_width(700.0)
+        .default_pos(ctx.content_rect().left_top() + egui::vec2(80.0, 80.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let bar_width = ui.available_width();
+            let (bar_rect, _) = ui.allocate_exact_size(
+                egui::vec2(bar_width, 38.0),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect_filled(bar_rect, 0.0, theme::TOOLBAR_BG);
+            let inner = bar_rect.shrink2(egui::vec2(8.0, 6.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} — {} games",
+                            collection.name,
+                            collection.games.len()
+                        ))
+                        .size(15.0)
+                        .strong(),
+                    );
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new("Close")
+                                        .min_size(egui::vec2(80.0, 26.0)),
+                                )
+                                .clicked()
+                            {
+                                close_clicked = true;
+                            }
+                        },
+                    );
+                });
+            });
+            ui.label(
+                RichText::new("Click a game to load it in the move list below.")
+                    .size(12.0)
+                    .color(theme::MUTED),
+            );
+            ui.separator();
+
+            let list_action = game_list(ui, collection, selected);
+            if list_action != GameListAction::None {
+                action = list_action;
+            }
+        });
+    if !open || close_clicked {
+        return GameListAction::Close;
+    }
+    action
+}
+
+/// The game list itself. Returns the selected game, if one was clicked.
+///
+/// This is a plain scrollable list rather than a table: every row spans the
+/// full window width, the columns are distributed across that width, and the
+/// whole row is clickable.
+fn game_list(ui: &mut Ui, collection: &PgnCollection, selected: usize) -> GameListAction {
+    let mut action = GameListAction::None;
+    let header_height = 24.0;
+    let row_height = 22.0;
+    // Tournament PGNs carry a `Termination` tag (e.g. "Black wins on time").
+    // Show it next to the result when the file has it.
+    let show_termination = collection
+        .games
+        .iter()
+        .any(|game| !game.termination.is_empty());
+
+    let width = ui.available_width();
+    let (header_rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, header_height), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(header_rect, 0.0, theme::TOOLBAR_BG);
+    let mut headers = vec!["#", "White", "Black", "Result"];
+    if show_termination {
+        headers.push("Termination");
+    }
+    headers.extend(["Date", "Event"]);
+    paint_list_row(
+        ui,
+        header_rect,
+        &column_widths(width, show_termination),
+        &headers,
+        theme::TEXT,
+    );
+    #[cfg(test)]
+    LAST_LIST_WIDTH.store(width as u32, std::sync::atomic::Ordering::Relaxed);
+
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(500.0)
+        .show_rows(ui, row_height, collection.games.len(), |ui, rows| {
+            let width = ui.available_width();
+            let widths = column_widths(width, show_termination);
+            for index in rows {
+                let entry = &collection.games[index];
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::click());
+                let fill = if index == selected {
+                    Some(ui.visuals().selection.bg_fill)
+                } else if response.hovered() {
+                    Some(ui.visuals().widgets.hovered.bg_fill)
+                } else if index % 2 == 1 {
+                    Some(ui.visuals().faint_bg_color)
+                } else {
+                    None
+                };
+                if let Some(fill) = fill {
+                    ui.painter().rect_filled(rect, 0.0, fill);
+                }
+
+                let number = format!("#{}", entry.number);
+                let result = entry.result.map_or("*", PgnResult::token);
+                let date = if entry.date == "????.??.??" {
+                    ""
+                } else {
+                    entry.date.as_str()
+                };
+                let mut cells = vec![
+                    number.as_str(),
+                    entry.white.as_str(),
+                    entry.black.as_str(),
+                    result,
+                ];
+                if show_termination {
+                    cells.push(entry.termination.as_str());
+                }
+                cells.extend([date, entry.event.as_str()]);
+                paint_list_row(ui, rect, &widths, &cells, theme::TEXT);
+
+                if response.clicked() {
+                    action = GameListAction::Select(index);
+                }
+                response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            }
+        });
+
+    action
+}
+
+/// Width of the list columns for a given total width. The first columns get a
+/// proportional share; `Event` takes the rest so the row always fills the
+/// available width.
+fn column_widths(total: f32, show_termination: bool) -> Vec<f32> {
+    let number = (total * 0.05).clamp(40.0, 64.0);
+    let white = (total * 0.19).clamp(90.0, 340.0);
+    let black = (total * 0.19).clamp(90.0, 340.0);
+    let result = (total * 0.08).clamp(44.0, 110.0);
+    let date = (total * 0.10).clamp(64.0, 160.0);
+    if show_termination {
+        let termination = (total * 0.22).clamp(120.0, 340.0);
+        let event = (total - number - white - black - result - termination - date).max(100.0);
+        vec![number, white, black, result, termination, date, event]
+    } else {
+        let event = (total - number - white - black - result - date).max(120.0);
+        vec![number, white, black, result, date, event]
+    }
+}
+
+/// Draw one row of the list. Text is clipped to its column so long names do not
+/// run into the next column.
+fn paint_list_row(
+    ui: &Ui,
+    rect: egui::Rect,
+    widths: &[f32],
+    cells: &[&str],
+    color: egui::Color32,
+) {
+    let painter = ui.painter();
+    let font = egui::FontId::proportional(14.0);
+    let mut x = rect.left();
+    for (text, width) in cells.iter().zip(widths.iter()) {
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            egui::pos2(x + width, rect.bottom()),
+        );
+        painter.with_clip_rect(cell.intersect(ui.clip_rect())).text(
+            egui::pos2(x + 6.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            *text,
+            font.clone(),
+            color,
+        );
+        x += width;
+    }
+}
+
+#[cfg(test)]
+static LAST_LIST_WIDTH: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -116,5 +350,77 @@ mod tests {
         game.goto_ply(white.ply);
         assert_eq!(game.cur_ply(), 1);
         assert_eq!(game.last_move().map(|(from, _)| from.to_string()), Some("e2".into()));
+    }
+
+    #[test]
+    fn the_move_list_draws_the_result_token() {
+        let mut game = GameState::new();
+        for (from, to) in [("e2", "e4"), ("e7", "e5")] {
+            game.play_squares(
+                shakmaty::Square::from_ascii(from.as_bytes()).unwrap(),
+                shakmaty::Square::from_ascii(to.as_bytes()).unwrap(),
+                None,
+            )
+            .unwrap();
+        }
+        let lines = game.pgn_lines();
+        let galleys = vec![None; game.total_plies() + 1];
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            show(ui, &mut game, &lines, &galleys, false, false, Some("1-0"));
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn the_multi_game_list_lays_out() {
+        let text = "[Event \"One\"]\n[White \"A\"]\n[Black \"B\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n\n[Event \"Two\"]\n[White \"C\"]\n[Black \"D\"]\n[Result \"0-1\"]\n\n1. d4 d5 0-1\n";
+        let collection = crate::chess::pgn::parse_pgn_collection(text).unwrap();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let _ = show_game_list_window(ui.ctx(), &collection, 0);
+        });
+        output.textures_delta.clear();
+        let width = LAST_LIST_WIDTH.load(std::sync::atomic::Ordering::Relaxed);
+        println!("PGN window table width: {width}");
+        assert!(width > 700, "the table must span the window, got {width}");
+    }
+
+    #[test]
+    fn the_game_list_fills_the_available_width() {
+        let text = "[Event \"One\"]\n[White \"A\"]\n[Black \"B\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n\n[Event \"Two\"]\n[White \"C\"]\n[Black \"D\"]\n[Result \"0-1\"]\n\n1. d4 d5 0-1\n";
+        let collection = crate::chess::pgn::parse_pgn_collection(text).unwrap();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ui.set_width(800.0);
+            let _ = game_list(ui, &collection, 0);
+        });
+        output.textures_delta.clear();
+        let width = LAST_LIST_WIDTH.load(std::sync::atomic::Ordering::Relaxed) as f32;
+        assert!(
+            (width - 800.0).abs() < 30.0,
+            "the table must fill the available width, got {width}"
+        );
     }
 }

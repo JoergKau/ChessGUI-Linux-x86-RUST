@@ -25,6 +25,7 @@ doc/
 
 # Logs
 *.log
+/logs/
 
 # Generated demo / scratch files
 /scratch/
