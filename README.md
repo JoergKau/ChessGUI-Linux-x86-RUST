@@ -107,9 +107,12 @@ the signature.
 
 **Install locally:** `./package-macos.sh --install` (or `-i`) also copies
 the freshly signed bundle into `/Applications`, replacing an existing
-copy there; without the flag nothing is installed, and an unknown
-argument is rejected with the usage line. If `/Applications` cannot be
-written, the script says so and the `.app` can be dragged by hand.
+copy there, and then **removes the repo copy and unregisters it with
+Launch Services** — so exactly one app entry ever exists, and it always
+lives in `/Applications`. Without the flag nothing is installed, and an
+unknown argument is rejected with the usage line. If `/Applications`
+cannot be written, the script says so and the `.app` can be dragged by
+hand.
 
 **What to do with it:** double-click to launch, or drag it to
 `/Applications`. A copy that came over the internet is quarantined by
