@@ -39,7 +39,7 @@ use crate::settings::{self, Settings, SettingsError};
 use crate::gui::time_control::{self, ClockFace, DialogOutcome, PlayerBar, TimeControlDialog};
 use crate::gui::{pgn_panel, theme};
 use crate::tournament::{
-    self, book_kind, find_book_path, game_headers, schedule_games, score_label, Adjudication,
+    self, book_kind, find_book_path, game_headers, schedule_games, white_score_label, Adjudication,
     Adjudicator, BookKind, CurrentGame, EngineSpec, EpdBook, ScheduledGame, TournamentBook,
     TournamentConfig, TournamentStatus,
 };
@@ -2330,7 +2330,9 @@ impl SiliconBoardApp {
             .adjudicator
             .observe(mover, score, last_move, fullmove);
         let ply = self.game.total_plies();
-        let score_text = score.map(score_label);
+        // The window shows White's point of view; the adjudication above used
+        // the engine's own score, as cutechess does.
+        let score_text = score.map(|score| white_score_label(score, mover));
         if let Some(session) = &mut self.tournament {
             if let Some(game) = session.status.current.first_mut() {
                 game.ply = ply;
