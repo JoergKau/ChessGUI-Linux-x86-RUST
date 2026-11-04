@@ -86,8 +86,9 @@ MD-Viewer-style toolbar across the top.
   exit status and the engine's last message.
 - **Players on the board:** a loaded PGN shows its White and Black names on the
   player bars. A new game, a FEN, a play mode or a tournament replaces them.
-- **About:** Help → About SiliconBoard shows "SiliconBoard 1.0", the project
-  page (https://github.com/JoergKau) and the licence.
+- **About:** the About item of the app menu shows the standard macOS panel:
+  "SiliconBoard", "Version 1.0", the project page as a clickable link
+  (https://github.com/JoergKau) and the licence, with the application icon.
 - **Icon:** the application icon is shown in the window and is included as
   `SiliconBoard.icns` for the app bundle.
 - **Warnings:** setting Threads whose total over both engines exceeds the core
