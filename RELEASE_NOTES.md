@@ -80,6 +80,10 @@ MD-Viewer-style toolbar across the top.
 - **Process cleanup:** every engine runs in its own process group, and a stop,
   stall or exit ends the whole group, helpers included. Engines left running by
   a crash or a forced quit are stopped at the next start.
+- **Engine files:** launcher scripts (shell, Java and Python wrappers) can be
+  loaded. A file that cannot run on this Mac is refused with the reason before
+  it starts. An engine runs from its own folder, and a failed start shows the
+  exit status and the engine's last message.
 - **Warnings:** setting Threads whose total over both engines exceeds the core
   count, or MultiPV above 1, shows a warning; the value is still applied.
 - **Performance:** engine output wakes the window directly, coalesced to about
