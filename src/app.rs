@@ -1489,7 +1489,52 @@ impl SiliconBoardApp {
                 .insert(name.to_string(), value.to_string());
             self.save_settings();
         }
-        self.set_status(StatusLevel::Info, format!("Engine {}: {} set to {}.", slot_letter(slot), name, value));
+        match self.option_warning(slot, name, value) {
+            Some(warning) => self.set_status(StatusLevel::Warning, warning),
+            None => self.set_status(StatusLevel::Info, format!("Engine {}: {} set to {}.", slot_letter(slot), name, value)),
+        }
+    }
+
+    /// A warning for an option value that wastes the machine: more threads
+    /// than cores over both engines (BUG-7-14), or a `MultiPV` above 1, which
+    /// makes the engine search lines the card never shows (BUG-7-15). The value
+    /// is still set; the warning only tells the owner.
+    fn option_warning(&self, slot: usize, name: &str, value: &str) -> Option<String> {
+        match name {
+            "MultiPV" => {
+                let lines: u32 = value.trim().parse().ok()?;
+                (lines > 1).then(|| {
+                    format!(
+                        "Engine {}: MultiPV {} makes it search {} lines; the card shows only line 1, so the search is slower.",
+                        slot_letter(slot),
+                        lines,
+                        lines
+                    )
+                })
+            }
+            "Threads" => {
+                let own: usize = value.trim().parse().ok()?;
+                let other = 1 - slot;
+                let other_threads: usize = self.engine_settings[other]
+                    .get("Threads")
+                    .and_then(|text| text.trim().parse().ok())
+                    .unwrap_or(1);
+                let total = own + other_threads;
+                let cores = std::thread::available_parallelism().map_or(usize::MAX, usize::from);
+                (total > cores).then(|| {
+                    format!(
+                        "Engine {}: Threads {} plus engine {} at {} is {} threads on {} cores; the engines will compete for cores.",
+                        slot_letter(slot),
+                        own,
+                        slot_letter(other),
+                        other_threads,
+                        total,
+                        cores
+                    )
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Press a button option on the engine in `slot`.
@@ -4562,5 +4607,25 @@ mod game_flow_tests {
         assert!(app.may_restart(1), "the other slot is not affected");
         app.restart_times[0] = vec![Instant::now() - RESTART_WINDOW - Duration::from_secs(1); RESTART_LIMIT];
         assert!(app.may_restart(0), "restarts older than the window no longer count");
+    }
+
+    #[test]
+    fn options_that_waste_the_machine_are_warned_about() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        assert!(app.option_warning(0, "MultiPV", "1").is_none());
+        assert!(app.option_warning(0, "MultiPV", "3").unwrap().contains("MultiPV 3"));
+        assert!(app.option_warning(0, "Hash", "4096").is_none());
+
+        let cores = std::thread::available_parallelism().map_or(usize::MAX, usize::from);
+        assert!(app.option_warning(0, "Threads", "1").is_none(), "one thread each fits");
+        if cores < usize::MAX {
+            let too_many = cores.to_string();
+            assert!(app.option_warning(0, "Threads", &too_many).is_some(), "{cores} + 1 threads exceed {cores} cores");
+        }
+        app.engine_settings[1].insert("Threads".to_string(), "4".to_string());
+        if cores < 5 {
+            assert!(app.option_warning(0, "Threads", "2").is_some(), "the other engine's threads count too");
+        }
     }
 }
