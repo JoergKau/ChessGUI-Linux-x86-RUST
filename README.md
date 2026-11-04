@@ -35,14 +35,19 @@ The full list of features, planned items and backlog lives in
 cargo run --release
 ```
 
-The **asset tree** is expected in a `public/` folder: board themes under
-`public/images/board/`, piece sets (twelve SVGs per folder) under
-`public/piece/`, the figurine font at `public/font/lichess-chess.ttf` and the
-CC0 ECO openings table at `public/data/openings/openings.tsv`. SiliconBoard
-finds it via `$SILICONBOARD_PUBLIC_ROOT`, by walking up from the executable,
-or as `./public`. The window icon is compiled in from `assets/icon/`
-(`siliconboard-512.png`); the visible piece artwork is not part of this
-repository.
+The **asset tree** is bundled in this repository under `public/`: board
+themes under `public/images/board/`, piece sets (twelve SVGs per folder)
+under `public/piece/`, the figurine font at `public/font/lichess-chess.ttf`
+and the CC0 ECO openings table at `public/data/openings/openings.tsv` — a
+fresh clone runs fully dressed. The per-asset licences (lichess and its
+piece authors, typically CC-BY-SA) are documented in
+[`public/LICENSING.md`](public/LICENSING.md). SiliconBoard finds the tree
+via `$SILICONBOARD_PUBLIC_ROOT`, by walking up from the executable, or as
+`./public` (the bundled copy is normally found by the walk-up);
+`$SILICONBOARD_PUBLIC_ROOT` points a development setup at a different tree.
+The workspace copy is refreshed from the canonical shared tree with
+`./sync-public.sh`. The window icon is compiled
+in from `assets/icon/` (`siliconboard-512.png`).
 
 SiliconBoard does **not** ship an opening book. If a PolyGlot book named
 `books/gm2001.bin` (exactly that file name) exists in a folder above the
@@ -66,7 +71,7 @@ cargo build --release
 mkdir -p SiliconBoard.app/Contents/MacOS SiliconBoard.app/Contents/Resources
 cp target/release/siliconboard   SiliconBoard.app/Contents/MacOS/SiliconBoard
 cp assets/icon/SiliconBoard.icns SiliconBoard.app/Contents/Resources/
-cp -R <your public tree>/public  SiliconBoard.app/Contents/Resources/public
+cp -R public                     SiliconBoard.app/Contents/Resources/public
 ```
 
 Note the `cp` renames the binary to `SiliconBoard`, which the plist then
@@ -130,5 +135,6 @@ engine fixtures fail (rather than skip) when they are missing.
 
 MIT — see [LICENSE](LICENSE).
 
-External assets follow their own licences (piece sets are typically
-CC-BY-SA); the ECO openings table is CC0.
+External assets follow their own licences — the bundled `public/` tree
+carries its source (lichess `lifat`) and per-asset terms in
+[`public/LICENSING.md`](public/LICENSING.md); the ECO openings table is CC0.
