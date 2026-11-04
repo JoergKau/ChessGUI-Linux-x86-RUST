@@ -58,54 +58,25 @@ to download, we recommend the
 
 ## Release as a macOS `.app` bundle
 
-The packaging script is still on the backlog (F-15), so these are the manual
-steps. The asset resolver already understands the bundle layout: a bundled
-app reads its assets from `Contents/Resources/public` — also
-`Contents/Resources` itself counts — as unit-tested in `src/assets.rs`.
+```shell
+./package-macos.sh
+```
 
-Assemble the bundle:
+The script (F-15) runs `cargo build --release`, then assembles
+`SiliconBoard.app` in the repository root: the binary as
+`Contents/MacOS/SiliconBoard`, the icon and the asset tree as
+`Contents/Resources/public` — the layout the asset resolver checks first in
+a bundle (unit-tested in `src/assets.rs`) — and writes
+`Contents/Info.plist` with the version taken from `Cargo.toml`, the bundle
+identifier `org.chess-gui.SiliconBoard` and the About-panel copyright
+(`macos_about.rs` reads both from the bundle). `plutil -lint` guards the
+plist, and the bundle is signed sign ad-hoc:
 
 ```shell
-cargo build --release
-
-mkdir -p SiliconBoard.app/Contents/MacOS SiliconBoard.app/Contents/Resources
-cp target/release/siliconboard   SiliconBoard.app/Contents/MacOS/SiliconBoard
-cp assets/icon/SiliconBoard.icns SiliconBoard.app/Contents/Resources/
-cp -R public                     SiliconBoard.app/Contents/Resources/public
+codesign --force --deep --sign - SiliconBoard.app   # the script does this
 ```
 
-Note the `cp` renames the binary to `SiliconBoard`, which the plist then
-names as the executable. Create `SiliconBoard.app/Contents/Info.plist`
-(the About panel reads the version and the copyright from this file when
-the app runs inside a bundle):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>               <string>SiliconBoard</string>
-    <key>CFBundleDisplayName</key>        <string>SiliconBoard</string>
-    <key>CFBundleExecutable</key>         <string>SiliconBoard</string>
-    <key>CFBundleIdentifier</key>         <string>org.chess-gui.SiliconBoard</string>
-    <key>CFBundlePackageType</key>        <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>1.0.0</string>
-    <key>CFBundleVersion</key>            <string>1</string>
-    <key>CFBundleIconFile</key>           <string>SiliconBoard.icns</string>
-    <key>LSMinimumSystemVersion</key>     <string>11.0</string>
-    <key>NSHighResolutionCapable</key>    <true/>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026 Joerg Kauschke. MIT License.</string>
-</dict>
-</plist>
-```
-
-An ad-hoc signature is enough for local use:
-
-```shell
-codesign --force --deep --sign - SiliconBoard.app
-```
+The bundle is a build artefact and stays out of git.
 
 **What to do with it:** double-click to launch, or drag it to
 `/Applications`. Nothing else is bundled, so on first launch:
