@@ -15,7 +15,6 @@
 //! └── time_control.rs ← clock labels above the board and the time-control dialog
 //! ```
 
-pub mod about;
 pub mod board_view;
 pub mod eval_panel;
 pub mod figurines;

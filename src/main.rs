@@ -12,6 +12,8 @@ mod chess;
 mod engine;
 mod gui;
 mod logging;
+#[cfg(target_os = "macos")]
+mod macos_about;
 mod settings;
 mod tournament;
 
@@ -80,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let log_file = logging::init(settings.session_log);
+
+    // The About panel shows the project credits and link (macOS only).
+    #[cfg(target_os = "macos")]
+    macos_about::install();
 
     log::info!(
         "SiliconBoard {} starting on {} {} — booting eframe on wgpu/Metal",
