@@ -330,6 +330,8 @@ enum AppEvent {
     TournamentMoveBookPicked { outcome: Option<PathBuf> },
     /// The tournament dialog asked for a PGN destination.
     TournamentPgnPicked { outcome: Option<PathBuf> },
+    /// Writing a finished tournament game to its PGN file failed.
+    TournamentWriteFailed { message: String },
     /// The tournament's opening book was indexed.
     TournamentBookLoaded {
         generation: u64,
@@ -1112,6 +1114,10 @@ impl SiliconBoardApp {
                         );
                     }
                 },
+                AppEvent::TournamentWriteFailed { message } => {
+                    log::error!("tournament PGN write failed: {}", message);
+                    self.fail_tournament(format!("Could not write the PGN file: {}", message));
+                }
                 AppEvent::TournamentBookLoaded { generation, outcome } => {
                     self.handle_tournament_book_loaded(generation, outcome);
                 }
@@ -2307,20 +2313,38 @@ impl SiliconBoardApp {
             self.game.total_plies(),
         );
         let text = pgn::to_pgn_with_headers(&self.game, &token, &headers);
-        let write_result = {
-            let session = self
-                .tournament
-                .as_mut()
-                .expect("the tournament exists");
-            session
-                .pgn_file
-                .write_all(text.as_bytes())
-                .and_then(|()| session.pgn_file.write_all(b"\n"))
-                .and_then(|()| session.pgn_file.flush())
-        };
-        if let Err(err) = write_result {
-            self.fail_tournament(format!("Could not write the PGN file: {}", err));
-            return;
+        // The write runs off the UI thread. A clone of the handle shares the
+        // file position, so games still follow each other in the file.
+        let file = self
+            .tournament
+            .as_ref()
+            .expect("the tournament exists")
+            .pgn_file
+            .try_clone();
+        match file {
+            Ok(mut file) => {
+                let tx = self.events_tx.clone();
+                self.spawn(async move {
+                    let written = tokio::task::spawn_blocking(move || {
+                        file.write_all(text.as_bytes())
+                            .and_then(|()| file.write_all(b"\n"))
+                            .and_then(|()| file.flush())
+                    })
+                    .await;
+                    let failure = match written {
+                        Ok(Ok(())) => None,
+                        Ok(Err(err)) => Some(err.to_string()),
+                        Err(err) => Some(err.to_string()),
+                    };
+                    if let Some(message) = failure {
+                        tx.send(AppEvent::TournamentWriteFailed { message });
+                    }
+                });
+            }
+            Err(err) => {
+                self.fail_tournament(format!("Could not write the PGN file: {}", err));
+                return;
+            }
         }
 
         let total = config.games;
