@@ -1,6 +1,6 @@
 # SiliconBoard — Release Notes
 
-## v0.1.0 — unreleased (Phase 7 in progress)
+## v1.0 — unreleased (Phase 7 in progress)
 
 A native macOS (Apple Silicon) UCI chess GUI in Rust: board on the left, live
 engine analysis on the right, move list along the bottom, and a flat
@@ -84,6 +84,12 @@ MD-Viewer-style toolbar across the top.
   loaded. A file that cannot run on this Mac is refused with the reason before
   it starts. An engine runs from its own folder, and a failed start shows the
   exit status and the engine's last message.
+- **Players on the board:** a loaded PGN shows its White and Black names on the
+  player bars. A new game, a FEN, a play mode or a tournament replaces them.
+- **About:** Help → About SiliconBoard shows "SiliconBoard 1.0", the project
+  page (https://github.com/JoergKau) and the licence.
+- **Icon:** the application icon is shown in the window and is included as
+  `SiliconBoard.icns` for the app bundle.
 - **Warnings:** setting Threads whose total over both engines exceeds the core
   count, or MultiPV above 1, shows a warning; the value is still applied.
 - **Performance:** engine output wakes the window directly, coalesced to about
