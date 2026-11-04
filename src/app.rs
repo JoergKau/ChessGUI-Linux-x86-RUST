@@ -6,6 +6,7 @@
 //! on the Tokio runtime owned by [`SiliconBoardApp`] and reports back as an
 //! [`AppEvent`], which [`SiliconBoardApp::drain_app_events`] picks up each frame.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -116,6 +117,9 @@ struct PvCache {
     /// Converted SAN line.
     san: Arc<Vec<String>>,
 }
+
+/// The book moves remembered for one position: `(source, FEN, moves)`.
+type BookMemo = ((bool, u64), String, Vec<(Move, u16)>);
 
 /// Cached SAN layouts for the move list, keyed by history revision and figurine setting.
 type PgnGalleyCache = (u64, bool, Vec<Option<Arc<egui::Galley>>>);
@@ -505,6 +509,11 @@ pub struct SiliconBoardApp {
     analysis_on: [bool; 2],
     /// The loaded opening book and its file name.
     book: Option<(String, PolyglotBook)>,
+    /// Incremented whenever `book` is replaced, so the memo below is not reused.
+    book_generation: u64,
+    /// The book moves of the last position asked for, with the book they came
+    /// from (`(is_tournament, generation)`) and the FEN (BUG-7-18).
+    book_memo: RefCell<Option<BookMemo>>,
     /// ECO opening names, keyed by position.
     opening_names: Option<OpeningNames>,
     /// The most recent ECO name at or before the displayed position. Kept
@@ -652,6 +661,8 @@ impl SiliconBoardApp {
             engine_loading: [false, false],
             analysis_on: [false, false],
             book: None,
+            book_generation: 0,
+            book_memo: RefCell::new(None),
             opening_names: None,
             opening_name: None,
             book_moves: Vec::new(),
@@ -949,6 +960,7 @@ impl SiliconBoardApp {
                     Some((name, Ok(book))) => {
                         self.set_status(StatusLevel::Info, format!("Opening book loaded: {} ({} records)", name, book.len()));
                         self.book = Some((name, book));
+                        self.book_generation += 1;
                         self.sync_position(true);
                     }
                     Some((name, Err(err))) => {
@@ -2875,7 +2887,7 @@ impl SiliconBoardApp {
         if let Some(session) = &self.tournament {
             if session.active() {
                 if let Some(book) = session.book.as_ref().and_then(TournamentBook::polyglot) {
-                    return self.game.book_moves(book);
+                    return self.book_moves_cached(book, (true, self.tournament_generation));
                 }
             }
         }
@@ -2883,9 +2895,24 @@ impl SiliconBoardApp {
             return Vec::new();
         }
         match &self.book {
-            Some((_, book)) => self.game.book_moves(book),
+            Some((_, book)) => self.book_moves_cached(book, (false, self.book_generation)),
             None => Vec::new(),
         }
+    }
+
+    /// The book moves of the displayed position from `book`. An engine on the
+    /// move asks every frame, so the answer is kept for the position and the
+    /// book it came from (`source`) (BUG-7-18).
+    fn book_moves_cached(&self, book: &PolyglotBook, source: (bool, u64)) -> Vec<(Move, u16)> {
+        let fen = self.game.fen();
+        if let Some((memo_source, memo_fen, moves)) = self.book_memo.borrow().as_ref() {
+            if *memo_source == source && *memo_fen == fen {
+                return moves.clone();
+            }
+        }
+        let moves = self.game.book_moves(book);
+        *self.book_memo.borrow_mut() = Some((source, fen, moves.clone()));
+        moves
     }
 
     /// Play a weighted-random book move for the engine on the move, if the
