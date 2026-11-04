@@ -3373,7 +3373,6 @@ dependencies = [
 name = "siliconboard"
 version = "0.1.0"
 dependencies = [
- "arboard",
  "byteorder",
  "eframe",
  "egui",

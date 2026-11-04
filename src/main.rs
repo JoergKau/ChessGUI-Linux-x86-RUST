@@ -91,7 +91,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("session log file unavailable; logging to the console only");
     }
 
+    // The runtime only does I/O for the engines and short background jobs, so
+    // two workers are enough. The rest of the cores are left to the engines.
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .thread_name("siliconboard-io")
         .build()?;

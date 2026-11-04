@@ -351,6 +351,8 @@ pub enum EngineError {
     /// Tried to send a command after the writer task had exited, or the
     /// command queue is full (for [`crate::engine::EngineProcess::try_send`]).
     ChannelClosed,
+    /// The command queue is full: the engine is not reading its input.
+    QueueFull,
     /// Generic I/O error on the subprocess pipe.
     Io {
         source: std::io::Error,
@@ -367,6 +369,7 @@ impl std::fmt::Display for EngineError {
                 write!(f, "could not spawn engine {}: {}", name, source)
             }
             EngineError::ChannelClosed => f.write_str("engine command channel closed"),
+            EngineError::QueueFull => f.write_str("engine command queue is full"),
             EngineError::Io { source } => write!(f, "engine I/O error: {}", source),
         }
     }
@@ -376,7 +379,7 @@ impl std::error::Error for EngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             EngineError::SpawnFailed { source, .. } | EngineError::Io { source } => Some(source),
-            EngineError::ChannelClosed => None,
+            EngineError::ChannelClosed | EngineError::QueueFull => None,
         }
     }
 }

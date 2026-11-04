@@ -297,6 +297,10 @@ impl AnalysisSession {
     pub fn mark_offline(&mut self) {
         self.offline = true;
         self.phase = Phase::Idle;
+        // Nothing queued for a search or a move can be delivered any more.
+        self.pending.clear();
+        self.pending_move = None;
+        self.pending_evaluation = None;
     }
 
     /// Current status for the UI badge.

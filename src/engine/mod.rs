@@ -263,9 +263,10 @@ impl EngineProcess {
     /// command queue is full or the engine has exited, so the caller never
     /// waits on an engine.
     pub fn try_send(&self, cmd: EngineCommand) -> Result<(), EngineError> {
-        self.cmd_tx
-            .try_send(cmd)
-            .map_err(|_| EngineError::ChannelClosed)
+        self.cmd_tx.try_send(cmd).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(_) => EngineError::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => EngineError::ChannelClosed,
+        })
     }
 
     /// Subscribe a consumer to the broadcast event stream.
@@ -421,8 +422,12 @@ async fn run_reader(
                         | ParsedUciLine::Unknown(_)
                         | ParsedUciLine::ParseError { .. }
                 );
-                let _ = lines.send(message.clone());
-                let _ = events.send(message);
+                // Only clone for the broadcast when someone listens to it; the
+                // app reads the lossless stream, so usually nobody does.
+                if events.receiver_count() > 0 {
+                    let _ = events.send(message.clone());
+                }
+                let _ = lines.send(message);
                 if let Some(wake) = &wake {
                     wake(important);
                 }

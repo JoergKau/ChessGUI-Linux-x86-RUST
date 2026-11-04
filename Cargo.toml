@@ -58,10 +58,8 @@ tokio = { version = "1.40", features = [
 # Default features pick Cocoa dialogs on macOS automatically.
 rfd = "0.17"
 
-# Note: macOS clipboard writing is performed through `egui::Context::copy_text`
-# which avoids pulling in a heavyweight native-clipboard dep. `arboard` is kept
-# here as a fallback for read-from-clipboard flows if needed.
-arboard = { version = "3.4", default-features = false }
+# Clipboard writing goes through `egui::Context::copy_text`; no clipboard crate
+# is needed (BUG-7-19: `arboard` was unused and is removed).
 
 # ── Configuration persistence (engine options, layout, last PGN) ─────────────
 serde = { version = "1.0", features = ["derive"] }
