@@ -78,8 +78,18 @@ codesign --force --deep --sign - SiliconBoard.app   # the script does this
 
 The bundle is a build artefact and stays out of git.
 
+**Distribution:** the script also packs the signed app into
+`SiliconBoard-<version>-macos-arm64.zip` — one folder holding the app plus
+`LICENSE` and `README.md` — and prints the zip's SHA-256 for the release
+listing. The app is signed *before* it is zipped (modifying a signed app
+breaks the seal), and the zip is verified by unzipping it and re-checking
+the signature.
+
 **What to do with it:** double-click to launch, or drag it to
-`/Applications`. Nothing else is bundled, so on first launch:
+`/Applications`. A copy that came over the internet is quarantined by
+macOS: right-click → **Open** the first time.
+
+Nothing else is bundled, so on first launch:
 
 2. Load an engine via *Engine → Load engine A…* (and B as needed) — no UCI
    engine is distributed with SiliconBoard; the engines keep running from
