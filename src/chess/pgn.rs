@@ -183,6 +183,13 @@ pub fn parse_pgn_with_report(text: &str) -> Result<PgnImport, PgnError> {
         .find(|(name, _)| name == "Termination")
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
+    let tag_value = |wanted: &str| {
+        tags.iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    let players = (tag_value("White"), tag_value("Black"));
     let mut game = match tags.iter().find(|(name, _)| name == "FEN") {
         Some((_, fen)) => GameState::from_fen(fen).map_err(PgnError::Fen)?,
         None => GameState::new(),
@@ -215,6 +222,7 @@ pub fn parse_pgn_with_report(text: &str) -> Result<PgnImport, PgnError> {
         },
         result,
         termination,
+        players,
     })
 }
 
@@ -280,6 +288,8 @@ pub struct PgnImport {
     /// `Termination` tag, when the file gives a reason such as
     /// `Black wins on time` or `Draw by repetition`.
     pub termination: String,
+    /// The `White` and `Black` tags, empty when the file has none.
+    pub players: (String, String),
 }
 
 /// One game in a multi-game PGN file. The moves are kept as text and parsed
@@ -865,5 +875,13 @@ mod tests {
         let text = to_pgn(&game, None);
         assert!(text.contains("1. e4 e5 2. Nf3 Nc6 *"), "saved text: {}", text);
         assert_eq!(game.cur_ply(), 0, "saving must not move the cursor");
+    }
+
+    #[test]
+    fn the_player_tags_are_read_and_may_be_missing() {
+        let with = parse_pgn_with_report("[White \"Karpov, Anatoly\"]\n[Black \"Kasparov\"]\n\n1. e4 e5 *\n").unwrap();
+        assert_eq!(with.players, ("Karpov, Anatoly".to_string(), "Kasparov".to_string()));
+        let without = parse_pgn_with_report("1. e4 e5 *\n").unwrap();
+        assert_eq!(without.players, (String::new(), String::new()));
     }
 }

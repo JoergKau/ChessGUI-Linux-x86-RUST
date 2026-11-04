@@ -53,6 +53,19 @@ fn min_inner_size(settings: &settings::Settings) -> [f32; 2] {
     [width, MIN_WINDOW_HEIGHT]
 }
 
+/// The application icon for the window. It is compiled in and decoded once.
+fn app_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../assets/icon/siliconboard-512.png"))
+        .ok()?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The settings are read before the logger and the window, because both the
     // session-log switch and the window size are settings. The file is small,
@@ -105,9 +118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|size| [size.width.max(min_size[0]), size.height.max(min_size[1])])
         .unwrap_or(INITIAL_WINDOW_SIZE);
 
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
         .with_min_inner_size(min_size);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -157,6 +173,13 @@ mod tests {
             "the saved layout must allow a 320-point board, got {width}"
         );
         assert!(width - settings.panels.unwrap().right_width - PANEL_GAP >= MIN_BOARD_SIDE);
+    }
+
+    #[test]
+    fn the_application_icon_is_a_square_image() {
+        let icon = app_icon().expect("the bundled icon must decode");
+        assert_eq!(icon.width, icon.height);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
     }
 
     #[test]
