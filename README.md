@@ -135,6 +135,10 @@ engine fixtures fail (rather than skip) when they are missing.
 
 MIT — see [LICENSE](LICENSE).
 
-External assets follow their own licences — the bundled `public/` tree
-carries its source (lichess `lifat`) and per-asset terms in
-[`public/LICENSING.md`](public/LICENSING.md); the ECO openings table is CC0.
+**Credits:** the bundled board themes, piece sets and the figurine font are
+**lichess artwork** (`lichess.org`, asset repository
+[`lichess-org/lifat`](https://github.com/lichess-org/lifat)), by the
+respective CC-BY-SA-type upstream authors (e.g. the default `cburnett`
+pieces by Colin M. L. Burnett). The ECO openings table is CC0. The summary
+with sources and terms per asset family is in
+[`public/LICENSING.md`](public/LICENSING.md).
