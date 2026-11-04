@@ -67,7 +67,8 @@ MD-Viewer-style toolbar across the top.
   sections, labeled fields in two columns, and a Default button that resets
   every option.
 - **Diagnostics:** one session log per run in `~/Library/Logs/SiliconBoard/`;
-  the newest five are kept.
+  the newest five are kept. A log continues in a numbered file at 5 MB, so the
+  folder stays below about 25 MB.
   It records lifecycle messages, UCI commands, engine replies (`readyok`,
   `bestmove` with its timing), engine stderr, process exit status and the reason
   for any stall, which is what is needed to diagnose an engine that goes offline.
