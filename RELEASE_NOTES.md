@@ -1,19 +1,25 @@
 # SiliconBoard — Release Notes
 
-## v1.0 — unreleased (Phase 7 in progress)
+## v1.0
 
 A native macOS (Apple Silicon) UCI chess GUI in Rust: board on the left, live
-engine analysis on the right, move list along the bottom, and a flat
-MD-Viewer-style toolbar across the top.
+engine analysis on the right, move list along the bottom, and a flat toolbar
+across the top.
 
 ### What works
 
 - **Analysis:** two engine slots (A and B), Start / Abort, per-card play/pause,
+  and each card's engine name is a pulldown of the loaded A/B engines and the
+  engines used before (remembered across launches) — the same list as the
+  tournament window — with Browse… for another file.
   live depth, nodes, speed, evaluation and a two-line principal variation.
   Figurine piece letters in the PV are optional (off by default).
 - **Play:** human vs engine (White or Black, against A or B) and engine A vs
   engine B. Human moves by click-click or drag-and-drop, with promotion and
   castling.
+- **Play from a FEN:** paste a position into the top-bar FEN field and choose
+  _Game → Start from here…_: both engines play on with the current time
+  control, and the PGN starts from that position (`SetUp`/`FEN` tags).
 - **Clocks:** no clock, sudden death, Fischer increment and fixed time per move;
   player bars above and below the board; flags end the game.
 - **Opening book:** PolyGlot (`.bin`) books are loaded on demand —
@@ -22,6 +28,10 @@ MD-Viewer-style toolbar across the top.
   games are switchable — the switch starts off until a book is loaded.
   The book box labels the current opening by name
   (ECO table) and keeps the last known name after the line leaves the book.
+- **Syzygy tablebases:** _Engine → Load tablebases…_ takes the user's
+  tablebase folder(s) — several folders are joined into one string
+  (`:` on macOS/Linux, `;` on Windows) — and sends it as the `SyzygyPath`
+  option to the loaded engines and to every engine started afterwards.
 - **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
   (Game → Claim draw (threefold)), with the result written to the PGN.
 - **Tournaments:** Tournament → New tournament… opens a two-engine match
@@ -113,14 +123,13 @@ MD-Viewer-style toolbar across the top.
 
 Tracked in `features-list.md`:
 
-- Linear history; browsing is read-only (variation trees: F-08).
-- PGN import keeps the mainline only (comments and variations: F-09).
-- One principal variation per engine (multi-PV: F-10).
-- SVG board themes in `public/images/board/svg/` are not offered (F-11).
-- Syzygy tablebases are not supported (F-13).
-- No `.app` bundle yet; the asset resolver expects the workspace layout
-  (F-15).
-- The design's card extras (copy PV, pin, settings) are not built (F-16).
+- Linear history; browsing is read-only (variation trees are not built).
+- PGN import keeps the mainline only (no comments or variations on import).
+- One principal variation per engine (no multi-PV display).
+- SVG board themes in `public/images/board/svg/` are not offered.
+- The design's card extras (expand PV, copy PV, pin, settings) are not built.
+- Tablebases help endgame play only through the engines' own probing
+  (Syzygy via `SyzygyPath`); the GUI itself does not read tablebase files.
 
 ### Verification
 

@@ -31,9 +31,9 @@ doc/
 /scratch/
 /notes.md
 
-# Build artifacts: the assembled and signed macOS bundle and its release zip
+# Build artefacts: the assembled and signed macOS bundle. The distribution
+# zip (SiliconBoard-<version>-macos-arm64.zip) is committed to the repository.
 /SiliconBoard.app/
-/SiliconBoard-*.zip
 
 # Tournament output (the Engine match writes its PGN here by default)
 /tournament/

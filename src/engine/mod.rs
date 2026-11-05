@@ -90,7 +90,7 @@ pub struct EngineProcess {
     exited: Arc<AtomicBool>,
     /// The deadlines of the running search. The reader records signs of life
     /// in it as lines arrive, and the monitor task checks it on its own clock,
-    /// so a hidden window cannot stop the checks (BUG-7-07).
+    /// so a hidden window cannot stop the checks.
     watchdog: Arc<Mutex<Watchdog>>,
     /// The pending principal `info` statistics (see [`InfoSlot`]).
     info: InfoSlot,
@@ -108,11 +108,11 @@ struct ReaderShared {
 }
 
 /// Principal `info` statistics waiting for the host, merged in arrival order.
-/// Only one entry is kept, so a fast engine cannot grow the queue (BUG-7-17).
+/// Only one entry is kept, so a fast engine cannot grow the queue.
 pub type InfoSlot = Arc<Mutex<Option<EngineStats>>>;
 
 /// `true` for an `info` line of a MultiPV line other than the first. The UI
-/// never shows those lines, so they are not parsed (BUG-7-18).
+/// never shows those lines, so they are not parsed.
 fn is_secondary_info(line: &str) -> bool {
     let Some(rest) = line.strip_prefix("info ") else {
         return false;
@@ -428,7 +428,7 @@ async fn run_reader(
     let mut raw: Vec<u8> = Vec::new();
     let mut acc = HandshakeAccumulator::new();
     // The statistics the card shows, merged as the lines arrive. A line only
-    // wakes the window when one of these changes (BUG-7-16).
+    // wakes the window when one of these changes.
     let mut shown = EngineStats::default();
     loop {
         raw.clear();
@@ -495,7 +495,7 @@ async fn run_reader(
                         // `info` lines are merged into one pending entry, which
                         // the host takes before its queue. A search that prints
                         // faster than the window draws no longer piles up
-                        // (BUG-7-17). Merging is what the host would do anyway.
+                        //. Merging is what the host would do anyway.
                         let mut pending = info
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -540,7 +540,7 @@ fn shown_values(stats: &EngineStats) -> ShownValues {
 
 /// Record one engine event in the watchdog. Only real signs of life count:
 /// `readyok`, `uciok`, `bestmove`, and `info` lines with a depth or a node count.
-/// Noise does not (BUG-7-04). Replies are logged at debug with their timing.
+/// Noise does not. Replies are logged at debug with their timing.
 fn observe_line(watchdog: &Mutex<Watchdog>, binary: &Path, event: &EngineEvent) {
     let now = std::time::Instant::now();
     let mut watch = watchdog.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -598,7 +598,7 @@ struct Monitor {
 }
 
 /// Monitor task: checks the search deadlines and pings the engine, on its own
-/// clock, so the checks run even while the window is hidden (BUG-7-07). A
+/// clock, so the checks run even while the window is hidden. A
 /// stalled engine is killed here; the host sees the stall through the shared
 /// watchdog and restarts it.
 async fn run_monitor(monitor: Monitor) {

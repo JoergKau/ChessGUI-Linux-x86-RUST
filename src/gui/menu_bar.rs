@@ -1,8 +1,8 @@
-//! Top bar, one row: Game / File / Engine menus, Start and Abort buttons, and
+//! Top bar, one row: Game / File / Engine menus, Start and Stop buttons, and
 //! the FEN field.
 //!
 //! The bar only reports what the user chose as a [`MenuAction`]; the app
-//! performs it. Start and Abort switch analysis on and off for every engine;
+//! performs it. Start and Stop switch analysis on and off for every engine;
 //! they never quit an engine. Each engine card has its own toggle. The FEN
 //! text is owned by the app, so this module only edits it.
 
@@ -16,6 +16,10 @@ use crate::gui::theme;
 pub enum MenuAction {
     /// Game → New game.
     NewGame,
+    /// Game → Start from here…: two engines play the FEN in the top bar.
+    StartFromFen,
+    /// An engine card's pulldown: load the `choice`-th known engine into `slot`.
+    ChooseEngine { slot: usize, choice: usize },
     /// Game → Flip board.
     FlipBoard,
     /// Game → one of the modes (analysis, play a colour, engine vs engine).
@@ -36,7 +40,7 @@ pub enum MenuAction {
     ToggleSessionLog,
     /// File → Open PGN…
     OpenPgn,
-    /// File → PGN games…: reopen the multi-game list window.
+    /// File → PGN games…: show the multi-game list again.
     ShowPgnGames,
     /// File → Save PGN…
     SavePgn,
@@ -48,6 +52,8 @@ pub enum MenuAction {
     SaveFen,
     /// Engine → Load engine A… / B… (`0` = A, `1` = B).
     LoadEngine(usize),
+    /// Engine → Load tablebases…: open the SyzygyPath dialog.
+    OpenTablebases,
     /// An engine card's play/pause toggle (`0` = A, `1` = B).
     ToggleEngine(usize),
     /// Engine → Load PolyGlot book…
@@ -68,7 +74,7 @@ pub enum MenuAction {
     ShowTournament,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
-    /// Abort: stop all searches. Engines stay loaded and can be started again.
+    /// Stop: stop all searches. Engines stay loaded and can be started again.
     StopAnalysis,
     /// Enter in the FEN field: set the board to the FEN text.
     LoadFen,
@@ -92,6 +98,8 @@ pub struct MenuState<'a> {
     pub options_ready: [bool; 2],
     /// File name of the loaded opening book, if any.
     pub book_name: Option<&'a str>,
+    /// The `SyzygyPath` string currently given to the engines, if any.
+    pub tablebase_path: Option<&'a str>,
     /// Board images from `public/images/board/`.
     pub board_themes: &'a [crate::assets::BoardTheme],
     /// File name of the board image in use, if one has been chosen.
@@ -110,11 +118,11 @@ pub struct MenuState<'a> {
     pub tournament_running: bool,
     /// Whether a tournament result is available to show.
     pub tournament_has_run: bool,
-    /// Whether a multi-game PGN is loaded, so the games window can be opened.
+    /// Whether a multi-game PGN is loaded, so the games list can be reopened.
     pub pgn_games_available: bool,
 }
 
-/// The flat, MD-Viewer-style toolbar look: padded outlined buttons, a slightly
+/// The flat toolbar look: padded outlined buttons, a slightly
 /// lighter bar background and a compact 15 pt label. Submenus keep the normal
 /// app style.
 fn style_menu_bar(style: &mut egui::Style) {
@@ -160,6 +168,15 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         ui.menu_button("Game", |ui| {
             if ui.button("New game").clicked() {
                 action = Some(MenuAction::NewGame);
+                ui.close();
+            }
+            let start_from_fen = ui
+                .button("Start from here…")
+                .on_hover_text(
+                    "Two engines play the position in the FEN field, with the current time control",
+                );
+            if start_from_fen.clicked() {
+                action = Some(MenuAction::StartFromFen);
                 ui.close();
             }
             if ui.button("Flip board").clicked() {
@@ -295,6 +312,16 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 action = Some(MenuAction::LoadBook);
                 ui.close();
             }
+            let tablebases = ui
+                .button("Load tablebases…")
+                .on_hover_text(match state.tablebase_path {
+                    Some(path) => format!("Change the Syzygy folders (now: {})", path),
+                    None => "Give the engines a Syzygy tablebase folder (SyzygyPath).".to_string(),
+                });
+            if tablebases.clicked() {
+                action = Some(MenuAction::OpenTablebases);
+                ui.close();
+            }
         });
         ui.menu_button("View", |ui| {
             ui.menu_button("Board theme", |ui| {
@@ -389,22 +416,26 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         if ui.add(start).on_hover_text("Analyse the position with every loaded engine").clicked() {
             action = Some(MenuAction::StartAnalysis);
         }
-        let abort = egui::Button::new(RichText::new("Abort").color(Color32::WHITE).strong())
+        let stop_searches = egui::Button::new(RichText::new("Stop").color(Color32::WHITE).strong())
             .fill(theme::DANGER_RED);
-        if ui.add(abort).on_hover_text("Stop all searches (engines stay loaded)").clicked() {
+        if ui.add(stop_searches).on_hover_text("Stop all searches (engines stay loaded)").clicked() {
             action = Some(MenuAction::StopAnalysis);
         }
 
         ui.separator();
         ui.label(RichText::new("FEN").color(theme::MUTED).size(14.0));
+        let fen_id = ui.make_persistent_id("fen_field");
+        let selection = crate::gui::text_field::selection_before(ui, fen_id);
         let field = ui
             .add(
                 egui::TextEdit::singleline(fen_input)
+                    .id(fen_id)
                     .font(FontId::monospace(15.0))
                     .desired_width(ui.available_width().max(120.0))
                     .hint_text("paste a FEN and press Enter"),
             )
             .on_hover_text("Enter loads this position");
+        crate::gui::text_field::after_edit(ui, fen_id, fen_input, selection, &field);
         // A single-line field gives up focus when Enter is pressed.
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = Some(MenuAction::LoadFen);

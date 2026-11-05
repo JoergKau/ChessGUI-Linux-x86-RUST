@@ -1,7 +1,8 @@
 //! Settings that survive a restart: the time control, whether engines play
 //! book moves, the session-log switch, the UCI option values chosen for each
-//! engine file, the board theme, the piece set, the two figurine switches, the
-//! window and panel sizes, and the last tournament configuration.
+//! engine file, the tablebase path, the board theme, the piece set, the two
+//! figurine switches, the window and panel sizes, and the last tournament
+//! configuration.
 //!
 //! The file is JSON, kept under `~/Library/Application Support/SiliconBoard/`.
 //! `SILICONBOARD_SETTINGS` overrides the path. A missing file means the
@@ -16,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::chess::clock::TimeControl;
 use crate::tournament::TournamentConfig;
 
+/// How many previously loaded engine files the pulldowns remember.
+pub const ENGINE_HISTORY_LIMIT: usize = 12;
+
 /// Everything kept between runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +33,11 @@ pub struct Settings {
     /// book…), restored at start-up. No book is loaded without it: there
     /// is no default book.
     pub book_path: Option<PathBuf>,
+    /// The `SyzygyPath` value chosen in Engine → Load tablebases…: the
+    /// tablebase folders, joined by the platform separator. Sent to every
+    /// engine at start-up and while it is loaded. `None` when no tablebases
+    /// are configured.
+    pub tablebase_path: Option<String>,
     /// Whether the app writes the session log (`~/Library/Logs/SiliconBoard`). On by
     /// default; Engine → Session log switches it.
     pub session_log: bool,
@@ -36,9 +45,14 @@ pub struct Settings {
     pub engine_options: BTreeMap<String, BTreeMap<String, String>>,
     /// The engine file last loaded into each slot (A, B). Loaded again at start-up.
     pub engines: [Option<PathBuf>; 2],
+    /// Engine files loaded before, newest first, for the engine pulldowns.
+    /// Bounded by [`ENGINE_HISTORY_LIMIT`]; duplicates are removed.
+    pub engine_history: Vec<PathBuf>,
     /// The window's inner size in points, restored at the next launch.
+    /// A fresh install opens at the reference layout (1316 × 844).
     pub window_size: Option<WindowSize>,
     /// The evaluation and move-list panel sizes, restored at the next launch.
+    /// A fresh install opens with the reference layout (right 637, bottom 190).
     pub panels: Option<PanelSizes>,
     /// Board image file name from `public/images/board/`, e.g. `blue.png`.
     pub board_theme: Option<String>,
@@ -75,16 +89,26 @@ pub struct PanelSizes {
 impl Default for Settings {
     /// No clock, book play off (the menu item waits for a loaded book, which
     /// only the user loads — there is no default book), no saved engine options.
+    /// A fresh install opens at the reference layout: a 1316 × 844 window with
+    /// a 637-point right panel and a 190-point move list.
     fn default() -> Self {
         Self {
             time_control: None,
             book_in_games: false,
             book_path: None,
+            tablebase_path: None,
             session_log: true,
             engine_options: BTreeMap::new(),
             engines: [None, None],
-            window_size: None,
-            panels: None,
+            engine_history: Vec::new(),
+            window_size: Some(WindowSize {
+                width: 1316.0,
+                height: 844.0,
+            }),
+            panels: Some(PanelSizes {
+                right_width: 637.0,
+                bottom_height: 190.0,
+            }),
             board_theme: None,
             piece_set: None,
             figurines_move_list: true,
@@ -260,7 +284,14 @@ mod tests {
         };
         let restored = parse(&to_json(&settings)).unwrap();
         assert_eq!(restored.window_size, settings.window_size);
-        assert_eq!(Settings::default().window_size, None, "no size saved yet");
+        assert_eq!(
+            Settings::default().window_size,
+            Some(WindowSize {
+                width: 1316.0,
+                height: 844.0
+            }),
+            "a fresh install opens at the reference window size"
+        );
     }
 
     #[test]
@@ -274,7 +305,14 @@ mod tests {
         };
         let restored = parse(&to_json(&settings)).unwrap();
         assert_eq!(restored.panels, settings.panels);
-        assert_eq!(Settings::default().panels, None, "no sizes saved yet");
+        assert_eq!(
+            Settings::default().panels,
+            Some(PanelSizes {
+                right_width: 637.0,
+                bottom_height: 190.0
+            }),
+            "a fresh install opens at the reference panel sizes"
+        );
     }
 
     #[test]
@@ -338,6 +376,31 @@ mod tests {
     }
 
     #[test]
+    fn the_tablebase_path_round_trips() {
+        let settings = Settings {
+            tablebase_path: Some("/tb/5:/tb/6".into()),
+            ..Settings::default()
+        };
+        let restored = parse(&to_json(&settings)).unwrap();
+        assert_eq!(restored.tablebase_path.as_deref(), Some("/tb/5:/tb/6"));
+        assert_eq!(Settings::default().tablebase_path, None, "no tablebases by default");
+    }
+
+    #[test]
+    fn the_engine_history_round_trips() {
+        let settings = Settings {
+            engine_history: vec![
+                PathBuf::from("/opt/pawnforge"),
+                PathBuf::from("/opt/stockfish"),
+            ],
+            ..Settings::default()
+        };
+        let restored = parse(&to_json(&settings)).unwrap();
+        assert_eq!(restored.engine_history, settings.engine_history);
+        assert!(Settings::default().engine_history.is_empty(), "no history yet");
+    }
+
+    #[test]
     fn missing_fields_take_their_defaults() {
         let settings = parse("{}").unwrap();
         assert_eq!(settings, Settings::default());
@@ -354,6 +417,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_sync(&dir.path().join("absent.json")).unwrap();
         assert_eq!(loaded, Settings::default());
+    }
+
+    /// A brand-new user gets the reference layout the owner uses: a
+    /// 1316 × 844 window with a 637-point right panel and a 190-point move
+    /// list. Everything else is the documented default (no clock, no book,
+    /// A/B empty, figurines in the move list only).
+    #[test]
+    fn a_fresh_install_opens_at_the_reference_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = load_sync(&dir.path().join("absent.json")).unwrap();
+        assert_eq!(
+            fresh.window_size,
+            Some(WindowSize {
+                width: 1316.0,
+                height: 844.0
+            })
+        );
+        assert_eq!(
+            fresh.panels,
+            Some(PanelSizes {
+                right_width: 637.0,
+                bottom_height: 190.0
+            })
+        );
+        assert_eq!(fresh.engines, [None, None], "no engine is preloaded");
+        assert!(fresh.engine_history.is_empty());
+        assert!(fresh.figurines_move_list);
+        assert!(!fresh.figurines_eval);
     }
 
     #[test]

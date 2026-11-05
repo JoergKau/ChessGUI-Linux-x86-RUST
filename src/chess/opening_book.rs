@@ -287,6 +287,33 @@ fn random_seed() -> u64 {
     hasher.finish()
 }
 
+/// A tiny, self-contained book for tests: the four main first moves for the
+/// start position, with descending weights. It keeps the test suite free of
+/// external `.bin` fixtures (no opening book is part of the repository or
+/// the app).
+#[cfg(test)]
+pub(crate) fn sample_start_book() -> PolyglotBook {
+    let key = crate::chess::GameState::new().zobrist();
+    let records = [
+        (key, 0x031cu16, 60u16, 0u32), // e2e4
+        (key, 0x02dbu16, 30u16, 0u32), // d2d4
+        (key, 0x0195u16, 20u16, 0u32), // g1f3
+        (key, 0x0052u16, 10u16, 0u32), // b1c3
+    ];
+    let bytes: Vec<u8> = records
+        .iter()
+        .flat_map(|(key, encoded, weight, learn)| {
+            let mut record = Vec::with_capacity(16);
+            record.extend_from_slice(&key.to_be_bytes());
+            record.extend_from_slice(&encoded.to_be_bytes());
+            record.extend_from_slice(&weight.to_be_bytes());
+            record.extend_from_slice(&learn.to_be_bytes());
+            record
+        })
+        .collect();
+    PolyglotBook::from_bytes(&bytes).expect("the built-in sample book is valid")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,87 +404,46 @@ mod tests {
     }
 
     #[test]
-    fn real_world_gm2001_book_opens_and_probes_starting_position() {
-        // Real-world fixture: books/gm2001.bin (30416 records, 486656 bytes)
-        // is a Polyglot opening book. Locate it relative to the workspace
-        // root by walking up from CARGO_MANIFEST_DIR until we find a
-        // `books/` directory.
-        let book_path = locate_real_world_book("gm2001.bin")
-            .expect("the workspace fixture books/gm2001.bin must be present");
+    fn a_book_keyed_on_the_start_position_answers_that_key() {
+        // The sample book is built in memory (no external .bin fixture): the
+        // same records a real opening book has for the start position.
+        let book = sample_start_book();
+        assert_eq!(book.len(), 4);
 
-        let book = PolyglotBook::open(&book_path).expect("real-world book must parse");
-        // 486656 bytes ÷ 16 bytes = 30 416 records.
-        assert_eq!(
-            book.len(),
-            30_416,
-            "gm2001.bin should contain exactly 30416 records"
-        );
-
-        // The PolyGlot canonical starting-position Zobrist key — every
-        // well-known opening book has at least one move for it (1.e4, 1.d4,
-        // 1.Nf3, etc.). If we get zero we have parsed the bytes wrong.
+        // The PolyGlot canonical starting-position Zobrist key. If
+        // `GameState::zobrist` ever stops matching it, books stop answering.
         let canonical_key: u64 = 0x463b96181691fc9c;
-        let start_moves = book.find(canonical_key);
-        assert!(
-            !start_moves.is_empty(),
-            "gm2001.bin should have at least one move for the starting position"
+        assert_eq!(
+            crate::chess::GameState::new().zobrist(),
+            canonical_key,
+            "GameState::zobrist() must be the PolyGlot start key"
         );
+        let start_moves = book.find(canonical_key);
+        assert_eq!(start_moves.len(), 4, "all four first moves are in the book");
 
-        // Every record must describe a real move: from and to differ. Catches
-        // malformed entries without needing a position for each record.
+        // Every record must describe a real, legal start-position move.
+        let start_pos = shakmaty::Chess::default();
         let mut total_weight: u64 = 0;
-        for entry in &book.entries {
+        for entry in &start_moves {
             let from = (entry.encoded_move >> 6) & 0x3F;
             let to = entry.encoded_move & 0x3F;
             assert_ne!(from, to, "record {:#06x} is a null move", entry.encoded_move);
-            total_weight = total_weight.saturating_add(u64::from(entry.weight));
-        }
-        assert!(total_weight > 0, "book's total weight should be non-zero");
-
-        // The key the app really probes with (`GameState::zobrist`) must
-        // find the start-position records. The canonical key check above
-        // proves that this key agrees with the on-disk file.
-        let start_pos = shakmaty::Chess::default();
-        let from_position = book.find(crate::chess::GameState::new().zobrist());
-        assert!(
-            !from_position.is_empty(),
-            "GameState::zobrist() of the start should match the file's starting-position entries"
-        );
-        // Every recorded start-position move must decode onto a real legal move.
-        for entry in &from_position {
             assert!(
                 entry.to_move(&start_pos).is_some(),
                 "book move {:#06x} does not map onto a legal start-position move",
                 entry.encoded_move
             );
+            total_weight = total_weight.saturating_add(u64::from(entry.weight));
         }
-    }
+        assert!(total_weight > 0, "book's total weight should be non-zero");
 
-    /// Helper used by the real-world-fixture test. Walks up to 8 levels
-    /// looking for a `books/` directory that contains `name`.
-    fn locate_real_world_book(name: &str) -> Result<std::path::PathBuf, String> {
-        const MAX_WALK: usize = 8;
-        let start: std::path::PathBuf =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut cursor: Option<&std::path::Path> = Some(start.as_path());
-        let mut steps = 0usize;
-        while let Some(candidate) = cursor {
-            if steps > MAX_WALK {
-                break;
-            }
-            let maybe = candidate.join("books").join(name);
-            if maybe.exists() {
-                return Ok(maybe);
-            }
-            cursor = candidate.parent();
-            steps += 1;
-        }
-        Err(format!(
-            "`books/{}` not found within {} levels of {}",
-            name,
-            MAX_WALK,
-            start.display()
-        ))
+        // The key the app really probes with (`GameState::zobrist`) finds the
+        // records.
+        assert_eq!(
+            book.find(crate::chess::GameState::new().zobrist()).len(),
+            4,
+            "GameState::zobrist() of the start must find the book's entries"
+        );
     }
 
     /// PolyGlot square index (a1 = 0 … h8 = 63) for a square name.
@@ -474,8 +460,8 @@ mod tests {
 
     #[test]
     fn real_start_position_record_is_e2e4() {
-        // 0x031c is the first-move record for e2e4 in the gm2001 book (checked
-        // against the file in `real_world_gm2001_book_opens_and_probes_starting_position`).
+        // 0x031c is the first-move record for e2e4 in the sample book above
+        // (and in well-known PolyGlot books).
         let entry = BookEntry { key: 0, encoded_move: 0x031c, weight: 1, learn: 0 };
         assert_eq!(
             entry.to_move(&shakmaty::Chess::default()),

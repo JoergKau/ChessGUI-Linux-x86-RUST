@@ -389,7 +389,10 @@ impl OptionsDialog {
             }
             UciOptionKind::String { .. } => {
                 let text = self.values.entry(name.clone()).or_default();
-                let response = ui.add_sized([width, FIELD_HEIGHT], TextEdit::singleline(text));
+                let id = ui.make_persistent_id(("engine_option", &name));
+                let selection = crate::gui::text_field::selection_before(ui, id);
+                let response = ui.add_sized([width, FIELD_HEIGHT], TextEdit::singleline(text).id(id));
+                crate::gui::text_field::after_edit(ui, id, text, selection, &response);
                 // A text value is sent when the field is left (or Enter is pressed), not on every key.
                 if response.lost_focus() {
                     let value = self.values.get(&name).cloned().unwrap_or_default();
