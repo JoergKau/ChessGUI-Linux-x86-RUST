@@ -207,6 +207,8 @@ The real-engine tests need an available UCI engine fixture; it fails
 (rather than skips) when it is missing. The opening-book tests use small
 built-in books, so no external `.bin` file is needed.
 
+## AI Assisted by DeepSeek V.4.1 Flash
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
