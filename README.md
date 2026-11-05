@@ -28,6 +28,38 @@ A short summary of what SiliconBoard does lives in
 [features-list.md](features-list.md); what ships in v1.0 is in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## The ready-to-run app
+
+The repository contains the built, signed app:
+
+```
+SiliconBoard-1.0.0-macos-arm64.zip
+```
+
+It is the same bundle the packaging script produces — one folder
+(`SiliconBoard-1.0.0/`) holding `SiliconBoard.app`, `LICENSE` and this
+README — and it is **committed to the repository**, so no build is needed to
+run SiliconBoard. It is for macOS on Apple Silicon.
+
+To use it:
+
+1. Download the zip (or clone the repository) and double-click the zip.
+2. Drag `SiliconBoard.app` from the unpacked folder into `/Applications`
+   (or run it from the folder).
+3. The first launch may be blocked by macOS because the download is
+   quarantined: **right-click the app → Open**, then confirm **Open**.
+   SiliconBoard is ad-hoc signed but not notarized, so this one-time step is
+   expected.
+4. The app ships no engine. Load yours via _Engine → Load engine A…_ (and B
+   if you want two engines); see the next section.
+
+The SHA-256 of the zip is printed by `./package-macos.sh` when it rebuilds
+the app and is listed with each release; check a download with:
+
+```shell
+shasum -a 256 SiliconBoard-1.0.0-macos-arm64.zip
+```
+
 ## Requirements
 
 - macOS on Apple Silicon (other platforms are out of scope for now)
