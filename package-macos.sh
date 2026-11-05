@@ -1,7 +1,7 @@
 #!/bin/zsh
 # package-macos.sh — build SiliconBoard and assemble the macOS .app bundle.
 #
-# F-15. The steps are the manual ones from the README, scripted:
+# The steps are the manual ones from the README, scripted:
 #
 #   1. `cargo build --release`
 #   2. assemble SiliconBoard.app in the repository root: the binary in
@@ -16,13 +16,17 @@
 #      holds one folder with the signed app plus LICENSE and README.md,
 #      and the SHA-256 is printed for the release listing.
 #
-# With `--install` (or `-i`), the freshly signed bundle is also copied into
-# /Applications (replacing an existing SiliconBoard.app), so the daily-use
-# app is the one just built; the repo copy is then removed and its Launch
-# Services entry unregistered, so only /Applications ever shows the app.
-# Without the flag nothing is installed.
+# By default the freshly signed bundle is also installed into /Applications
+# (replacing an existing SiliconBoard.app), so the daily-use app is always
+# the one just built; the dev-folder bundle is then removed and its Launch
+# Services entry unregistered, so Launchpad only ever shows one app icon —
+# the one in /Applications. Installing is the default because a build left
+# in the dev folder gets registered by Launch Services as well and users end
+# up with two icons. `--no-install` (or `-n`) skips the install
+# step and leaves the bundle in the repo folder.
 #
-# The .app is a build artefact; it is listed in .gitignore.
+# The .app is a build artefact; it is listed in .gitignore. The distribution
+# zip is committed to the repository.
 
 set -euo pipefail
 
@@ -45,6 +49,15 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp target/release/siliconboard "$CONTENTS/MacOS/SiliconBoard"
 cp assets/icon/SiliconBoard.icns "$CONTENTS/Resources/"
 cp -R public "$CONTENTS/Resources/public"
+# The start-up PGN rides along, so the installed app also opens
+# PGN/WorldChamp1972.pgn at launch and selects game 1.
+STARTUP_PGN="$REPO_ROOT/PGN/WorldChamp1972.pgn"
+if [[ -f "$STARTUP_PGN" ]]; then
+    mkdir -p "$CONTENTS/Resources/PGN"
+    cp "$STARTUP_PGN" "$CONTENTS/Resources/PGN/"
+else
+    print -u2 "  ▲ $STARTUP_PGN is missing — the bundle starts without the start-up PGN."
+fi
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -89,25 +102,48 @@ rm -rf "$(dirname "$stage")"
 print "  SHA-256 of $zip_file:"
 shasum -a 256 "$zip_file"
 
-print "▶ Done: $REPO_ROOT/$APP"
-print "        $zip_file"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-install_flag="${1:-}"
-if [[ "$install_flag" == "--install" || "$install_flag" == "-i" ]]; then
-    print "▶ Installing into /Applications"
-    rm -rf /Applications/"$APP"
-    if ditto "$REPO_ROOT/$APP" /Applications/"$APP"; then
-        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-            -u "$REPO_ROOT/$APP" 2>/dev/null || true
-        # One live copy only: after the install the repo bundle (a build
-        # artefact) is removed, so Launch Services cannot end up showing two
-        # app entries — one pointing into the dev folder.
-        rm -rf "$REPO_ROOT/$APP"
-        print "  ✓ /Applications/$APP (the repo copy was removed; the app lives in /Applications)"
-    else
-        print -u2 "  Could not write to /Applications (permissions?). Drag $APP there by hand, or run the install step with sudo."
-    fi
-elif [[ -n "$install_flag" ]]; then
-    print -u2 "Unknown argument: $install_flag (usage: $0 [--install|-i])"
-    exit 1
+print "▶ Installing into /Applications (default — the daily-use app is the one just built)"
+
+# After the bundle is in /Applications: unregister the dev-folder copy (so
+# Launch Services cannot show two app entries — one pointing into the dev
+# folder), remove that copy, and make the installed copy the authoritative
+# registration, so the app that opens is the one just built.
+apply_install() {
+    "$LSREGISTER" -u "$REPO_ROOT/$APP" 2>/dev/null || true
+    rm -rf "$REPO_ROOT/$APP"
+    "$LSREGISTER" -f /Applications/"$APP" 2>/dev/null || true
+    print "  ✓ /Applications/$APP — the app lives only in /Applications."
+}
+
+# `--no-install` skips the step (zip-only run); the old `--install`/`-i`
+# flags are still accepted and mean the same as the default.
+skip_install=false
+case "${1:-}" in
+    "" | --install | -i)  ;;
+    --no-install | -n)    skip_install=true ;;
+    *) print -u2 "Unknown argument: ${1} (usage: $0 [--no-install])"; exit 1 ;;
+esac
+
+if [[ "$skip_install" == true ]]; then
+    print "  (--no-install) the bundle stays at $REPO_ROOT/$APP and Launchpad shows it as an app."
+    print "▶ Done: $zip_file"
+    exit 0
 fi
+
+rm -rf /Applications/"$APP" 2>/dev/null || true
+if ditto "$REPO_ROOT/$APP" /Applications/"$APP"; then
+    apply_install
+else
+    # /Applications is normally writable by an admin user; when it is not,
+    # ask for administrator rights once (a macOS password prompt).
+    print "  No write access to /Applications; asking for administrator rights…"
+    if osascript -e "do shell script \"rm -rf '/Applications/$APP'; /usr/bin/ditto '$REPO_ROOT/$APP' '/Applications/$APP'\" with administrator privileges" >/dev/null 2>&1; then
+        apply_install
+    else
+        print -u2 "  ✗ Could not install (cancelled or no permission)."
+        print -u2 "    The bundle stays at $REPO_ROOT/$APP; drag it to /Applications by hand."
+    fi
+fi
+print "▶ Done: $zip_file"

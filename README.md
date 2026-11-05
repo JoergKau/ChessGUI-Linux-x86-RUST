@@ -2,13 +2,19 @@
 
 A native **macOS (Apple Silicon) UCI chess GUI** written in Rust. The layout
 takes its cues from the Nibbler analysis GUI: board on the left, live engine
-analysis on the right, move list along the bottom, and a flat
-MD-Viewer-style toolbar across the top.
+analysis on the right, move list along the bottom, and a flat toolbar across
+the top.
 
 - **Analysis:** two engine slots with live depth, nodes, speed, evaluation
-  and principal variation; Start / Abort; per-card play/pause.
+  and principal variation; Start / Abort; per-card play/pause. Each card's
+  engine name is a pulldown of the known engines (loaded A/B and the engines
+  used before, remembered across launches, the same list as the tournament
+  window) with Browse….
 - **Play:** human vs engine (either colour), engine vs engine, clocks with
   flag handling, resign, draw offers, threefold-repetition claims.
+- **Play from a position:** paste a FEN into the top bar and choose
+  _Game → Start from here…_ — two engines play on from that position with the
+  current time control, and the saved PGN starts there (`SetUp`/`FEN`).
 - **Engine care:** a watchdog restarts or stops an unresponsive engine,
   launcher scripts and broken files are checked before start, failed starts
   report a reason.
@@ -18,7 +24,7 @@ MD-Viewer-style toolbar across the top.
   multi-game browser, FEN import/export, board themes and piece sets,
   figurine piece letters, persistent settings, a session log.
 
-The full list of features, planned items and backlog lives in
+A short summary of what SiliconBoard does lives in
 [features-list.md](features-list.md); what ships in v1.0 is in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
@@ -76,13 +82,37 @@ the choice is kept in the settings and restored at the next start-up.
 to download, we recommend the
 [PolyGlot book collection](https://github.com/ChrisWhittington/polyglot-books).
 
+## Syzygy tablebases
+
+Engines can use Syzygy tablebase files (`*.rtbw` / `*.rtbz`) for endgame
+knowledge — perfect play once few pieces are on the board. Point the GUI at
+your installation once via _Engine → Load tablebases…_: enter the tablebase
+folder(s) in the dialog (or pick them with **Browse…**, which accepts
+several folders) and press Apply. The path is kept in the settings and sent
+to every loaded engine — and to every engine loaded later — as the
+`SyzygyPath` option.
+
+- Several folders are joined into **one string**, separated by `:` on macOS
+  and Linux (`;` on Windows). This matters when the 5-men and 6-men files
+  live in different folders, as in
+  `/Users/you/EGTB/Syzygy-3-4-5:/Users/you/EGTB/Syzygy-6`.
+- Applying an empty line clears the tablebases again: the loaded engines get
+  an empty path, and engines started afterwards get none.
+- The GUI forwards the string untouched — which folder holds which files,
+  and whether an engine supports tablebases at all, is the engine's
+  business; a user choosing paths knows what they are doing. Look in the
+  session log for the engine's own report, e.g.
+  `Found 510 WDL and 510 DTZ tablebase files (up to 6-man)`. The files and
+  what to download are described at
+  [syzygy-tables.info](https://syzygy-tables.info/).
+
 ## Release as a macOS `.app` bundle
 
 ```shell
 ./package-macos.sh
 ```
 
-The script (F-15) runs `cargo build --release`, then assembles
+The script runs `cargo build --release`, then assembles
 `SiliconBoard.app` in the repository root: the binary as
 `Contents/MacOS/SiliconBoard`, the icon and the asset tree as
 `Contents/Resources/public` — the layout the asset resolver checks first in
@@ -96,7 +126,9 @@ plist, and the bundle is signed sign ad-hoc:
 codesign --force --deep --sign - SiliconBoard.app   # the script does this
 ```
 
-The bundle is a build artefact and stays out of git.
+The `.app` bundle is a build artefact and stays out of git. The distributable
+zip is committed to the repository at the repo root, so the download sits next
+to the source.
 
 **Distribution:** the script also packs the signed app into
 `SiliconBoard-<version>-macos-arm64.zip` — one folder holding the app plus
@@ -105,20 +137,26 @@ listing. The app is signed _before_ it is zipped (modifying a signed app
 breaks the seal), and the zip is verified by unzipping it and re-checking
 the signature.
 
-**Install locally:** `./package-macos.sh --install` (or `-i`) also copies
-the freshly signed bundle into `/Applications`, replacing an existing
-copy there, and then **removes the repo copy and unregisters it with
-Launch Services** — so exactly one app entry ever exists, and it always
-lives in `/Applications`. Without the flag nothing is installed, and an
+**Install locally:** `./package-macos.sh` installs the freshly signed bundle
+into `/Applications` by default, replacing an existing copy there, and then
+**removes the repo copy and unregisters it with Launch Services** — so
+exactly one app entry ever exists, and it always lives in `/Applications`.
+(Installing is the default: a bundle left in the dev folder
+gets registered by Launch Services as well and Launchpad shows two icons.)
+The old `--install`/`-i` flags still work and mean the same; `--no-install`
+(or `-n`) skips the install and leaves the bundle in the repo folder. An
 unknown argument is rejected with the usage line. If `/Applications`
-cannot be written, the script says so and the `.app` can be dragged by
-hand.
+cannot be written, the script asks once for administrator rights; cancelling
+keeps the bundle in the repo folder, where it can be dragged by hand.
 
 **What to do with it:** double-click to launch, or drag it to
 `/Applications`. A copy that came over the internet is quarantined by
 macOS: right-click → **Open** the first time.
 
-Nothing else is bundled, so on first launch:
+Besides the assets, the bundle carries the start-up PGN
+(`Contents/Resources/PGN/WorldChamp1972.pgn`), so launch opens
+Spassky–Fischer, game 1, and the multi-game list is ready. On first
+launch you still load the rest:
 
 2. Load an engine via _Engine → Load engine A…_ (and B as needed) — no UCI
    engine is distributed with SiliconBoard; the engines keep running from
@@ -133,8 +171,9 @@ cargo test --bin siliconboard     # unit + real-engine integration tests
 cargo clippy --all-targets        # zero warnings
 ```
 
-The real-engine tests need an available UCI engine fixture; the PolyGlot and
-engine fixtures fail (rather than skip) when they are missing.
+The real-engine tests need an available UCI engine fixture; it fails
+(rather than skips) when it is missing. The opening-book tests use small
+built-in books, so no external `.bin` file is needed.
 
 ## Licence
 

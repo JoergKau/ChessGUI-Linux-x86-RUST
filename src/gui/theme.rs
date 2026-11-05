@@ -52,7 +52,7 @@ pub const BAR_BLACK: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x33);
 pub const TOOLBAR_BG: Color32 = Color32::from_rgb(0x1c, 0x1d, 0x21);
 
 /// Toolbar buttons: fill, border, hover and open/active fills. These mirror
-/// the flat toolbar palette in MD-Viewer.
+/// the flat toolbar palette.
 pub const TOOLBAR_BUTTON_BG: Color32 = Color32::from_rgb(0x24, 0x26, 0x2b);
 pub const TOOLBAR_STROKE: Color32 = Color32::from_rgb(0x34, 0x37, 0x3f);
 pub const TOOLBAR_HOVER: Color32 = Color32::from_rgb(0x30, 0x33, 0x3a);

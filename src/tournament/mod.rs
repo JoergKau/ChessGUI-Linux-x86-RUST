@@ -283,10 +283,37 @@ impl TournamentConfig {
     }
 }
 
-/// The default destination for tournament games.
+/// The default destination for tournament games: `engine-match.pgn` in a
+/// writable folder under the user's home.
+///
+/// It must not be relative to the process working directory: a macOS app
+/// launched from Finder starts with `/` as its working directory, and `/` is
+/// read-only, so a relative default fails with “Could not create /tournament:
+/// Read-only file system”. `~/Documents/SiliconBoard` always exists or can be
+/// created, and the file is easy to find in Finder.
 pub fn default_pgn_path() -> PathBuf {
-    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    base.join("tournament").join("engine-match.pgn")
+    default_output_dir().join("engine-match.pgn")
+}
+
+/// The folder tournament PGNs go to unless the user picks another one:
+/// `~/Documents/SiliconBoard`. Relative paths typed in the dialog — or saved
+/// by an older version, when the default followed the working directory — are
+/// anchored here as well, so they never resolve against `/`.
+pub fn default_output_dir() -> PathBuf {
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join("Documents").join("SiliconBoard"),
+        None => std::env::temp_dir().join("SiliconBoard"),
+    }
+}
+
+/// Make `path` absolute: an absolute path is kept, and a relative one is
+/// anchored in [`default_output_dir`] rather than the working directory.
+pub fn resolve_pgn_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        default_output_dir().join(path)
+    }
 }
 
 /// A `TimeControl` as the PGN tag and the dialog show it: `4+1` for four
@@ -1047,6 +1074,37 @@ mod tests {
         );
     }
 
+    /// A Finder-launched app has `/` as its working directory, and `/` is
+    /// read-only: the default PGN destination must never be relative.
+    #[test]
+    fn the_default_pgn_path_is_absolute_and_in_a_writable_folder() {
+        let path = default_pgn_path();
+        assert!(
+            path.is_absolute(),
+            "a relative default resolves against `/` in a Finder launch"
+        );
+        assert!(
+            path.ends_with(Path::new("Documents").join("SiliconBoard").join("engine-match.pgn")),
+            "unexpected default: {}",
+            path.display()
+        );
+        assert_eq!(path.parent(), Some(default_output_dir().as_path()));
+    }
+
+    #[test]
+    fn relative_pgn_paths_are_anchored_in_the_default_folder() {
+        let resolved = resolve_pgn_path(Path::new("tournament/engine-match.pgn"));
+        assert!(resolved.is_absolute(), "a relative path must not stay relative");
+        assert_eq!(
+            resolved,
+            default_output_dir().join("tournament/engine-match.pgn"),
+            "old relative settings land under the default folder"
+        );
+
+        let absolute = Path::new("/tmp/games.pgn");
+        assert_eq!(resolve_pgn_path(absolute), absolute, "absolute paths are kept");
+    }
+
     #[test]
     fn colours_alternate_only_when_reverse_colors_is_on() {
         let mut config = config();
@@ -1121,16 +1179,20 @@ mod tests {
     }
 
     #[test]
-    fn the_real_uho_epd_file_indexes_and_yields_a_fen() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("books")
-            .join("UHO_Lichess_4852_v1.epd");
-        if !path.exists() {
-            return;
-        }
-        let book = EpdBook::load(&path).expect("the workspace EPD fixture must index");
-        assert!(book.len() > 1000, "the UHO suite has many positions");
+    fn an_epd_file_indexes_and_yields_a_fen() {
+        // A small EPD suite written for the test: no external book file is
+        // needed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("suite.epd");
+        std::fs::write(
+            &path,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - bm e4; id \"start\";\n\
+             8/8/8/4k3/8/8/2Q5/2K5 w - - bm Qe2+;\n\
+             r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - bm Bb5;\n",
+        )
+        .unwrap();
+        let book = EpdBook::load(&path).expect("the EPD file must index");
+        assert_eq!(book.len(), 3);
         let fen = book.fen_at(0).unwrap().expect("the first line is a position");
         assert!(crate::chess::GameState::from_fen(&fen).is_ok());
     }

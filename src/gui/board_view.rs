@@ -3,7 +3,7 @@
 //! The board widget is egui-native and refreshes per frame. It paints:
 //!
 //! 1. the blue-board texture from `public/images/board/blue.png` (v0.1
-//!    hardcoded; the board picker is a backlog feature, F-11),
+//!    hardcoded; the board picker is a backlog feature),
 //! 2. overlays — the currently selected square, legal destinations (with
 //!    different treatment for quiet vs. capture moves), the last played
 //!    move's from/to, and a red highlight for a checked king. Square
@@ -322,7 +322,7 @@ pub fn show(
         }
     }
 
-    // ── Promotion modal (BUG-4-01) ──
+    // ── Promotion modal ──
     // Painted *after* the square loop so its four icon rects win pointer
     // priority over the squares underneath — a click on an icon therefore
     // does NOT land on the square's `clicked()`, which is what drives the
@@ -557,7 +557,7 @@ fn draw_piece(painter: &Painter, center: Pos2, texture: TextureId, square: f32) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Promotion modal (BUG-4-01)
+// Promotion modal
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The four promotion choices, in on-screen order **from the destination
@@ -665,7 +665,7 @@ fn show_promotion_modal(
 /// Consume one [`egui::Response`] for a board square.
 ///
 /// `board_rect` is passed in so the drop-position resolver maps the pointer
-/// through the *board*, not just this one square (BUG-4-03).
+/// through the *board*, not just this one square.
 fn handle_interaction(
     response: &egui::Response,
     sq: Square,

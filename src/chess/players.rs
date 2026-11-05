@@ -30,7 +30,7 @@ pub enum GameMode {
         /// The slot of the engine (`0` = A, `1` = B).
         engine: usize,
     },
-    /// Engine A plays White and engine B plays Black (F-02).
+    /// Engine A plays White and engine B plays Black.
     EngineVsEngine,
 }
 

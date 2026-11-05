@@ -1,48 +1,56 @@
-# SiliconBoard — Feature List
+# SiliconBoard — Features
 
-Features that are planned or wanted but not built yet. Status values:
-**planned** (assigned to a phase), **backlog** (wanted, no phase yet),
-**deferred** (blocked by a dependency).
+SiliconBoard is a native macOS UCI chess GUI for Apple Silicon. The board
+sits on the left, the engine analysis on the right, and the move list along
+the bottom — with a clean dark theme.
 
-| ID | Feature | Phase | Status | Notes |
-| --- | --- | --- | --- | --- |
-| F-01 | Game loop: human vs engine (either colour), engine vs engine | 6 | done | All Phase 6 steps are built. Owner tested in round 6; re-checked in the live window in round 7 (see test-results.md). |
-| F-02 | Bind engines to colours (Engine A = White, Engine B = Black) | 6 | done (step 1) | Engine vs engine: A = White, B = Black. Human vs engine: the human picks a colour and engine A or B (round 8, BUG-6-15). Checked in the live window. |
-| F-03 | Clock UI: time-control dialog, live clocks, flag handling | 6 | done (step 2) | Dialog, clock labels, engines get live clocks, flags end the game on time. Owner tested in round 6; re-checked in the live window in round 7 (see test-results.md). Game results are now in the PGN (F-06). |
-| F-04 | Opening book move policy in the game loop (weighted random, top-N) | 6 | done (step 3) | Weighted-random book reply before searching; off by default now (2026-11-04,
-round 17) — no default book: the user loads one via Engine → Load PolyGlot
-book…, the choice is kept in the settings and restored at start-up, and the
-switch stays greyed out until a book is loaded. The book box is hidden while book moves in games are off (round 10), and its heading shows the ECO opening name (`Opening book · Ruy Lopez`), not the book file name. The most recent name at or before the displayed position stays on screen after the line leaves the named table rows, instead of reverting to a bare `not in book` heading. Owner tested in round 6; re-checked in the live window in round 7 (see test-results.md). |
-| F-05 | Engine watchdog: deadlines that restart or kill an unresponsive engine | 6 | done (step 4); deadlines rewritten in the final audit | While an engine **searches**, the watchdog enforces: `isready` every 5 s with a 10 s answer, and a 30 s hard limit that output cannot extend; after `stop`, a `bestmove` within 3 s; a move search ends within its own time plus 3 s; an analysis shows a new depth or node count within 60 s. Only `readyok`, `uciok`, `bestmove` and `info` lines with depth or nodes count as signs of life, so noise does not keep a stuck engine alive. A stalled engine is restarted from the same file, and the status line and session log give the reason. A second stall within 60 s leaves it offline; in a tournament that stops the match. An engine that exits after a successful handshake is restarted once. Idle engines are not pinged, so a finished game stays quiet. Owner tested in round 6 and re-checked in round 7; the round 13 deadlines await a live check (see new-bugs.md BUG-7-01 to 7-06). Round 14 (2026-11-04): the deadlines run on a Tokio monitor task, so a hidden window still gets pinged and stalls are found (BUG-7-07); an engine's helper processes are killed with it (BUG-7-08); engines left by a crash are stopped at the next start (BUG-7-09); three restarts per slot in ten minutes (BUG-7-10). |
-| F-06 | Resign, draw by agreement, game result written to PGN | 6 | done (step 5) | Resign and Offer draw (the engine evaluates for one second; accepts within ±50 cp). The result tag follows the ending. Reopening a saved PGN shows the result as a generic win/draw (`White won (from PGN)`); the reason itself is not stored. Round 6: blocked by the engine bugs. Round 7: checked in the live window (test-results.md). Owner re-test pending. |
-| F-07 | Engine options dialog (UCI `setoption`, buttons, combos, spins) | 6 | done (step 6) | Engine → Engine A/B options…; values kept per engine file and sent again after a restart and at the next launch (F-12). Owner tested in round 6; re-checked in the live window in round 7 (see test-results.md). Round 11 re-laid it out like en-croissant's settings page: engine header, dashed section headings, labels above two-column fields, and Reset links only where a value differs from the engine default. The Actions section also has a **Default** button that resets every option to the engine's defaults and forgets the saved values. |
-| F-08 | Variation tree: play a different move from a browsed position | backlog | backlog | Today browsing is read-only, which keeps the history linear and safe. |
-| F-09 | Keep PGN comments and variations on import and export | backlog | backlog | Import reports what it skipped (Phase 5). |
-| F-10 | Multi-PV display (several principal lines per engine) | backlog | backlog | Phase 5 shows only the first line. |
-| F-11 | Board theme picker (other themes in `public/images/board/`) | — | done | View → Board theme lists the PNG/JPEG boards (thumbnails and horsey overlays are skipped). The choice is saved in the settings and restored at launch; decoding runs off the UI thread. SVG themes are not offered. Checked live: Wood applied and came back after a relaunch. |
-| F-12 | Settings persistence (time control, book play, engine option values per engine file) | 6 | done | Stored as JSON under `~/Library/Application Support/SiliconBoard/`. Engines used last time are loaded at launch, but not started. The window size is kept (round 8), and the evaluation and move-list panel sizes are kept too (round 9); the window position and the last PGN folder are not. Owner tested in round 6; re-checked in the live window in rounds 7, 8 and 9 (see test-results.md). |
-| F-13 | Syzygy tablebase probing | deferred | deferred | `shakmaty-syzygy` does not support shakmaty 0.30. |
-| F-14 | Performance measurement: frame time with two engines searching above 10 M NPS | 7 | done (measured) | `SILICONBOARD_PERF=1` logs one summary per second. Live run 2026-11-03 (M4, two Stockfish 19 at 4 threads each, 2.6–2.9 M NPS combined): 0.27 ms average CPU frame cost, 10.15 ms worst, gaps set by the engine's `info` rate. The board paint harness reports ~8–11 µs. The 10 M NPS target was not reachable on this machine (8 threads plateau at ~1.5 M per engine). |
-| F-15 | Release packaging (`.app` bundle with resources) | 7 | done | `package-macos.sh` (round 18) builds the release binary and assembles `SiliconBoard.app`: binary as `Contents/MacOS/SiliconBoard`, icon and `Resources/public`, `Info.plist` with the Cargo version, identifier `org.chess-gui.SiliconBoard` and the About copyright, then an ad-hoc signature. The app is zipped with LICENSE and README.md to `SiliconBoard-<version>-macos-arm64.zip` (SHA-256 printed for the release listing); the zip round-trip re-checks the signature. `--install`/`-i` also copies the bundle into `/Applications` (opt-in). First run verified (v1.0.0); the installed copy awaits the owner's live double-click run. The bundle and the zip are gitignored. |
-| F-16 | Engine card extras from the design: expand and collapse the PV, copy PV, pin, settings | backlog | backlog | `eval1.png` and `eval2.png` show these icons. Only the play/pause toggle and the PV box are built. Owner: decide later. |
-| F-17 | Figurine piece symbols in the PV (`♘f6` instead of `Nf6`) | — | done | Two View settings, saved in the settings: **Figurines in move list** (on by default) and **Figurines in engine evaluation** (off by default). Piece letters use the bundled `public/font/lichess-chess.ttf`; pawn moves, castling and move numbers stay plain. Saved/copied PGN files remain standard SAN. Checked live with two engines and toggled both ways. |
-| F-18 | Repaint on engine events instead of a 100 ms timer | 7 | done | The engine reader wakes the window when it publishes a line; `info` lines are coalesced across both engines to about 30 fps, while `bestmove`, handshake answers and exit wake at once (BUG-6-22, round 10). A 500 ms tick remains only for the watchdog and handshake timeout; clock digits keep their 100 ms tick. Same idea as en-croissant's `BestMovesPayload` event.  Round 14: principal `info` lines are merged in the reader, so a fast engine cannot grow the queue (BUG-7-17). |
-| F-19 | Piece set picker (sets in `public/piece/`) | — | done | View → Piece set lists the folders that hold all twelve SVGs (41 here; incomplete sets are skipped). Rasterising runs off the UI thread; the choice is saved and restored. Checked live: Merida applied and persisted. |
-| F-20 | Session log for app and engine diagnostics | — | done | One file per run, `siliconboard-<UTC time>.log` in `~/Library/Logs/SiliconBoard/`; the newest five are kept (round 14, BUG-7-13). A file of 5 MB is continued in `-2`, `-3`, … so the folder stays below about 25 MB (BUG-7-22). Captures lifecycle messages, UCI commands, engine stderr and process exit status. **Engine → Session log** switches it at runtime (on by default, kept in the settings). The file defaults to `info` plus app/engine debug; `SILICONBOARD_LOG` changes the filter and `SILICONBOARD_LOG_FILE` the path. Idle engines are not pinged, so a finished game leaves the log alone. |
-| F-21 | Threefold repetition claim (FIDE Article 9.2) | — | done | Detects when the displayed position has occurred three times, using shakmaty's position equality (pieces, side to move, castling rights, legal en-passant square). It is **not automatic**: Game → Claim draw (threefold) is enabled only in a running human-vs-engine game on the claimant's turn. The ending is `1/2-1/2` in the PGN. shakmaty's `is_game_over` does not adjudicate repetition because a single position has no history. |
-| F-22 | MD-Viewer-style top toolbar | — | done | Flat top bar with a slightly lighter background, 10/5 pt padding, outlined 28 pt menu buttons (fill `#24262b`, border `#34373f`, 4 pt radius, hover/open states), compact 15 pt labels, green Start / red Abort, and a FEN field aligned with the buttons. |
-| F-23 | Engine tournaments (two-engine match) | 8 | built; owner test pending | **Tournament → New tournament…** opens the dark "Engine match" window: White/Black engine combos with Browse, Hash (64 MB) and Nalimov cache (4 MB), time control (default 4 min + 1 s), number of games, reverse colours after each game (on), an optional **EPD start book and/or PolyGlot `.bin` move book** (random/sequential order for EPD), resign adjudication (10 moves / 2000 cp), draw adjudication (move 90, 20 moves, 5 cp), a PGN path and a match title. Start plays the match **on the main board**, one game after another, with the live move list, clocks and engine cards. EPD books supply the starting position (`SetUp`/`FEN` in the PGN). When a `.bin` move book is also selected and contains the line to that position, the app replays the line from move 1, so the opening moves are in the PGN too; `.bin` books also supply opening moves on their own. The movable Tournament window shows the head-to-head score (`A vs B: 2 : 3`), the results of finished games and the PGN path, and can be dragged; a movable result pop-up appears when the match ends. The PGN is written in round order. |
-| F-24 | Multi-game PGN browser | — | done | Opening a PGN with more than one game opens a movable **PGN games** window with a scrollable table (#, White, Black, Result, Event, Date). Clicking a row loads that game into the standard bottom move list; the window stays open so another game can be picked, and the move list is used as usual. It stays open when a game mode (e.g. analysis) is chosen and only closes with its top **Close** button, the title-bar X, or when a single-game PGN is opened. File → PGN games… reopens it. `PGN/Karpov.pgn` (3529 games) and the two-game tournament PGN are the fixtures. |
-| F-25 | Engine files: launcher scripts, a file check, and the reason when an engine does not start | — | done | A chosen file is checked before it starts. A native program passes; a launcher script passes when the interpreter it names exists (for `env`, when the program is on the engine PATH). A Java archive, a Linux or Windows program, or a file that is not a program is refused with the reason. Engines run from their own folder with the usual tool folders on PATH. A failed start reports the exit status and the engine's last message. Checked with Calvin (`calvin.sh`, answers uciok) and gnuchess (`run_gnuchess.sh`, whose path is wrong, and the report names the missing file). |
-| F-26 | Player names on the board from a loaded PGN | — | done | A PGN's `White` and `Black` tags are shown on the player bars in analysis, in place of White and Black. A new game, a FEN, a play mode or a tournament clears them. |
-| F-27 | About panel, application icon and version 1.0 | — | done | The About item of the app menu shows the standard macOS panel with "SiliconBoard", "Version 1.0", a clickable https://github.com/JoergKau and the MIT licence (`src/macos_about.rs`, ported from MD-Viewer). The icon is `siliconboard/assets/icon/` (1024 px PNG, 512 px for the window, `SiliconBoard.icns` for the bundle; F-15 packaging still open). Cargo version 1.0.0. The icon source is the owner's `chess-icon.png`; its licence is the owner's to confirm. |
+## Play and analyse
 
-## Done
+- Live analysis with **two UCI engines side by side** — evaluation, depth,
+  nodes, speed and the principal variation in standard notation.
+- **Play** against an engine as White or Black, or watch **engine vs
+  engine**, with configurable time controls, increments and live clocks.
+- **Play from a position**: paste a FEN and choose _Game → Start from
+  here…_ — two engines play on with the current time control, and the PGN
+  starts from that position.
+- Opening-book moves in games with any PolyGlot `.bin` book you load, plus a
+  suggestions box named after the ECO opening.
+- Resign, draw offers (accepted by the engine within a score margin),
+  threefold-repetition claims, and results written to the PGN.
+- Robust engine handling: a file that is not a working UCI engine is
+  explained, and an unresponsive engine is restarted automatically.
 
-| ID | Feature | Shipped in |
-| --- | --- | --- |
-| — | Board: click-click and drag-and-drop, promotion, castling | Phase 4 |
-| — | UCI engine supervisor, handshake, analysis | Phase 3, Phase 5 |
-| — | Opening book (PolyGlot) lookup and book box | Phase 2, Phase 5 |
-| — | Menu bar, FEN bar, evaluation dashboard, move list | Phase 5 |
-| — | PGN open and save (mainline, FEN header) | Phase 5 |
+## PGN and FEN
+
+- Open, save, and copy PGN and FEN.
+- **Multi-game PGN browser**: a scrollable games list (White, Black, result,
+  event, date) docked next to the analysis; click a game to load it.
+- Opens with a classic World Championship game selected.
+- Player names from a loaded PGN are shown on the board's player bars.
+
+## Engines and tournaments
+
+- Load engine files directly (including launcher scripts); an options
+  dialog for every UCI option an engine declares. Each engine card's name is
+  a pulldown of the known engines (loaded A/B and the engines used before,
+  remembered across launches, the same list as the tournament window) with
+  Browse… for another file.
+- **Syzygy tablebases** via _Engine → Load tablebases…_: pick your
+  tablebase folder(s) — 5-men and 6-men sets in separate folders are
+  supported — and the path is given to every engine as its `SyzygyPath`
+  option.
+- **Two-engine tournaments** on the main board: time control, alternating
+  colours, resign and draw adjudication, optional EPD/PolyGlot opening
+  books, and one PGN with every game.
+
+## Look and feel
+
+- Board themes and piece sets; figurine piece symbols (`♘f6`) in the move
+  list and the evaluation.
+- Everything — engines, engine options, time control, themes, window layout
+  — is restored on the next launch.
+
+## Not (yet) included
+
+- Variation trees; PGN comments and variations; multi-PV engine lines;
+  in-GUI tablebase probing (the engines do the probing); other platforms.

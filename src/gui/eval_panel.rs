@@ -5,6 +5,7 @@
 //! summary from the engine hosts and the game state. Score, number and move
 //! formatting are pure functions with unit tests.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
@@ -13,6 +14,7 @@ use crate::app::StatusLevel;
 use crate::engine::{AnalysisStatus, EngineView, Score};
 use crate::gui::menu_bar::MenuAction;
 use crate::gui::theme;
+use crate::tournament::EngineSpec;
 
 /// Number of lines of principal variation shown. Both engine cards use it, so
 /// their PV areas are the same height; the rest is cut off with "…".
@@ -43,6 +45,8 @@ pub struct EvalCard {
     pub slot: usize,
     /// Engine snapshot; `None` when the slot is empty.
     pub view: Option<EngineView>,
+    /// File the slot's engine was started from, for the pulldown's tick.
+    pub binary_path: Option<PathBuf>,
     /// Principal variation in SAN, relative to the displayed position.
     pub pv_san: Arc<Vec<String>>,
     /// Whether analysis is switched on for this slot (the card's toggle).
@@ -66,6 +70,9 @@ impl EvalCard {
 pub struct EvalSummary {
     /// Engine cards, Engine A first.
     pub cards: [EvalCard; 2],
+    /// Engines the cards' pulldowns offer: the loaded A/B files and the files
+    /// used last time, as in the tournament window.
+    pub engine_choices: Vec<EngineSpec>,
     /// Side to move in the displayed position (scores are relative to it).
     pub white_to_move: bool,
     /// Full-move number of the displayed position.
@@ -90,8 +97,8 @@ pub struct EvalSummary {
     pub status_level: StatusLevel,
 }
 
-/// Draw the dashboard. Returns the menu action requested by a card's toggle or
-/// "Load engine" button, if one was clicked.
+/// Draw the dashboard. Returns the menu action requested by a card's toggle,
+/// engine pulldown or Browse item, if one was clicked.
 pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     let mut requested = None;
 
@@ -100,14 +107,21 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     ui.add_space(6.0);
 
     for card in &summary.cards {
-        if let Some(action) = engine_card(ui, card, summary.white_to_move, summary.fullmove, summary.figurines) {
+        if let Some(action) = engine_card(
+            ui,
+            card,
+            &summary.engine_choices,
+            summary.white_to_move,
+            summary.fullmove,
+            summary.figurines,
+        ) {
             requested = Some(action);
         }
         ui.add_space(CARD_GAP);
     }
 
     // The book box belongs to book play. With Game → Book moves in games
-    // switched off it is not shown at all (round 10).
+    // switched off it is not shown at all.
     if summary.book_in_games {
         book_box(ui, summary);
     }
@@ -125,10 +139,17 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     requested
 }
 
-/// One engine card: a header row (toggle, name, speed, metrics), a blue rule,
-/// and the score badge with the principal variation. Returns a menu action
-/// when the toggle or the "Load engine" button is pressed.
-fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32, figurines: bool) -> Option<MenuAction> {
+/// One engine card: a header row (toggle, engine pulldown, speed, metrics), a
+/// blue rule, and the score badge with the principal variation. Returns a menu
+/// action when the toggle, the pulldown or Browse is used.
+fn engine_card(
+    ui: &mut Ui,
+    card: &EvalCard,
+    choices: &[EngineSpec],
+    white_to_move: bool,
+    fullmove: u32,
+    figurines: bool,
+) -> Option<MenuAction> {
     let mut action = None;
     let live = card.is_live();
     let letter = slot_letter(card.slot);
@@ -148,51 +169,41 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32,
                 if toggle_button(ui, card.running, toggle_enabled, disabled_hint) {
                     action = Some(MenuAction::ToggleEngine(card.slot));
                 }
-                match card.view.as_ref().filter(|_| live) {
-                    Some(view) => {
-                        let spacing = ui.spacing().item_spacing.x;
-                        let name_width = (ui.available_width()
-                            - LETTER_SLOT_WIDTH
-                            - PILL_SLOT_WIDTH
-                            - metrics_width()
-                            - 4.0 * spacing)
-                            .max(0.0);
-                        ui.label(RichText::new(letter.to_string()).small().color(theme::MUTED));
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(name_width, METRIC_HEIGHT),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(engine_name(view)).strong().color(theme::TEXT))
-                                        .truncate(),
-                                );
-                            },
-                        );
-                        speed_pill(ui, view);
-                        let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
-                        let depth = view
-                            .stats
-                            .depth
-                            .map_or_else(|| "--".to_string(), |d| d.to_string());
-                        let nodes = format_count(view.stats.nodes.unwrap_or(0));
-                        let eval = white_score.map_or_else(|| "--".to_string(), format_eval_one_digit);
-                        ui.add_space((ui.available_width() - metrics_width()).max(METRIC_GAP));
-                        metrics_block(ui, &eval, &depth, &nodes);
-                    }
-                    None => {
-                        let text = match &card.view {
-                            None => format!("Engine {}: no engine loaded", letter),
-                            Some(_) => format!("Engine {}: offline", letter),
-                        };
-                        ui.label(RichText::new(text).color(theme::MUTED));
-                    }
+                ui.label(RichText::new(letter.to_string()).small().color(theme::MUTED));
+                let spacing = ui.spacing().item_spacing.x;
+                let name_width = if live {
+                    (ui.available_width()
+                        - LETTER_SLOT_WIDTH
+                        - PILL_SLOT_WIDTH
+                        - metrics_width()
+                        - 4.0 * spacing)
+                        .max(120.0)
+                } else {
+                    (ui.available_width() - LETTER_SLOT_WIDTH - spacing).max(120.0)
+                };
+                // The engine name is the same pulldown the tournament window
+                // uses: known engines plus Browse….
+                engine_choice_combo(ui, card, choices, name_width, &mut action);
+                if let Some(view) = card.view.as_ref().filter(|_| live) {
+                    speed_pill(ui, view);
+                    let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
+                    let depth = view
+                        .stats
+                        .depth
+                        .map_or_else(|| "--".to_string(), |d| d.to_string());
+                    let nodes = format_count(view.stats.nodes.unwrap_or(0));
+                    let eval = white_score.map_or_else(|| "--".to_string(), format_eval_one_digit);
+                    ui.add_space((ui.available_width() - metrics_width()).max(METRIC_GAP));
+                    metrics_block(ui, &eval, &depth, &nodes);
                 }
             });
 
             if !live {
-                if ui.button("Load engine…").clicked() {
-                    action = Some(MenuAction::LoadEngine(card.slot));
-                }
+                let text = match &card.view {
+                    None => format!("Engine {}: no engine loaded", letter),
+                    Some(_) => format!("Engine {}: offline", letter),
+                };
+                ui.label(RichText::new(text).color(theme::MUTED));
                 return;
             }
             let Some(view) = card.view.as_ref() else {
@@ -217,6 +228,43 @@ fn engine_card(ui: &mut Ui, card: &EvalCard, white_to_move: bool, fullmove: u32,
 }
 
 /// The engine's name, or its file name when it did not give one.
+/// The engine pulldown: the loaded A/B engines and the files used last time,
+/// with a tick on the one the slot runs, plus Browse… for another file. This
+/// is the same choice the tournament window offers.
+fn engine_choice_combo(
+    ui: &mut Ui,
+    card: &EvalCard,
+    choices: &[EngineSpec],
+    width: f32,
+    action: &mut Option<MenuAction>,
+) {
+    let selected = card
+        .view
+        .as_ref()
+        .map(engine_name)
+        .unwrap_or_else(|| "— none —".to_string());
+    egui::ComboBox::from_id_salt(("engine_slot", card.slot))
+        .width(width)
+        .selected_text(RichText::new(selected).strong().color(theme::TEXT))
+        .show_ui(ui, |ui| {
+            for (index, choice) in choices.iter().enumerate() {
+                let current = card.binary_path.as_deref() == Some(choice.path.as_path());
+                if ui.selectable_label(current, &choice.name).clicked() {
+                    *action = Some(MenuAction::ChooseEngine {
+                        slot: card.slot,
+                        choice: index,
+                    });
+                }
+            }
+            if !choices.is_empty() {
+                ui.separator();
+            }
+            if ui.button("Browse…").clicked() {
+                *action = Some(MenuAction::LoadEngine(card.slot));
+            }
+        });
+}
+
 fn engine_name(view: &EngineView) -> String {
     view.name.clone().unwrap_or_else(|| view.binary_name.clone())
 }

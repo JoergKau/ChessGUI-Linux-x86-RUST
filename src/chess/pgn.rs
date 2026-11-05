@@ -763,11 +763,12 @@ mod tests {
     }
 
     #[test]
-    fn the_real_karpov_file_lists_all_games() {
-        let text = workspace_pgn("Karpov.pgn");
+    fn the_bundled_pgn_lists_all_games() {
+        let text = bundled_pgn("WorldChamp1972.pgn");
         let collection = parse_pgn_collection(&text).unwrap();
-        assert_eq!(collection.games.len(), 3529);
-        assert_eq!(collection.games[0].white, "Karpov, Anatoly");
+        assert_eq!(collection.games.len(), 21);
+        assert_eq!(collection.games[0].white, "Spassky, Boris V");
+        assert_eq!(collection.games[0].black, "Fischer, Robert James");
         assert_eq!(collection.games[0].result, Some(PgnResult::WhiteWin));
         let import = collection.load_game(0).unwrap();
         assert!(import.game.total_plies() > 0);
@@ -823,10 +824,9 @@ mod tests {
         assert_eq!(result_token(&game, None), "1-0");
     }
 
-    /// Path of a PGN file in the workspace `PGN/` folder.
-    fn workspace_pgn(name: &str) -> String {
+    /// Text of a PGN file that ships with the repository (`PGN/`).
+    fn bundled_pgn(name: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
             .join("PGN")
             .join(name);
         let bytes = std::fs::read(&path)
@@ -836,12 +836,14 @@ mod tests {
 
     #[test]
     fn real_world_game_with_crlf_glued_numbers_and_suffixes_loads_fully() {
-        // The owner's PGN/Abdusattorov.pgn: CRLF endings, `1.e4` style numbers,
-        // `Qb6+`, `O-O`, and a result token directly after the last move.
-        let import = parse_pgn_with_report(&workspace_pgn("Abdusattorov.pgn")).unwrap();
-        assert_eq!(import.game.total_plies(), 81, "41 white moves and 40 black moves");
-        assert_eq!(import.game.active_history().last().map(|p| p.san.to_string()).as_deref(), Some("c7"));
-        assert_eq!(import.ignored, IgnoredContent::default());
+        // The bundled PGN: CRLF endings, `1.d4` style numbers, `O-O`,
+        // `Rxd1+` and a result token directly after the last move.
+        let import = parse_pgn_with_report(&bundled_pgn("WorldChamp1972.pgn")).unwrap();
+        assert_eq!(import.game.total_plies(), 111, "55 full moves and White's 56th");
+        assert_eq!(import.game.active_history().last().map(|p| p.san.to_string()).as_deref(), Some("Kd6"));
+        assert_eq!(import.ignored.variations, 0, "no variations in the first game");
+        assert_eq!(import.ignored.comments, 0, "no comments in the first game");
+        assert_eq!(import.ignored.games, 20, "the other games of the collection are skipped");
     }
 
     #[test]

@@ -171,7 +171,7 @@ pub struct GameState {
     revision: u64,
     /// The FEN of the displayed position, with the revision and cursor it was
     /// made for. Formatting it clones the position, and the UI asks several
-    /// times per frame (BUG-7-18).
+    /// times per frame.
     fen_memo: RefCell<Option<(u64, usize, String)>>,
     /// Whether the displayed position is a threefold repetition, with the
     /// revision and cursor it was counted for.
@@ -1130,9 +1130,8 @@ mod tests {
     }
 
     #[test]
-    fn book_suggestions_list_real_book_moves_for_the_start() {
-        let book = PolyglotBook::open(std::path::Path::new("../books/gm2001.bin"))
-            .expect("the workspace fixture books/gm2001.bin must be present");
+    fn book_suggestions_list_the_books_start_moves() {
+        let book = crate::chess::opening_book::sample_start_book();
         let suggestions = GameState::new().book_suggestions(&book);
         assert!(!suggestions.is_empty(), "start position must have book moves");
         // Every suggestion must be a legal SAN move of the start position.
@@ -1149,8 +1148,7 @@ mod tests {
 
     #[test]
     fn book_moves_are_legal_and_match_the_suggestions() {
-        let book = PolyglotBook::open(std::path::Path::new("../books/gm2001.bin"))
-            .expect("the workspace fixture books/gm2001.bin must be present");
+        let book = crate::chess::opening_book::sample_start_book();
         let game = GameState::new();
         let moves = game.book_moves(&book);
         assert!(!moves.is_empty(), "start position must have book moves");

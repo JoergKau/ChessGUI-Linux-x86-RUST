@@ -32,6 +32,7 @@ use crate::gui::board_view::{self, BoardAction, BoardView};
 use crate::gui::eval_panel::{self, EvalCard, EvalSummary};
 use crate::gui::menu_bar::{self, MenuAction, MenuState};
 use crate::gui::options_dialog::{default_value, OptionsAction, OptionsDialog};
+use crate::gui::tablebases::{self, TablebaseDialog, TablebaseOutcome};
 use crate::gui::tournament_dialog::{
     self, ProgressAction, TournamentAction, TournamentDialog, TournamentSide,
 };
@@ -66,7 +67,7 @@ const BOOK_MAX_PLIES: usize = 40;
 
 /// Restarts of one engine slot are counted over this window. Once an engine has
 /// been restarted [`RESTART_LIMIT`] times within it, the next failure leaves it
-/// offline, so a broken engine cannot loop (BUG-7-10).
+/// offline, so a broken engine cannot loop.
 const RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// Restarts allowed within [`RESTART_WINDOW`] before an engine is left offline.
@@ -124,7 +125,7 @@ type BookMemo = ((bool, u64), String, Vec<(Move, u16)>);
 /// Cached SAN layouts for the move list, keyed by history revision and figurine setting.
 type PgnGalleyCache = (u64, bool, Vec<Option<Arc<egui::Galley>>>);
 
-/// A one-second summary of frame costs, used by the F-14 measurement.
+/// A one-second summary of frame costs, used by the frame-cost measurement.
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct FrameSummary {
     /// Frames counted in the window.
@@ -339,6 +340,9 @@ enum AppEvent {
     TournamentMoveBookPicked { outcome: Option<PathBuf> },
     /// The tournament dialog asked for a PGN destination.
     TournamentPgnPicked { outcome: Option<PathBuf> },
+    /// The Load-tablebases dialog's Browse picked tablebase folders (or was
+    /// cancelled).
+    TablebasesPicked { outcome: Option<Vec<PathBuf>> },
     /// Writing a finished tournament game to its PGN file failed.
     TournamentWriteFailed { message: String },
     /// The tournament's opening book was indexed.
@@ -465,6 +469,8 @@ pub struct SiliconBoardApp {
     clock: Option<Clock>,
     /// The Game → Time control dialog, while it is open.
     time_dialog: Option<TimeControlDialog>,
+    /// The Engine → Load tablebases… dialog, while it is open.
+    tablebase_dialog: Option<TablebaseDialog>,
     /// Whether an engine on the move plays an opening-book move when one exists.
     book_in_games: bool,
     /// Chooses among the book moves by weight.
@@ -515,7 +521,7 @@ pub struct SiliconBoardApp {
     /// Incremented whenever `book` is replaced, so the memo below is not reused.
     book_generation: u64,
     /// The book moves of the last position asked for, with the book they came
-    /// from (`(is_tournament, generation)`) and the FEN (BUG-7-18).
+    /// from (`(is_tournament, generation)`) and the FEN.
     book_memo: RefCell<Option<BookMemo>>,
     /// ECO opening names, keyed by position.
     opening_names: Option<OpeningNames>,
@@ -559,7 +565,7 @@ pub struct SiliconBoardApp {
     tournament: Option<TournamentSession>,
     /// Counter used to reject late results from an older tournament.
     tournament_generation: u64,
-    /// A multi-game PGN whose games are listed in the bottom panel.
+    /// A multi-game PGN whose games are listed on the right panel.
     pgn_collection: Option<PgnCollection>,
     /// Selected game in `pgn_collection` (zero-based).
     pgn_browser_selected: usize,
@@ -569,8 +575,8 @@ pub struct SiliconBoardApp {
     /// The `White` and `Black` names of the loaded PGN, shown on the player
     /// bars in analysis. Cleared by anything that starts a game of its own.
     pgn_players: Option<(String, String)>,
-    /// Whether the PGN games list window is visible.
-    pgn_browser_window_open: bool,
+    /// Whether the PGN games list is visible in the right panel.
+    pgn_browser_list_open: bool,
     /// Whether the tournament window is visible.
     tournament_window_open: bool,
     /// Whether the small result pop-up should be shown.
@@ -595,6 +601,7 @@ impl SiliconBoardApp {
         // The settings were read before the window existed (for its size).
         app.apply_settings(settings);
         app.load_startup_book();
+        app.load_startup_pgn();
         app.load_opening_names();
         app
     }
@@ -645,6 +652,7 @@ impl SiliconBoardApp {
             mode: GameMode::Analysis,
             clock: None,
             time_dialog: None,
+            tablebase_dialog: None,
             book_in_games: false,
             book_picker: BookPicker::default(),
             restarting: [None, None],
@@ -693,7 +701,7 @@ impl SiliconBoardApp {
             pgn_browser_selected: 0,
             pgn_termination: None,
             pgn_players: None,
-            pgn_browser_window_open: false,
+            pgn_browser_list_open: false,
             tournament_window_open: false,
             tournament_finished_popup: false,
         }
@@ -747,7 +755,7 @@ impl SiliconBoardApp {
         self.finish_draw_offer();
         self.play_book_reply(ctx);
         // A game that ends (or is replaced) switches its engines off, so each
-        // card's button reads Start again and the engine rests (round 8, bugs 2-4).
+        // card's button reads Start again and the engine rests.
         let live = self.live_play();
         if self.game_was_live && !live {
             for &slot in self.mode.engine_slots() {
@@ -773,7 +781,7 @@ impl SiliconBoardApp {
     }
 
     /// Record this frame's `logic` + `ui` cost and log a one-second summary
-    /// while an engine searches (F-14). `SILICONBOARD_PERF` turns it on.
+    /// while an engine searches. `SILICONBOARD_PERF` turns it on.
     fn record_frame(&mut self) {
         let Some(started) = self.frame_started.take() else {
             return;
@@ -940,12 +948,13 @@ impl SiliconBoardApp {
                                     self.settings.engine_options.get(&binary).cloned().unwrap_or_default();
                                 self.restart_times[slot].clear();
                                 self.close_options_dialog(slot);
+                                self.remember_engine(&path);
                                 self.settings.engines[slot] = Some(path);
                                 self.save_settings();
                             }
                             self.engines[slot] = Some(EngineHost::attach_with_settings(
                                 process,
-                                self.engine_settings[slot].clone(),
+                                engine_startup_settings(&self.engine_settings[slot], &self.settings.tablebase_path),
                             ));
                             self.engine_auto_restart[slot] = true;
                             self.engine_status[slot] = None;
@@ -988,6 +997,18 @@ impl SiliconBoardApp {
                         self.set_status(StatusLevel::Error, format!("Could not load book {}: {}", name, err));
                     }
                 },
+                AppEvent::TablebasesPicked { outcome } => match outcome {
+                    None => {
+                        self.set_status(StatusLevel::Info, "Tablebase folder selection cancelled.".to_string());
+                    }
+                    Some(dirs) => {
+                        // The folders replace the field text in the open
+                        // dialog; the user applies them.
+                        if let Some(dialog) = self.tablebase_dialog.as_mut() {
+                            dialog.set_draft_dirs(&dirs);
+                        }
+                    }
+                },
                 AppEvent::OpeningNamesLoaded { outcome } => match outcome {
                     Ok(names) if names.is_empty() => {
                         log::warn!("opening names table is empty");
@@ -1007,19 +1028,19 @@ impl SiliconBoardApp {
                             let total = collection.games.len();
                             self.pgn_collection = Some(collection);
                             self.pgn_browser_selected = 0;
-                            self.pgn_browser_window_open = true;
+                            self.pgn_browser_list_open = true;
                             self.select_pgn_game(0);
                             self.set_status(
                                 StatusLevel::Info,
                                 format!(
-                                    "Opened {} — {} games. Pick a game in the PGN games window.",
+                                    "Opened {} — {} games. Pick a game in the games list on the right.",
                                     name, total
                                 ),
                             );
                         } else {
                             self.pgn_collection = None;
                             self.pgn_browser_selected = 0;
-                            self.pgn_browser_window_open = false;
+                            self.pgn_browser_list_open = false;
                             match collection.load_game(0) {
                                 Ok(import) => self.load_pgn_game(&name, import, None),
                                 Err(err) => {
@@ -1242,6 +1263,9 @@ impl SiliconBoardApp {
         }
         match action {
             MenuAction::NewGame => {
+                // A fresh game is not part of the loaded PGN: the games list
+                // closes.
+                self.clear_pgn_browser();
                 self.game = GameState::new();
                 self.ending = None;
                 self.pgn_termination = None;
@@ -1254,6 +1278,7 @@ impl SiliconBoardApp {
                 }
                 self.set_status(StatusLevel::Info, "New game.".to_string());
             }
+            MenuAction::StartFromFen => self.start_from_fen(),
             MenuAction::FlipBoard => self.view.flip(),
             MenuAction::SetMode(mode) => self.set_mode(mode),
             MenuAction::ToggleBookInGames => {
@@ -1278,7 +1303,7 @@ impl SiliconBoardApp {
             MenuAction::OpenPgn => self.open_pgn(),
             MenuAction::ShowPgnGames => {
                 if self.pgn_collection.is_some() {
-                    self.pgn_browser_window_open = true;
+                    self.pgn_browser_list_open = true;
                 } else {
                     self.set_status(
                         StatusLevel::Warning,
@@ -1303,6 +1328,7 @@ impl SiliconBoardApp {
                 self.save_text("FEN", text, "position.fen", "FEN", &["fen"]);
             }
             MenuAction::LoadEngine(slot) => self.load_engine(slot),
+            MenuAction::ChooseEngine { slot, choice } => self.choose_engine(slot, choice),
             MenuAction::ToggleEngine(slot) => self.toggle_engine(slot),
             MenuAction::StartAnalysis => self.set_analysis(true),
             MenuAction::StopAnalysis => self.set_analysis(false),
@@ -1320,6 +1346,9 @@ impl SiliconBoardApp {
                 Err(err) => self.set_status(StatusLevel::Error, format!("Invalid FEN: {}", err)),
             },
             MenuAction::LoadBook => self.load_book(),
+            MenuAction::OpenTablebases => {
+                self.tablebase_dialog = Some(TablebaseDialog::new(self.settings.tablebase_path.as_deref()));
+            }
             MenuAction::SetBoardTheme(index) => self.set_board_theme(index),
             MenuAction::SetPieceSet(index) => self.set_piece_set(index),
             MenuAction::ToggleFigurinesMoveList => self.toggle_figurines(false),
@@ -1533,9 +1562,9 @@ impl SiliconBoardApp {
     }
 
     /// A warning for an option value that wastes the machine: more threads
-    /// than cores over both engines (BUG-7-14), or a `MultiPV` above 1, which
-    /// makes the engine search lines the card never shows (BUG-7-15). The value
-    /// is still set; the warning only tells the owner.
+    /// than cores over both engines, or a `MultiPV` above 1, which
+    /// makes the engine search lines the card never shows. The value
+    /// is still set; the warning only informs the user.
     fn option_warning(&self, slot: usize, name: &str, value: &str) -> Option<String> {
         match name {
             "MultiPV" => {
@@ -1695,7 +1724,7 @@ impl SiliconBoardApp {
         }
         self.engine_loading[slot] = true;
         // A manual load replaces whatever restart was in flight for this slot,
-        // so the new engine is not taken for the restart (BUG-7-19).
+        // so the new engine is not taken for the restart.
         self.restarting[slot] = None;
         self.set_status(StatusLevel::Info, format!("Choose an engine for slot {}…", slot_letter(slot)));
         let tx = self.events_tx.clone();
@@ -1714,6 +1743,31 @@ impl SiliconBoardApp {
             };
             tx.send(AppEvent::EngineSpawned { slot, outcome });
         });
+    }
+
+    /// Engine card pulldown: start a known engine file in `slot`, replacing
+    /// whatever is loaded there. The file list is the one the tournament
+    /// window offers (loaded A/B engines and the files used last time).
+    fn choose_engine(&mut self, slot: usize, choice: usize) {
+        let Some(spec) = self.engine_choices().get(choice).cloned() else {
+            return;
+        };
+        if self.engine_loading[slot] {
+            return;
+        }
+        if self.engine_live(slot)
+            && self.engines[slot]
+                .as_ref()
+                .is_some_and(|host| host.binary_path() == spec.path)
+        {
+            return; // already running in this slot
+        }
+        self.restarting[slot] = None;
+        self.set_status(
+            StatusLevel::Info,
+            format!("Loading engine {}: {}…", slot_letter(slot), spec.path.display()),
+        );
+        self.spawn_engine_file(slot, spec.path);
     }
 
     /// Switch the board image. Decoding runs off the UI thread; the texture is
@@ -1846,12 +1900,26 @@ impl SiliconBoardApp {
         if config.pgn_path.as_os_str().is_empty() {
             config.pgn_path = tournament::default_pgn_path();
         }
+        // Relative paths (typed earlier, or saved by an older version whose
+        // default followed the working directory) would otherwise resolve
+        // against `/` in a Finder launch. Show the absolute path instead.
+        config.pgn_path = tournament::resolve_pgn_path(&config.pgn_path);
         self.tournament_dialog = Some(TournamentDialog::new(config, choices));
         self.tournament_finished_popup = false;
     }
 
+    /// Remember an engine file in the pulldown history, newest first, without
+    /// duplicates.
+    fn remember_engine(&mut self, path: &Path) {
+        self.settings.engine_history.retain(|known| known != path);
+        self.settings.engine_history.insert(0, path.to_path_buf());
+        self.settings
+            .engine_history
+            .truncate(settings::ENGINE_HISTORY_LIMIT);
+    }
+
     /// Engines offered in the tournament dialog: the loaded A/B slots, then the
-    /// files used last time. Paths are unique.
+    /// files used last time, then the remembered history. Paths are unique.
     fn engine_choices(&self) -> Vec<EngineSpec> {
         let mut choices: Vec<EngineSpec> = Vec::new();
         for slot in 0..2 {
@@ -1865,6 +1933,13 @@ impl SiliconBoardApp {
                     None => continue,
                 },
             };
+            if spec.is_set() && !choices.iter().any(|choice| choice.path == spec.path) {
+                choices.push(spec);
+            }
+        }
+        // Everything loaded before this session, newest first.
+        for path in &self.settings.engine_history {
+            let spec = EngineSpec::from_path(path.clone());
             if spec.is_set() && !choices.iter().any(|choice| choice.path == spec.path) {
                 choices.push(spec);
             }
@@ -1890,12 +1965,13 @@ impl SiliconBoardApp {
 
     /// Start the match. The games are played on the main board, one after the
     /// other, using the normal game loop.
-    fn start_tournament(&mut self, config: TournamentConfig) {
+    fn start_tournament(&mut self, mut config: TournamentConfig) {
         if let Err(message) = config.validate() {
             self.set_status(StatusLevel::Error, message);
             return;
         }
         self.clear_pgn_browser();
+        config.pgn_path = tournament::resolve_pgn_path(&config.pgn_path);
         let pgn_file = match open_tournament_pgn(&config.pgn_path) {
             Ok(file) => file,
             Err(message) => {
@@ -2598,8 +2674,13 @@ impl SiliconBoardApp {
     fn pick_tournament_pgn(&mut self) {
         let tx = self.events_tx.clone();
         self.spawn(async move {
+            // Start in the default output folder, which is writable even in a
+            // Finder launch (`/` is not).
+            let directory = tournament::default_output_dir();
+            let _ = tokio::fs::create_dir_all(&directory).await;
             let picked = rfd::AsyncFileDialog::new()
                 .set_title("Choose the tournament PGN file")
+                .set_directory(&directory)
                 .set_file_name("engine-match.pgn")
                 .add_filter("PGN", &["pgn"])
                 .save_file()
@@ -2624,6 +2705,61 @@ impl SiliconBoardApp {
             };
             tx.send(AppEvent::BookLoaded { outcome, startup: false });
         });
+    }
+
+    /// Multi-folder picker for the Load-tablebases dialog (Browse…). The
+    /// folders replace the open dialog's field text, joined as one
+    /// `SyzygyPath` string; Apply sends it.
+    fn pick_tablebase_dirs(&mut self) {
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Choose tablebase folders")
+                .pick_folders()
+                .await;
+            let outcome = picked.map(|handles| {
+                handles
+                    .into_iter()
+                    .map(|handle| handle.path().to_path_buf())
+                    .collect::<Vec<_>>()
+            });
+            tx.send(AppEvent::TablebasesPicked { outcome });
+        });
+    }
+
+    /// Apply the `SyzygyPath` string from the Load-tablebases dialog: keep
+    /// it in the settings, send it to every loaded engine now, and give it
+    /// to every engine started afterwards. An empty string clears the
+    /// tablebases again (the engines take an empty path until they are
+    /// restarted, after which they get none).
+    fn set_tablebase_path(&mut self, raw: &str) {
+        let value = raw.trim().to_string();
+        let cleared = value.is_empty();
+        self.settings.tablebase_path = (!cleared).then(|| value.clone());
+        // The path is one global setting; a stale `SyzygyPath` saved for an
+        // engine file must not override it later.
+        for saved in self.settings.engine_options.values_mut() {
+            saved.remove(tablebases::SYZYGY_PATH);
+        }
+        for slot in 0..2 {
+            if cleared {
+                self.engine_settings[slot].remove(tablebases::SYZYGY_PATH);
+            } else {
+                self.engine_settings[slot]
+                    .insert(tablebases::SYZYGY_PATH.to_string(), value.clone());
+            }
+        }
+        self.save_settings();
+        let sent = if cleared { "" } else { value.as_str() };
+        for host in self.engines.iter_mut().flatten() {
+            host.set_option(tablebases::SYZYGY_PATH, sent);
+        }
+        let text = if cleared {
+            "Tablebases cleared off the loaded engines; new engines get no path.".to_string()
+        } else {
+            "Tablebase path set for the loaded engines.".to_string()
+        };
+        self.set_status(StatusLevel::Info, text);
     }
 
     /// Write the current settings to disk, off the UI thread. One writer at a
@@ -2724,6 +2860,23 @@ impl SiliconBoardApp {
         });
     }
 
+    /// The start-up PGN: `PGN/WorldChamp1972.pgn` next to the asset tree —
+    /// the repository folder for a dev run, `Contents/Resources/PGN/` in the
+    /// packaged bundle — is opened automatically and its first game selected.
+    /// Reading runs off the UI thread like File → Open PGN…; a
+    /// missing file starts the app without it.
+    fn load_startup_pgn(&mut self) {
+        let Some(path) = crate::assets::project_pgn_path("WorldChamp1972.pgn") else {
+            log::info!("no start-up PGN: PGN/WorldChamp1972.pgn is not next to the assets");
+            return;
+        };
+        let tx = self.events_tx.clone();
+        self.spawn(async move {
+            let outcome = Some(read_pgn(&path).await);
+            tx.send(AppEvent::PgnOpened { outcome });
+        });
+    }
+
     /// Load one parsed PGN game onto the board. `game_number` is set when it
     /// came from a multi-game file, for the status line.
     fn load_pgn_game(
@@ -2795,7 +2948,7 @@ impl SiliconBoardApp {
     fn clear_pgn_browser(&mut self) {
         self.pgn_collection = None;
         self.pgn_browser_selected = 0;
-        self.pgn_browser_window_open = false;
+        self.pgn_browser_list_open = false;
     }
 
     /// Show the file picker for a PGN file, then read and parse it.
@@ -2933,7 +3086,7 @@ impl SiliconBoardApp {
 
     /// The book moves of the displayed position from `book`. An engine on the
     /// move asks every frame, so the answer is kept for the position and the
-    /// book it came from (`source`) (BUG-7-18).
+    /// book it came from (`source`).
     fn book_moves_cached(&self, book: &PolyglotBook, source: (bool, u64)) -> Vec<(Move, u16)> {
         let fen = self.game.fen();
         if let Some((memo_source, memo_fen, moves)) = self.book_memo.borrow().as_ref() {
@@ -3259,11 +3412,69 @@ impl SiliconBoardApp {
             .unwrap_or_else(|| format!("Engine {}", slot_letter(slot)))
     }
 
+    /// Game → Start from here…: two engines play the position in the FEN
+    /// field with the current time control. The game's start position is that
+    /// FEN, so the PGN carries `SetUp`/`FEN` and the moves from there.
+    fn start_from_fen(&mut self) {
+        let fen = self.fen_input.trim();
+        let game = match GameState::from_fen(fen) {
+            Ok(game) => game,
+            Err(err) => {
+                self.set_status(StatusLevel::Error, format!("Invalid FEN: {}", err));
+                return;
+            }
+        };
+        if game.is_game_over() {
+            self.set_status(
+                StatusLevel::Warning,
+                "The FEN position is already over; nothing can be played from it.".to_string(),
+            );
+            return;
+        }
+        let mut missing = Vec::new();
+        for slot in 0..2 {
+            if !self.engine_live(slot) {
+                missing.push(slot_letter(slot).to_string());
+            }
+        }
+        if !missing.is_empty() {
+            self.set_status(
+                StatusLevel::Warning,
+                format!("Load engine {} first.", missing.join(" and ")),
+            );
+            return;
+        }
+
+        self.game = game;
+        self.ending = None;
+        self.pgn_termination = None;
+        self.pgn_players = None;
+        self.game_started = false;
+        self.view.clear_selection();
+        // A play mode of its own: the PGN browser closes, the clock starts
+        // from full time for the side to move, and both engines are pointed
+        // at the position.
+        self.set_mode(GameMode::EngineVsEngine);
+        self.set_analysis(true);
+        if self.live_play() {
+            self.set_status(
+                StatusLevel::Info,
+                "Two engines play from the FEN position.".to_string(),
+            );
+        }
+    }
+
     /// Switch the session to `mode`. The engines the mode plays with are
     /// switched on, so the game starts without a Start press. A missing engine
     /// is named in the status line. The clocks start from full time.
     fn set_mode(&mut self, mode: GameMode) {
         self.mode = mode;
+        // A play mode is a new game of its own: the PGN games list closes.
+        // Analysis only keeps it open — that is
+        // the mode the user browses different games of a file in.
+        if mode != GameMode::Analysis {
+            self.clear_pgn_browser();
+        }
         if mode != GameMode::Analysis {
             // A game against an engine or between engines has its own names.
             self.pgn_players = None;
@@ -3345,7 +3556,7 @@ impl SiliconBoardApp {
             if self.engine_live(slot) {
                 live += 1;
                 // In a play mode Start begins the game for the engines that play
-                // it. A merely loaded engine is left switched off (round 9, bug 2).
+                // it. A merely loaded engine is left switched off.
                 let playing_slot = !playing || self.mode.engine_slots().contains(&slot);
                 self.set_engine_analysis(slot, enabled && playing_slot);
             } else {
@@ -3455,7 +3666,7 @@ impl SiliconBoardApp {
             };
             // A play-mode engine's button says whether the game is running, but
             // only the engines the mode plays with follow the game. An engine
-            // that is merely loaded stays at play (round 9, bug 2).
+            // that is merely loaded stays at play.
             let playing_slot = self.mode == GameMode::Analysis || self.mode.engine_slots().contains(&slot);
             let running = self.engine_live(slot)
                 && playing_slot
@@ -3466,6 +3677,7 @@ impl SiliconBoardApp {
             EvalCard {
                 slot,
                 view,
+                binary_path: self.engines[slot].as_ref().map(EngineHost::binary_path),
                 pv_san,
                 running,
                 toggle_enabled: playing_slot
@@ -3475,6 +3687,7 @@ impl SiliconBoardApp {
         let tournament_active = self.tournament.as_ref().is_some_and(TournamentSession::active);
         EvalSummary {
             cards,
+            engine_choices: self.engine_choices(),
             white_to_move: self.game.turn() == PieceColor::White,
             fullmove: self.game.fullmove_number(),
             outcome: self.result_text().unwrap_or_else(|| self.game.outcome()),
@@ -3520,6 +3733,7 @@ impl eframe::App for SiliconBoardApp {
                         .is_some_and(|host| host.status() != AnalysisStatus::Starting)
             }),
             book_name: self.book.as_ref().map(|(name, _)| name.as_str()),
+            tablebase_path: self.settings.tablebase_path.as_deref(),
             figurines_move_list: self.settings.figurines_move_list,
             figurines_eval: self.settings.figurines_eval,
             board_themes: &self.board_themes,
@@ -3660,11 +3874,34 @@ impl eframe::App for SiliconBoardApp {
             .settings
             .panels
             .map_or(eval_panel::MIN_WIDTH, |sizes| sizes.right_width);
+        // The multi-game PGN list docks inside the right panel, under
+        // the two engine cards. The sub-panel is shown first, so it takes the
+        // space below the cards; the cards keep the rest. A row click and the
+        // Close button are handled after the panel closes.
+        let mut list_action = pgn_panel::GameListAction::None;
+        let game_list = if self.pgn_browser_list_open {
+            self.pgn_collection.as_ref()
+        } else {
+            None
+        };
         let dashboard = egui::Panel::right("evaluation")
             .resizable(true)
             .default_size(dashboard_width)
             .min_size(eval_panel::MIN_WIDTH)
             .show(ui, |ui| {
+                if let Some(collection) = game_list {
+                    egui::Panel::bottom("pgn_games_list")
+                        .resizable(true)
+                        .default_size(360.0)
+                        .min_size(160.0)
+                        .show(ui, |ui| {
+                            list_action = pgn_panel::show_game_list_panel(
+                                ui,
+                                collection,
+                                self.pgn_browser_selected,
+                            );
+                        });
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -3673,6 +3910,11 @@ impl eframe::App for SiliconBoardApp {
                         }
                     });
             });
+        match list_action {
+            pgn_panel::GameListAction::Select(index) => self.select_pgn_game(index),
+            pgn_panel::GameListAction::Close => self.pgn_browser_list_open = false,
+            pgn_panel::GameListAction::None => {}
+        }
         self.save_panel_sizes(
             move_list.response.rect.height(),
             dashboard.response.rect.width(),
@@ -3697,6 +3939,20 @@ impl eframe::App for SiliconBoardApp {
                 DialogOutcome::Apply(control) => {
                     self.time_dialog = None;
                     self.set_time_control(control);
+                }
+            }
+        }
+
+        if let Some(dialog) = self.tablebase_dialog.as_mut() {
+            match dialog.show(&ctx) {
+                TablebaseOutcome::Open => {}
+                TablebaseOutcome::Cancel => self.tablebase_dialog = None,
+                TablebaseOutcome::Browse => {
+                    self.pick_tablebase_dirs();
+                }
+                TablebaseOutcome::Apply(value) => {
+                    self.tablebase_dialog = None;
+                    self.set_tablebase_path(&value);
                 }
             }
         }
@@ -3729,26 +3985,6 @@ impl eframe::App for SiliconBoardApp {
                 .is_some_and(|session| tournament_dialog::show_finished(&ctx, &session.status));
             if closed || self.tournament.is_none() {
                 self.tournament_finished_popup = false;
-            }
-        }
-
-        if self.pgn_browser_window_open {
-            let action = self.pgn_collection.as_ref().map(|collection| {
-                pgn_panel::show_game_list_window(
-                    &ctx,
-                    collection,
-                    self.pgn_browser_selected,
-                )
-            });
-            match action {
-                Some(pgn_panel::GameListAction::Select(index)) => {
-                    self.select_pgn_game(index)
-                }
-                Some(pgn_panel::GameListAction::Close) => {
-                    self.pgn_browser_window_open = false
-                }
-                Some(pgn_panel::GameListAction::None) => {}
-                None => self.pgn_browser_window_open = false,
             }
         }
 
@@ -3821,6 +4057,7 @@ fn action_conflicts_with_tournament(action: MenuAction) -> bool {
     matches!(
         action,
         MenuAction::NewGame
+            | MenuAction::StartFromFen
             | MenuAction::SetMode(_)
             | MenuAction::OpenTimeControl
             | MenuAction::OpenPgn
@@ -3834,6 +4071,26 @@ fn action_conflicts_with_tournament(action: MenuAction) -> bool {
             | MenuAction::OfferDraw
             | MenuAction::ClaimThreefold
     )
+}
+
+/// The settings map handed to a freshly attached engine: the slot's own saved
+/// option values, with the global `SyzygyPath` overlaid — inserted when
+/// tablebases are configured and removed when they are cleared, so a stale
+/// value saved for an engine file cannot survive the clearing.
+fn engine_startup_settings(
+    saved: &BTreeMap<String, String>,
+    tablebase_path: &Option<String>,
+) -> BTreeMap<String, String> {
+    let mut map = saved.clone();
+    match tablebase_path {
+        Some(path) => {
+            map.insert(tablebases::SYZYGY_PATH.to_string(), path.clone());
+        }
+        None => {
+            map.remove(tablebases::SYZYGY_PATH);
+        }
+    }
+    map
 }
 
 /// `White` or `Black`, as shown to the user.
@@ -3978,7 +4235,7 @@ mod tests {
     }
 
     /// Without SILICONBOARD_BOOK and without a saved book no book loads:
-    /// the workspace `books/gm2001.bin` is not picked up any more.
+    /// no workspace book is picked up automatically.
     #[test]
     fn no_book_loads_without_explicit_choice() {
         if std::env::var_os("SILICONBOARD_BOOK").is_some() {
@@ -4024,7 +4281,6 @@ mod tests {
 mod game_flow_tests {
     use super::*;
     use crate::chess::clock::TimeControl;
-    use crate::chess::opening_book::PolyglotBook;
     use crate::engine::{AnalysisStatus, EngineHost, EngineProcess, SearchGoal};
     use crate::tournament::{BookOrder, OpeningBookConfig};
 
@@ -4091,6 +4347,101 @@ mod game_flow_tests {
     }
 
     #[test]
+    fn starting_from_a_fen_plays_engine_vs_engine_with_a_pgn_start_position() {
+        let mut app = app_with_two_engines();
+        let ctx = egui::Context::default();
+        let fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2";
+        app.fen_input = fen.to_string();
+
+        app.perform(MenuAction::StartFromFen, &ctx);
+
+        assert_eq!(app.mode, GameMode::EngineVsEngine, "two engines play");
+        assert!(app.game_started, "the game starts without a separate Start press");
+        assert_eq!(app.game.fen(), fen, "the board keeps the FEN position");
+        let text = pgn::to_pgn(&app.game, None);
+        assert!(text.contains("[SetUp \"1\"]"), "PGN: {text}");
+        assert!(
+            text.contains("[FEN \"rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2\"]"),
+            "PGN: {text}"
+        );
+    }
+
+    #[test]
+    fn starting_from_an_invalid_fen_changes_nothing() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.fen_input = "not a FEN".to_string();
+
+        app.perform(MenuAction::StartFromFen, &egui::Context::default());
+
+        assert_eq!(app.mode, GameMode::Analysis, "the mode is unchanged");
+        assert!(!app.game_started);
+        assert!(app.status.contains("Invalid FEN"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn starting_from_a_fen_needs_both_engines_loaded() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.fen_input = "8/8/8/4k3/8/8/2Q5/2K5 w - - 0 1".to_string();
+
+        app.perform(MenuAction::StartFromFen, &egui::Context::default());
+
+        assert!(!app.game_started);
+        assert_eq!(app.mode, GameMode::Analysis, "nothing started");
+        assert!(
+            app.status.contains("Load engine A and B first"),
+            "status: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn the_engine_cards_offer_the_known_engines() {
+        let mut app = app_with_two_engines();
+        app.settings.engine_history = vec![PathBuf::from("/opt/other-engine")];
+        let summary = app.eval_summary();
+        assert!(
+            summary.engine_choices.iter().any(|choice| choice.path == Path::new("/opt/other-engine")),
+            "the card pulldown lists the remembered engines"
+        );
+        assert!(
+            summary.cards.iter().all(|card| card.binary_path.is_some()),
+            "each card knows the file it runs"
+        );
+
+        // Choosing the engine that is already in the slot does not restart it.
+        app.perform(
+            MenuAction::ChooseEngine { slot: 0, choice: 0 },
+            &egui::Context::default(),
+        );
+        assert!(!app.engine_loading[0], "the same engine is not reloaded");
+    }
+
+    #[test]
+    fn the_engine_history_is_newest_first_deduplicated_and_bounded() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.remember_engine(Path::new("/opt/a"));
+        app.remember_engine(Path::new("/opt/b"));
+        app.remember_engine(Path::new("/opt/a"));
+        assert_eq!(
+            app.settings.engine_history,
+            vec![PathBuf::from("/opt/a"), PathBuf::from("/opt/b")],
+            "newest first, no duplicate"
+        );
+
+        for i in 0..settings::ENGINE_HISTORY_LIMIT + 5 {
+            app.remember_engine(Path::new(&format!("/opt/engine-{i}")));
+        }
+        assert_eq!(
+            app.settings.engine_history.len(),
+            settings::ENGINE_HISTORY_LIMIT,
+            "the history stays bounded"
+        );
+    }
+
+    #[test]
     fn the_engine_rests_while_the_human_is_to_move() {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
@@ -4110,9 +4461,8 @@ mod game_flow_tests {
     fn book_replies_stop_after_the_opening_depth() {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
-        let book = PolyglotBook::open(std::path::Path::new("../books/gm2001.bin"))
-            .expect("the workspace fixture books/gm2001.bin must be present");
-        app.book = Some(("gm2001.bin".to_string(), book));
+        let book = crate::chess::opening_book::sample_start_book();
+        app.book = Some(("sample.bin".to_string(), book));
         app.book_in_games = true; // the user switched book play on
         app.mode = GameMode::EngineVsEngine;
         app.game_started = true;
@@ -4535,7 +4885,7 @@ mod game_flow_tests {
             Some(2)
         );
         assert_eq!(app.pgn_browser_selected, 0);
-        assert!(app.pgn_browser_window_open, "the PGN games window opens");
+        assert!(app.pgn_browser_list_open, "the PGN games list opens");
         assert_eq!(app.game.total_plies(), 2, "the first game is loaded");
         assert_eq!(
             app.game.history()[0].san.to_string(),
@@ -4549,12 +4899,32 @@ mod game_flow_tests {
         assert_eq!(app.game.history()[0].san.to_string(), "d4");
         assert_eq!(app.result_text().as_deref(), Some("Black won (from PGN)"));
 
+        // Analysis only is the browsing mode: the PGN browser stays open.
         app.set_mode(GameMode::Analysis);
         assert!(
             app.pgn_collection.is_some(),
-            "choosing a mode keeps the PGN browser open"
+            "choosing Analysis only keeps the PGN browser open"
         );
-        assert!(app.pgn_browser_window_open);
+        assert!(app.pgn_browser_list_open);
+
+        // Any play mode is a game of its own and closes the browser.
+        app.set_mode(GameMode::EngineVsEngine);
+        assert!(
+            app.pgn_collection.is_none(),
+            "choosing a play mode closes the PGN browser"
+        );
+        assert!(!app.pgn_browser_list_open);
+
+        // The list can be shown again after a mode change, and a new game
+        // closes it as well.
+        app.pgn_collection = Some(pgn::parse_pgn_collection(text).unwrap());
+        app.pgn_browser_list_open = true;
+        app.perform(MenuAction::NewGame, &egui::Context::default());
+        assert!(
+            app.pgn_collection.is_none(),
+            "a new game closes the PGN browser"
+        );
+        assert!(!app.pgn_browser_list_open);
     }
 
     #[test]
@@ -4749,5 +5119,79 @@ mod game_flow_tests {
         app.perform(MenuAction::NewGame, &egui::Context::default());
         let names: Vec<String> = app.player_bars().iter().map(|bar| bar.name.clone()).collect();
         assert_eq!(names, vec!["Black".to_string(), "White".to_string()], "a new game drops the PGN names");
+    }
+
+    #[test]
+    fn applying_tablebases_keeps_the_path_and_removes_stale_per_engine_values() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        // An engine file with its own (stale) saved SyzygyPath.
+        app.settings.engine_options
+            .entry("/opt/sf/stockfish".into())
+            .or_default()
+            .insert(tablebases::SYZYGY_PATH.into(), "/stale".into());
+        app.engine_settings[0].insert(tablebases::SYZYGY_PATH.into(), "/stale".into());
+
+        app.set_tablebase_path(" /tb/5:/tb/6 ");
+        assert_eq!(
+            app.settings.tablebase_path.as_deref(),
+            Some("/tb/5:/tb/6"),
+            "the trimmed string is kept as one global setting"
+        );
+        assert_eq!(app.engine_settings[0].get(tablebases::SYZYGY_PATH).map(String::as_str), Some("/tb/5:/tb/6"));
+        assert!(
+            !app.settings.engine_options["/opt/sf/stockfish"].contains_key(tablebases::SYZYGY_PATH),
+            "a stale per-engine value must not override the global one"
+        );
+
+        app.set_tablebase_path("   ");
+        assert_eq!(app.settings.tablebase_path, None, "an empty string clears the tablebases");
+        assert!(
+            !app.engine_settings[0].contains_key(tablebases::SYZYGY_PATH),
+            "a cold restart of an engine gets no path again"
+        );
+    }
+
+    #[test]
+    fn the_tablebase_dialog_opens_from_the_menu_and_applies_the_draft() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        app.perform(MenuAction::OpenTablebases, &ctx);
+        assert!(app.tablebase_dialog.is_some(), "the menu item opens the dialog");
+        assert_eq!(app.tablebase_dialog.as_ref().unwrap().draft(), "", "no tablebases yet");
+
+        app.tablebase_dialog = Some(TablebaseDialog::new(Some("/tb/5:/tb/6")));
+        assert_eq!(
+            app.tablebase_dialog.as_ref().unwrap().draft(),
+            "/tb/5:/tb/6",
+            "the dialog starts from the current setting"
+        );
+        app.tablebase_dialog
+            .as_mut()
+            .unwrap()
+            .set_draft_dirs(["/tb/5", "/tb/6"]);
+        assert_eq!(
+            app.tablebase_dialog.as_ref().unwrap().draft(),
+            tablebases::join_paths(["/tb/5", "/tb/6"])
+        );
+    }
+
+    #[test]
+    fn the_tablebase_path_overlays_the_engine_settings_at_attach() {
+        let mut saved = BTreeMap::new();
+        saved.insert("Hash".to_string(), "256".to_string());
+        saved.insert(tablebases::SYZYGY_PATH.to_string(), "/stale".to_string());
+
+        let with = engine_startup_settings(&saved, &Some("/tb/5:/tb/6".to_string()));
+        assert_eq!(with.get(tablebases::SYZYGY_PATH).map(String::as_str), Some("/tb/5:/tb/6"));
+        assert_eq!(with.get("Hash").map(String::as_str), Some("256"), "the engine's own values survive");
+
+        let without = engine_startup_settings(&saved, &None);
+        assert!(
+            !without.contains_key(tablebases::SYZYGY_PATH),
+            "a cleared tablebase path is not handed to a fresh engine"
+        );
+        assert_eq!(without.get("Hash").map(String::as_str), Some("256"));
     }
 }

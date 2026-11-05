@@ -1,6 +1,6 @@
 //! Tournament configuration window and the running/finished dialogs.
 //!
-//! The layout follows the owner's "Engine match" screenshot, drawn with the
+//! The layout follows a classic engine-match dialog, drawn with the
 //! app's dark egui palette: engines at the top, then the clock, match details,
 //! opening book, adjudication and the PGN destination. The dialog edits a
 //! draft and reports a [`TournamentAction`]; the app owns the real settings and
@@ -440,11 +440,15 @@ impl TournamentDialog {
             );
         });
         row(ui, "Match title", |ui| {
-            ui.add(
+            let id = ui.make_persistent_id("match_title");
+            let selection = crate::gui::text_field::selection_before(ui, id);
+            let response = ui.add(
                 TextEdit::singleline(&mut self.config.event_name)
+                    .id(id)
                     .desired_width(360.0)
                     .hint_text("Engine match"),
             );
+            crate::gui::text_field::after_edit(ui, id, &mut self.config.event_name, selection, &response);
         });
         ui.add_space(8.0);
         None
@@ -456,11 +460,15 @@ impl TournamentDialog {
         section_heading(ui, "Opening books");
         ui.horizontal(|ui| {
             ui.add_sized([LABEL_WIDTH, FIELD_HEIGHT], egui::Label::new("Book file"));
-            ui.add(
+            let id = ui.make_persistent_id("tournament_book_path");
+            let selection = crate::gui::text_field::selection_before(ui, id);
+            let response = ui.add(
                 TextEdit::singleline(&mut self.book_path)
+                    .id(id)
                     .desired_width(340.0)
                     .hint_text("optional .epd or .bin file"),
             );
+            crate::gui::text_field::after_edit(ui, id, &mut self.book_path, selection, &response);
             if ui
                 .add(Button::new("Browse…").min_size(Vec2::new(88.0, FIELD_HEIGHT)))
                 .clicked()
@@ -482,12 +490,15 @@ impl TournamentDialog {
                 [LABEL_WIDTH, FIELD_HEIGHT],
                 egui::Label::new("Move book (.bin)"),
             );
-            ui.add(
+            let id = ui.make_persistent_id("tournament_move_book_path");
+            let selection = crate::gui::text_field::selection_before(ui, id);
+            let response = ui.add(
                 TextEdit::singleline(&mut self.move_book_path)
+                    .id(id)
                     .desired_width(340.0)
                     .hint_text("optional PolyGlot moves"),
             );
-            if ui
+            crate::gui::text_field::after_edit(ui, id, &mut self.move_book_path, selection, &response);            if ui
                 .add(Button::new("Browse…").min_size(Vec2::new(88.0, FIELD_HEIGHT)))
                 .clicked()
             {
@@ -600,11 +611,15 @@ impl TournamentDialog {
         section_heading(ui, "PGN output");
         ui.horizontal(|ui| {
             ui.add_sized([LABEL_WIDTH, FIELD_HEIGHT], egui::Label::new("Save games to"));
-            ui.add(
+            let id = ui.make_persistent_id("tournament_pgn_path");
+            let selection = crate::gui::text_field::selection_before(ui, id);
+            let response = ui.add(
                 TextEdit::singleline(&mut self.pgn_path)
+                    .id(id)
                     .desired_width(340.0)
-                    .hint_text("tournament/engine-match.pgn"),
+                    .hint_text("~/Documents/SiliconBoard/engine-match.pgn"),
             );
+            crate::gui::text_field::after_edit(ui, id, &mut self.pgn_path, selection, &response);
             if ui
                 .add(Button::new("Browse…").min_size(Vec2::new(88.0, FIELD_HEIGHT)))
                 .clicked()

@@ -104,84 +104,70 @@ pub fn show(
     }
 }
 
-/// What the PGN games window asked for this frame.
+/// What the PGN games list asked for this frame.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum GameListAction {
     /// Nothing changed.
     None,
     /// Load the game at this zero-based index.
     Select(usize),
-    /// The user closed the window.
+    /// The user pressed **Close**.
     Close,
 }
 
-/// A movable window listing every game in a multi-game PGN. Clicking a row
-/// loads that game into the normal bottom move list; the window stays open so
-/// another game can be picked.
-pub fn show_game_list_window(
-    ctx: &egui::Context,
+/// Smallest full width of the game table. When the list is narrower than this,
+/// it keeps the table at this width and shows a horizontal scrollbar instead
+/// of squeezing the columns.
+const MIN_TABLE_WIDTH: f32 = 900.0;
+
+/// The multi-game PGN list docked inside the right dashboard, below the two
+/// engine cards. A title strip names the collection and carries the
+/// **Close** button; clicking a row loads that game into the normal bottom
+/// move list, and the list stays open so another game can be picked.
+pub fn show_game_list_panel(
+    ui: &mut Ui,
     collection: &PgnCollection,
     selected: usize,
 ) -> GameListAction {
     let mut action = GameListAction::None;
-    let mut open = true;
-    let mut close_clicked = false;
-    egui::Window::new("PGN games")
-        .collapsible(false)
-        .resizable(true)
-        .default_width(900.0)
-        .min_width(700.0)
-        .default_pos(ctx.content_rect().left_top() + egui::vec2(80.0, 80.0))
-        .open(&mut open)
-        .show(ctx, |ui| {
-            let bar_width = ui.available_width();
-            let (bar_rect, _) = ui.allocate_exact_size(
-                egui::vec2(bar_width, 38.0),
-                egui::Sense::hover(),
-            );
-            ui.painter().rect_filled(bar_rect, 0.0, theme::TOOLBAR_BG);
-            let inner = bar_rect.shrink2(egui::vec2(8.0, 6.0));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} — {} games",
-                            collection.name,
-                            collection.games.len()
-                        ))
-                        .size(15.0)
-                        .strong(),
-                    );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new("Close")
-                                        .min_size(egui::vec2(80.0, 26.0)),
-                                )
-                                .clicked()
-                            {
-                                close_clicked = true;
-                            }
-                        },
-                    );
-                });
-            });
-            ui.label(
-                RichText::new("Click a game to load it in the move list below.")
-                    .size(12.0)
-                    .color(theme::MUTED),
-            );
-            ui.separator();
 
-            let list_action = game_list(ui, collection, selected);
-            if list_action != GameListAction::None {
-                action = list_action;
-            }
+    // Title strip: collection name and game count on the left, Close on the
+    // right.
+    let bar_width = ui.available_width();
+    let (bar_rect, _) =
+        ui.allocate_exact_size(egui::vec2(bar_width, 38.0), egui::Sense::hover());
+    ui.painter().rect_filled(bar_rect, 0.0, theme::TOOLBAR_BG);
+    let inner = bar_rect.shrink2(egui::vec2(8.0, 6.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} — {} games",
+                    collection.name,
+                    collection.games.len()
+                ))
+                .size(15.0)
+                .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new("Close").min_size(egui::vec2(80.0, 26.0)))
+                    .clicked()
+                {
+                    action = GameListAction::Close;
+                }
+            });
         });
-    if !open || close_clicked {
-        return GameListAction::Close;
+    });
+    ui.label(
+        RichText::new("Click a game to load it in the move list below.")
+            .size(12.0)
+            .color(theme::MUTED),
+    );
+
+    let list_action = game_list(ui, collection, selected);
+    if list_action != GameListAction::None {
+        action = list_action;
     }
     action
 }
@@ -189,8 +175,9 @@ pub fn show_game_list_window(
 /// The game list itself. Returns the selected game, if one was clicked.
 ///
 /// This is a plain scrollable list rather than a table: every row spans the
-/// full window width, the columns are distributed across that width, and the
-/// whole row is clickable.
+/// full table width, the columns are distributed across that width, and the
+/// whole row is clickable. The list scrolls vertically and horizontally; the
+/// column captions stay put while the rows scroll under them.
 fn game_list(ui: &mut Ui, collection: &PgnCollection, selected: usize) -> GameListAction {
     let mut action = GameListAction::None;
     let header_height = 24.0;
@@ -202,33 +189,34 @@ fn game_list(ui: &mut Ui, collection: &PgnCollection, selected: usize) -> GameLi
         .iter()
         .any(|game| !game.termination.is_empty());
 
-    let width = ui.available_width();
-    let (header_rect, _) =
-        ui.allocate_exact_size(egui::vec2(width, header_height), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(header_rect, 0.0, theme::TOOLBAR_BG);
+    let content_width = ui.available_width().max(MIN_TABLE_WIDTH);
+    #[cfg(test)]
+    LAST_LIST_WIDTH.store(content_width as u32, std::sync::atomic::Ordering::Relaxed);
     let mut headers = vec!["#", "White", "Black", "Result"];
     if show_termination {
         headers.push("Termination");
     }
     headers.extend(["Date", "Event"]);
-    paint_list_row(
-        ui,
-        header_rect,
-        &column_widths(width, show_termination),
-        &headers,
-        theme::TEXT,
-    );
-    #[cfg(test)]
-    LAST_LIST_WIDTH.store(width as u32, std::sync::atomic::Ordering::Relaxed);
+
+    // Reserve the caption strip. The captions are painted after the table
+    // below, shifted by the table's horizontal scroll offset, so they stay in
+    // step with the columns while the rows scroll under the strip.
+    let width = ui.available_width();
+    let (header_rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, header_height), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(header_rect, 0.0, theme::TOOLBAR_BG);
 
     ui.separator();
 
-    egui::ScrollArea::vertical()
+    let out = egui::ScrollArea::both()
+        .id_salt("pgn_games_table")
         .auto_shrink([false, false])
-        .max_height(500.0)
         .show_rows(ui, row_height, collection.games.len(), |ui, rows| {
-            let width = ui.available_width();
+            // Keep the table wider than the strip could ever squeeze it, so
+            // the horizontal scrollbar appears instead of shrinking a column.
+            ui.set_min_width(MIN_TABLE_WIDTH);
+            let width = ui.available_width().max(MIN_TABLE_WIDTH);
             let widths = column_widths(width, show_termination);
             for index in rows {
                 let entry = &collection.games[index];
@@ -264,7 +252,7 @@ fn game_list(ui: &mut Ui, collection: &PgnCollection, selected: usize) -> GameLi
                     cells.push(entry.termination.as_str());
                 }
                 cells.extend([date, entry.event.as_str()]);
-                paint_list_row(ui, rect, &widths, &cells, theme::TEXT);
+                paint_list_row(ui, rect, &widths, &cells, theme::TEXT, 0.0);
 
                 if response.clicked() {
                     action = GameListAction::Select(index);
@@ -272,6 +260,17 @@ fn game_list(ui: &mut Ui, collection: &PgnCollection, selected: usize) -> GameLi
                 response.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
         });
+
+    // The column captions, painted over the reserved strip and moved by the
+    // table's horizontal offset, so they always label the visible columns.
+    paint_list_row(
+        ui,
+        header_rect,
+        &column_widths(content_width, show_termination),
+        &headers,
+        theme::TEXT,
+        out.state.clamped_offset().x,
+    );
 
     action
 }
@@ -295,18 +294,20 @@ fn column_widths(total: f32, show_termination: bool) -> Vec<f32> {
     }
 }
 
-/// Draw one row of the list. Text is clipped to its column so long names do not
-/// run into the next column.
+/// Draw one row of the list. Text is clipped to its column so long names do
+/// not run into the next column. `offset_x` shifts the row left by the table's
+/// horizontal scroll offset; the data rows pass `0.0`.
 fn paint_list_row(
     ui: &Ui,
     rect: egui::Rect,
     widths: &[f32],
     cells: &[&str],
     color: egui::Color32,
+    offset_x: f32,
 ) {
     let painter = ui.painter();
     let font = egui::FontId::proportional(14.0);
-    let mut x = rect.left();
+    let mut x = rect.left() - offset_x;
     for (text, width) in cells.iter().zip(widths.iter()) {
         let cell = egui::Rect::from_min_max(
             egui::pos2(x, rect.top()),
@@ -392,23 +393,46 @@ mod tests {
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| {
-            let _ = show_game_list_window(ui.ctx(), &collection, 0);
+            let _ = show_game_list_panel(ui, &collection, 0);
         });
         output.textures_delta.clear();
         let width = LAST_LIST_WIDTH.load(std::sync::atomic::Ordering::Relaxed);
-        println!("PGN window table width: {width}");
-        assert!(width > 700, "the table must span the window, got {width}");
+        println!("PGN games list table width: {width}");
+        assert!(width > 700, "the table must span the panel, got {width}");
     }
 
     #[test]
-    fn the_game_list_fills_the_available_width() {
+    fn the_game_list_fills_the_available_width_or_scrolls() {
         let text = "[Event \"One\"]\n[White \"A\"]\n[Black \"B\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n\n[Event \"Two\"]\n[White \"C\"]\n[Black \"D\"]\n[Result \"0-1\"]\n\n1. d4 d5 0-1\n";
         let collection = crate::chess::pgn::parse_pgn_collection(text).unwrap();
         let ctx = egui::Context::default();
+
+        // A panel that is wide enough: the table spans all of it.
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(900.0, 600.0),
+                egui::vec2(1200.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ui.set_width(1200.0);
+            let action = game_list(ui, &collection, 0);
+            assert_eq!(action, GameListAction::None);
+        });
+        output.textures_delta.clear();
+        let width = LAST_LIST_WIDTH.load(std::sync::atomic::Ordering::Relaxed) as f32;
+        assert!(
+            (width - 1200.0).abs() < 30.0,
+            "the table must fill the available width, got {width}"
+        );
+
+        // A narrow panel keeps the table at its minimum width, so a
+        // horizontal scrollbar appears instead of squeezing the columns.
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
             )),
             ..Default::default()
         };
@@ -419,8 +443,9 @@ mod tests {
         output.textures_delta.clear();
         let width = LAST_LIST_WIDTH.load(std::sync::atomic::Ordering::Relaxed) as f32;
         assert!(
-            (width - 800.0).abs() < 30.0,
-            "the table must fill the available width, got {width}"
+            width >= MIN_TABLE_WIDTH,
+            "a narrow list must keep the table at its minimum width for the \
+             horizontal scrollbar, got {width}"
         );
     }
 }

@@ -4,7 +4,7 @@
 //! Phase 1 BIS refactor it is responsible for:
 //!
 //! 1. The board image (`public/images/board/<theme>` — the selected theme,
-//!    decoded once at load time; F-11 adds the picker).
+//!    decoded once at load time; the board picker comes later).
 //! 2. The twelve cburnett chess-piece sprites (`public/piece/cburnett/<w|b><K|Q|R|B|N|P>.svg`)
 //!    which we **rasterise at load time** through the `usvg`/`resvg`/`tiny-skia`
 //!    stack. That gives us vector-sharpness at any board scale on Apple
@@ -280,6 +280,31 @@ pub fn opening_data_path() -> Option<PathBuf> {
         .join("data")
         .join("openings")
         .join("openings.tsv");
+    path.is_file().then_some(path)
+}
+
+/// Path of a PGN file in the project's `PGN/` folder, next to the resolved
+/// `public/` tree (e.g. the start-up fixture `WorldChamp1972.pgn`): from the
+/// repository it is `<repo>/siliconboard/PGN/…`, from a bundle it is
+/// `Contents/Resources/PGN/…` (the packager bundles the fixture there). Both
+/// are one folder above the resolved asset root. `None` when the file is not
+/// there, so the app simply starts without the start-up game.
+pub fn project_pgn_path(file: &str) -> Option<PathBuf> {
+    let name = Path::new(file);
+    if name.components().count() != 1
+        || name
+            .extension()
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("pgn"))
+    {
+        return None;
+    }
+    project_pgn_path_from(&resolve_asset_root(), file)
+}
+
+/// Pure version of [`project_pgn_path`]: `file` is looked up in the `PGN/`
+/// folder next to the given asset root.
+fn project_pgn_path_from(asset_root: &Path, file: &str) -> Option<PathBuf> {
+    let path = asset_root.parent()?.join("PGN").join(file);
     path.is_file().then_some(path)
 }
 
@@ -965,5 +990,43 @@ mod tests {
     fn resolution_falls_back_to_cwd_public_when_nothing_matches() {
         let chosen = resolve_asset_root_from(None, None);
         assert_eq!(chosen, PathBuf::from("public"));
+    }
+
+    /// The start-up PGN fixture beside the real asset tree. Like the PolyGlot
+    /// book and engine fixtures, a missing file fails the test.
+    #[test]
+    fn the_startup_pgn_fixture_is_found() {
+        let path = project_pgn_path("WorldChamp1972.pgn")
+            .expect("the PGN/WorldChamp1972.pgn fixture must sit beside the asset tree");
+        assert!(
+            path.ends_with(Path::new("PGN").join("WorldChamp1972.pgn")),
+            "the resolved path names the PGN folder: {path:?}"
+        );
+        assert!(path.is_file(), "{path:?} must exist");
+    }
+
+    #[test]
+    fn a_pgn_path_only_accepts_a_bare_pgn_name() {
+        assert!(project_pgn_path("sub/WorldChamp1972.pgn").is_none());
+        assert!(project_pgn_path("..").is_none());
+        assert!(project_pgn_path("notes.txt").is_none());
+        assert!(project_pgn_path("missing.pgn").is_none());
+    }
+
+    /// The packaged bundle: the packager puts the fixture into
+    /// `Contents/Resources/PGN/`, one folder above the `Contents/Resources/
+    /// public` asset root.
+    #[test]
+    fn a_bundle_finds_the_startup_pgn_in_its_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = dir.path().join("SiliconBoard.app").join("Contents");
+        let public = fake_public_tree(&contents.join("Resources"));
+        let pgn = contents.join("Resources").join("PGN");
+        std::fs::create_dir_all(&pgn).unwrap();
+        std::fs::write(pgn.join("WorldChamp1972.pgn"), b"[Event \"x\"]\n").unwrap();
+
+        let found = project_pgn_path_from(&public, "WorldChamp1972.pgn").expect("bundled PGN");
+        assert_eq!(found, pgn.join("WorldChamp1972.pgn"));
+        assert!(project_pgn_path_from(&public, "Karpov.pgn").is_none());
     }
 }
