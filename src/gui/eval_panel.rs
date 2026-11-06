@@ -73,10 +73,6 @@ pub struct EvalSummary {
     /// Engines the cards' pulldowns offer: the loaded A/B files and the files
     /// used last time, as in the tournament window.
     pub engine_choices: Vec<EngineSpec>,
-    /// Side to move in the displayed position (scores are relative to it).
-    pub white_to_move: bool,
-    /// Full-move number of the displayed position.
-    pub fullmove: u32,
     /// Outcome text, e.g. `"Unfinished"` or `"Black wins by checkmate"`.
     pub outcome: String,
     /// Opening-book moves as `(SAN, weight)`, heaviest first.
@@ -107,14 +103,7 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
     ui.add_space(6.0);
 
     for card in &summary.cards {
-        if let Some(action) = engine_card(
-            ui,
-            card,
-            &summary.engine_choices,
-            summary.white_to_move,
-            summary.fullmove,
-            summary.figurines,
-        ) {
+        if let Some(action) = engine_card(ui, card, &summary.engine_choices, summary.figurines) {
             requested = Some(action);
         }
         ui.add_space(CARD_GAP);
@@ -142,17 +131,26 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
 /// One engine card: a header row (toggle, engine pulldown, speed, metrics), a
 /// blue rule, and the score badge with the principal variation. Returns a menu
 /// action when the toggle, the pulldown or Browse is used.
+///
+/// The score and the PV belong to the position the card's engine searched —
+/// the turn and move number of *that* position decide the White-point-of-view
+/// conversion and the move numbering, not the game's current turn. Otherwise
+/// a finished engine's frozen score would flip its sign every time the other
+/// engine is on the move.
 fn engine_card(
     ui: &mut Ui,
     card: &EvalCard,
     choices: &[EngineSpec],
-    white_to_move: bool,
-    fullmove: u32,
     figurines: bool,
 ) -> Option<MenuAction> {
     let mut action = None;
     let live = card.is_live();
     let letter = slot_letter(card.slot);
+    let (search_white_to_move, search_fullmove) = card
+        .view
+        .as_ref()
+        .map(|view| (view.search_white_to_move, view.search_fullmove))
+        .unwrap_or((true, 1));
     egui::Frame::new()
         .fill(theme::CARD_BG)
         .corner_radius(4.0)
@@ -186,7 +184,10 @@ fn engine_card(
                 engine_choice_combo(ui, card, choices, name_width, &mut action);
                 if let Some(view) = card.view.as_ref().filter(|_| live) {
                     speed_pill(ui, view);
-                    let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
+                    let white_score = view
+                        .stats
+                        .score
+                        .map(|s| white_point_of_view(s, search_white_to_move));
                     let depth = view
                         .stats
                         .depth
@@ -215,9 +216,12 @@ fn engine_card(
             ui.painter().rect_filled(rule, 1.0, theme::BLUE);
             ui.add_space(6.0);
 
-            let white_score = view.stats.score.map(|s| white_point_of_view(s, white_to_move));
+            let white_score = view
+                .stats
+                .score
+                .map(|s| white_point_of_view(s, search_white_to_move));
             let badge = white_score.map_or_else(|| "--".to_string(), format_score_white);
-            let tokens = number_pv(fullmove, white_to_move, card.pv_san.as_slice());
+            let tokens = number_pv(search_fullmove, search_white_to_move, card.pv_san.as_slice());
             ui.horizontal_top(|ui| {
                 score_badge(ui, &badge);
                 ui.add_space(4.0);

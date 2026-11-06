@@ -3698,8 +3698,6 @@ impl SiliconBoardApp {
         EvalSummary {
             cards,
             engine_choices: self.engine_choices(),
-            white_to_move: self.game.turn() == PieceColor::White,
-            fullmove: self.game.fullmove_number(),
             outcome: self.result_text().unwrap_or_else(|| self.game.outcome()),
             book_moves: if tournament_active {
                 Vec::new()
