@@ -106,31 +106,57 @@ rm -rf "$verify"
 
 if [[ "$INSTALL" == 1 ]]; then
     prefix="$HOME/.local"
+    data_dir="${XDG_DATA_HOME:-$prefix/share}"
     echo "▶ Installing into $prefix"
-    # The real binary lives in share/siliconboard/bin, next to its assets
+    # The real binary lives under share/siliconboard, next to its assets
     # (the walk-up resolver and the PGN path both expect this layout); a
-    # wrapper in ~/.local/bin points there and is what PATH and the
-    # .desktop launcher use.
-    install -D "$app_dir/bin/siliconboard" "$prefix/share/siliconboard/bin/siliconboard"
-    rm -rf "$prefix/share/siliconboard/public" "$prefix/share/siliconboard/PGN"
-    cp -R "$app_dir/public" "$prefix/share/siliconboard/public"
+    # wrapper on PATH points there and is what the launcher uses.
+    install -D "$app_dir/bin/siliconboard" "$data_dir/siliconboard/bin/siliconboard"
+    rm -rf "$data_dir/siliconboard/public" "$data_dir/siliconboard/PGN"
+    cp -R "$app_dir/public" "$data_dir/siliconboard/public"
     if [[ -d "$app_dir/PGN" ]]; then
-        cp -R "$app_dir/PGN" "$prefix/share/siliconboard/PGN"
+        cp -R "$app_dir/PGN" "$data_dir/siliconboard/PGN"
     fi
-    install -D "$app_dir/share/applications/siliconboard.desktop" \
-        "$prefix/share/applications/siliconboard.desktop"
-    if [[ -f "$app_dir/share/icons/hicolor/512x512/apps/siliconboard.png" ]]; then
-        install -D "$app_dir/share/icons/hicolor/512x512/apps/siliconboard.png" \
-            "$prefix/share/icons/hicolor/512x512/apps/siliconboard.png"
-    fi
+    # Icon theme entries in the usual sizes, so the dock, the app grid and
+    # the window list all find a fitting one (MD-Viewer's build.sh is the
+    # reference recipe).
+    for size in 16 32 128 256 512; do
+        icon="assets/icon/siliconboard-$size.png"
+        if [[ -f "$icon" ]]; then
+            install -D "$icon" "$data_dir/icons/hicolor/${size}x${size}/apps/siliconboard.png"
+        else
+            echo "  ▲ $icon is missing — the dock icon may not show at every size." >&2
+        fi
+    done
+    # Desktop entry. StartupWMClass must match the Wayland app_id and the
+    # X11 WM_CLASS ("siliconboard", set in main.rs and derived from the
+    # binary name respectively). Exec carries the full path, so it works
+    # however the session's PATH is set.
+    install -D /dev/stdin "$data_dir/applications/siliconboard.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=SiliconBoard
+GenericName=Chess GUI
+Comment=Play and analyse chess with UCI engines
+Exec=$prefix/bin/siliconboard
+TryExec=$prefix/bin/siliconboard
+Icon=siliconboard
+Terminal=false
+Categories=Game;BoardGame;
+StartupWMClass=siliconboard
+StartupNotify=true
+DESKTOP
     # The wrapper is written last so it replaces an old real binary cleanly.
     install -Dm755 /dev/stdin "$prefix/bin/siliconboard" <<EOF
 #!/usr/bin/env bash
-export SILICONBOARD_PUBLIC_ROOT="\${SILICONBOARD_PUBLIC_ROOT:-$prefix/share/siliconboard/public}"
-exec "$prefix/share/siliconboard/bin/siliconboard" "\$@"
+export SILICONBOARD_PUBLIC_ROOT="\${SILICONBOARD_PUBLIC_ROOT:-$data_dir/siliconboard/public}"
+exec "$data_dir/siliconboard/bin/siliconboard" "\$@"
 EOF
     if command -v update-desktop-database > /dev/null; then
-        update-desktop-database "$prefix/share/applications" 2> /dev/null || true
+        update-desktop-database "$data_dir/applications" 2> /dev/null || true
+    fi
+    if command -v gtk-update-icon-cache > /dev/null; then
+        gtk-update-icon-cache -f -t "$data_dir/icons/hicolor" 2> /dev/null || true
     fi
     if ! [[ ":$PATH:" == *":$prefix/bin:"* ]]; then
         echo "  ▲ $prefix/bin is not on your PATH — add it to use the launcher." >&2
