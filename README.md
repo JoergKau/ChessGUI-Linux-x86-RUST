@@ -144,6 +144,12 @@ to every loaded engine — and to every engine loaded later — as the
   `/home/you/EGTB/Syzygy-3-4-5:/home/you/EGTB/Syzygy-6`.
 - Applying an empty line clears the tablebases again: the loaded engines get
   an empty path, and engines started afterwards get none.
+- **The switch:** _Engine → Tablebases in engines_ (below _Load
+  tablebases…_) turns the configured tablebases on or off — the same
+  look as _Game → Book moves in games_: greyed until a path is configured,
+  kept in the settings. Off, the loaded engines get an empty `SyzygyPath`
+  at once and engines started afterwards get none; on, they get the saved
+  path again. Applying a path in the dialog switches it on.
 - The GUI forwards the string untouched — which folder holds which files,
   and whether an engine supports tablebases at all, is the engine's
   business; a user choosing paths knows what they are doing. Look in the
