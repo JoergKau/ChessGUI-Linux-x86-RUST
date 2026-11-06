@@ -39,6 +39,11 @@ pub struct Settings {
     /// engine at start-up and while it is loaded. `None` when no tablebases
     /// are configured.
     pub tablebase_path: Option<String>,
+    /// Whether the configured tablebases are used at all
+    /// (Engine → Tablebases in engines). Off stops sending `SyzygyPath` to
+    /// the engines. Old settings without the field keep the path working.
+    #[serde(default = "default_tablebases_in_engines")]
+    pub tablebases_in_engines: bool,
     /// Whether the app writes the session log (the platform session-log
     /// folder). On by default; Engine → Session log switches it.
     pub session_log: bool,
@@ -99,6 +104,12 @@ pub fn default_game_list_height() -> f32 {
     271.0
 }
 
+/// Tablebases are used as soon as they are configured — the switch exists to
+/// turn them off again.
+fn default_tablebases_in_engines() -> bool {
+    true
+}
+
 impl Default for Settings {
     /// No clock, book play off (the menu item waits for a loaded book, which
     /// only the user loads — there is no default book), no saved engine options.
@@ -111,6 +122,7 @@ impl Default for Settings {
             book_in_games: false,
             book_path: None,
             tablebase_path: None,
+            tablebases_in_engines: default_tablebases_in_engines(),
             session_log: true,
             engine_options: BTreeMap::new(),
             engines: [None, None],

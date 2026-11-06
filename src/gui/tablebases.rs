@@ -92,6 +92,7 @@ impl TablebaseDialog {
         egui::Window::new("Load tablebases")
             .collapsible(false)
             .resizable(false)
+            .min_width(520.0)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label(
@@ -135,7 +136,11 @@ impl TablebaseDialog {
     }
 }
 
-/// The single-line, monospaced path field, the width the dialog can spare.
+/// The single-line, monospaced path field. Its width is a constant: sizing it
+/// to the width the dialog "can spare" fed an auto-size feedback loop — the
+/// auto-sized window took its width from the content, the field took its
+/// width from the window, and every layout pass grew both until the window
+/// filled the screen width.
 fn path_field(ui: &mut Ui, draft: &mut String) -> egui::Response {
     let id = ui.make_persistent_id("tablebase_path");
     let selection = crate::gui::text_field::selection_before(ui, id);
@@ -143,12 +148,16 @@ fn path_field(ui: &mut Ui, draft: &mut String) -> egui::Response {
         egui::TextEdit::singleline(draft)
             .id(id)
             .font(FontId::monospace(13.0))
-            .desired_width(ui.available_width() - ui.spacing().item_spacing.x - 80.0)
+            .desired_width(PATH_FIELD_WIDTH)
             .hint_text("/path/to/egtb"),
     );
     crate::gui::text_field::after_edit(ui, id, draft, selection, &response);
     response
 }
+
+/// Width of the path field, so the dialog is wide enough for several
+/// tablebase folders and never changes size.
+const PATH_FIELD_WIDTH: f32 = 420.0;
 
 #[cfg(test)]
 mod tests {

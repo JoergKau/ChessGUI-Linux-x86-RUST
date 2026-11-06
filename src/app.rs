@@ -962,7 +962,7 @@ impl SiliconBoardApp {
                             }
                             self.engines[slot] = Some(EngineHost::attach_with_settings(
                                 process,
-                                engine_startup_settings(&self.engine_settings[slot], &self.settings.tablebase_path),
+                                engine_startup_settings(&self.engine_settings[slot], &self.settings),
                             ));
                             self.engine_auto_restart[slot] = true;
                             self.engine_status[slot] = None;
@@ -1369,6 +1369,7 @@ impl SiliconBoardApp {
                 self.tournament_finished_popup = false;
             }
             MenuAction::ToggleSessionLog => self.toggle_session_log(),
+            MenuAction::ToggleTablebases => self.toggle_tablebases(),
         }
     }
 
@@ -2736,6 +2737,34 @@ impl SiliconBoardApp {
         });
     }
 
+    /// Switch the configured tablebases on or off (Engine → Tablebases in
+    /// engines) and keep the choice. Off stops giving the engines the
+    /// `SyzygyPath`: the loaded engines get an empty path at once, and
+    /// engines started afterwards get none.
+    fn toggle_tablebases(&mut self) {
+        self.settings.tablebases_in_engines = !self.settings.tablebases_in_engines;
+        self.save_settings();
+        let used = self.settings.tablebases_in_engines;
+        // The value the engines are given now: the saved path, or an empty
+        // one that clears theirs (as when the path is cleared in the dialog).
+        let value = if used {
+            self.settings.tablebase_path.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        for host in self.engines.iter_mut().flatten() {
+            host.set_option(tablebases::SYZYGY_PATH, &value);
+        }
+        let text = match (used, self.settings.tablebase_path.as_deref()) {
+            (true, Some(path)) => format!("Tablebases in engines: on, with {}.", path),
+            (true, None) => "Tablebases in engines: on, but no tablebases are loaded.".to_string(),
+            (false, _) => {
+                "Tablebases in engines: off; the loaded engines get no path.".to_string()
+            }
+        };
+        self.set_status(StatusLevel::Info, text);
+    }
+
     /// Apply the `SyzygyPath` string from the Load-tablebases dialog: keep
     /// it in the settings, send it to every loaded engine now, and give it
     /// to every engine started afterwards. An empty string clears the
@@ -2745,6 +2774,11 @@ impl SiliconBoardApp {
         let value = raw.trim().to_string();
         let cleared = value.is_empty();
         self.settings.tablebase_path = (!cleared).then(|| value.clone());
+        // Applying a path means using it; the switch only exists to turn the
+        // tablebases off again.
+        if !cleared {
+            self.settings.tablebases_in_engines = true;
+        }
         // The path is one global setting; a stale `SyzygyPath` saved for an
         // engine file must not override it later.
         for saved in self.settings.engine_options.values_mut() {
@@ -2759,7 +2793,13 @@ impl SiliconBoardApp {
             }
         }
         self.save_settings();
-        let sent = if cleared { "" } else { value.as_str() };
+        // The loaded engines get the path only when the switch is on; an
+        // empty string clears theirs.
+        let sent = if cleared || !self.settings.tablebases_in_engines {
+            ""
+        } else {
+            value.as_str()
+        };
         for host in self.engines.iter_mut().flatten() {
             host.set_option(tablebases::SYZYGY_PATH, sent);
         }
@@ -3742,6 +3782,7 @@ impl eframe::App for SiliconBoardApp {
             }),
             book_name: self.book.as_ref().map(|(name, _)| name.as_str()),
             tablebase_path: self.settings.tablebase_path.as_deref(),
+            tablebases_in_engines: self.settings.tablebases_in_engines,
             figurines_move_list: self.settings.figurines_move_list,
             figurines_eval: self.settings.figurines_eval,
             board_themes: &self.board_themes,
@@ -4100,16 +4141,17 @@ fn action_conflicts_with_tournament(action: MenuAction) -> bool {
 
 /// The settings map handed to a freshly attached engine: the slot's own saved
 /// option values, with the global `SyzygyPath` overlaid — inserted when
-/// tablebases are configured and removed when they are cleared, so a stale
-/// value saved for an engine file cannot survive the clearing.
-fn engine_startup_settings(
-    saved: &BTreeMap<String, String>,
-    tablebase_path: &Option<String>,
-) -> BTreeMap<String, String> {
+/// tablebases are configured and switched on, removed when they are cleared
+/// or switched off, so a stale value saved for an engine file cannot survive.
+fn engine_startup_settings(saved: &BTreeMap<String, String>, settings: &Settings) -> BTreeMap<String, String> {
     let mut map = saved.clone();
-    match tablebase_path {
+    match settings
+        .tablebase_path
+        .as_deref()
+        .filter(|_| settings.tablebases_in_engines)
+    {
         Some(path) => {
-            map.insert(tablebases::SYZYGY_PATH.to_string(), path.clone());
+            map.insert(tablebases::SYZYGY_PATH.to_string(), path.to_string());
         }
         None => {
             map.remove(tablebases::SYZYGY_PATH);
@@ -5222,15 +5264,27 @@ mod game_flow_tests {
         saved.insert("Hash".to_string(), "256".to_string());
         saved.insert(tablebases::SYZYGY_PATH.to_string(), "/stale".to_string());
 
-        let with = engine_startup_settings(&saved, &Some("/tb/5:/tb/6".to_string()));
+        let configured = settings::Settings {
+            tablebase_path: Some("/tb/5:/tb/6".to_string()),
+            ..Settings::default()
+        };
+        let with = engine_startup_settings(&saved, &configured);
         assert_eq!(with.get(tablebases::SYZYGY_PATH).map(String::as_str), Some("/tb/5:/tb/6"));
         assert_eq!(with.get("Hash").map(String::as_str), Some("256"), "the engine's own values survive");
 
-        let without = engine_startup_settings(&saved, &None);
+        let mut switched_off = configured.clone();
+        switched_off.tablebases_in_engines = false;
+        let off = engine_startup_settings(&saved, &switched_off);
         assert!(
-            !without.contains_key(tablebases::SYZYGY_PATH),
+            !off.contains_key(tablebases::SYZYGY_PATH),
+            "a switched-off tablebase path is not handed to a fresh engine"
+        );
+
+        let cleared = engine_startup_settings(&saved, &Settings::default());
+        assert!(
+            !cleared.contains_key(tablebases::SYZYGY_PATH),
             "a cleared tablebase path is not handed to a fresh engine"
         );
-        assert_eq!(without.get("Hash").map(String::as_str), Some("256"));
+        assert_eq!(cleared.get("Hash").map(String::as_str), Some("256"));
     }
 }
