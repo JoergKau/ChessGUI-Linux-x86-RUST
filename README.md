@@ -1,6 +1,7 @@
 # SiliconBoard
 
-A native **macOS (Apple Silicon) UCI chess GUI** written in Rust. The layout
+A native **macOS (Apple Silicon) UCI chess GUI** written in Rust, ported to
+**Linux** on the `linux` branch. The layout
 takes its cues from the Nibbler analysis GUI: board on the left, live engine
 analysis on the right, move list along the bottom, and a flat toolbar across
 the top.
@@ -62,10 +63,33 @@ shasum -a 256 SiliconBoard-1.0.0-macos-arm64.zip
 
 ## Requirements
 
-- macOS on Apple Silicon (other platforms are out of scope for now)
+- macOS on Apple Silicon, **or Linux on x86-64/aarch64** (X11 or Wayland;
+  a Vulkan-capable GPU driver, or llvmpipe as a software fallback)
 - Rust 2021 edition (`cargo`)
 - At least one **UCI engine** of your choice — SiliconBoard ships none; see
   the next section to install one
+
+On Debian/Ubuntu, building the Linux version needs the usual GUI development
+packages (rfd's file dialogs use GTK 3, wgpu uses Vulkan):
+
+```shell
+sudo apt install build-essential pkg-config libgtk-3-dev \
+    libvulkan-dev vulkan-tools
+```
+
+At runtime the desktop session usually provides everything; on a minimal
+setup install `libgtk-3-0` and a Vulkan loader such as
+`libvulkan1` (or Mesa's).
+
+## Where the files live (Linux)
+
+- **Settings:** `~/.config/siliconboard/settings.json` (XDG; macOS keeps
+  `~/Library/Application Support/SiliconBoard/`)
+- **Session logs:** `~/.local/state/siliconboard/logs/` (macOS keeps
+  `~/Library/Logs/SiliconBoard/`)
+- **Default match PGN:** `~/Documents/SiliconBoard/engine-match.pgn`
+- The `SILICONBOARD_SETTINGS` and `SILICONBOARD_LOG_FILE` environment
+  variables override the first two, as on macOS.
 
 ## Loading a UCI engine (example: Stockfish)
 
@@ -79,10 +103,11 @@ which are sent again after a restart and restored at the next launch.
 
 Installing the free Stockfish:
 
-1. Download from <https://stockfishchess.org/download/> (the macOS build).
-2. Unpack the file; the UCI binary inside is
+1. On Linux: `sudo apt install stockfish` (the binary lands in
+   `/usr/games/stockfish`). On macOS: download from
+   <https://stockfishchess.org/download/>, unpack, the UCI binary is
    `stockfish-macos-universal`.
-3. In the GUI, _Engine → Load engine A…_ and point it at that binary.
+2. In the GUI, _Engine → Load engine A…_ and point it at that binary.
 
 The process is the same for any other UCI engine: unpack it and point the
 menu at its executable.
@@ -195,6 +220,36 @@ launch you still load the rest:
    wherever their binaries live (e.g. `~/engines/`).
 3. For opening-book play in games, load your book once via _Engine → Load
    PolyGlot book…_ — the choice is remembered across starts.
+
+## Release as a Linux folder and tarball
+
+```shell
+./package-linux.sh
+```
+
+The script runs `cargo build --release`, then assembles
+`SiliconBoard-<version>-linux-<arch>/` in the repository root: the binary in
+`bin/`, the asset tree in `public/` and the start-up PGN in `PGN/` — the
+layout the resolver finds by walking up from the executable (unit-tested in
+`src/assets.rs`) — plus a `.desktop` launcher, the menu icon, `LICENSE` and
+`README.md`. It packs the folder into
+`SiliconBoard-<version>-linux-<arch>.tar.gz`, verifies the tarball by
+unpacking it again, and prints the SHA-256 for the release listing. The
+tarball is a build artefact and stays out of git.
+
+**Install locally:** `./package-linux.sh --install` puts the binary under
+`~/.local/share/siliconboard/bin/` (next to its assets, under
+`~/.local/share/siliconboard/`), a wrapper on `$PATH` at
+`~/.local/bin/siliconboard`, and the launcher and icon into
+`~/.local/share/` — after that SiliconBoard starts from the desktop menu.
+Without `--install` nothing is installed and the assembled folder is simply
+left in the repository.
+
+To run straight from the folder:
+
+```shell
+SiliconBoard-1.0.0-linux-x86_64/bin/siliconboard
+```
 
 ## Development
 

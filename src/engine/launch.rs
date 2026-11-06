@@ -3,10 +3,10 @@
 //!
 //! The user may point at a program, or at a launcher script that starts one
 //! (a shell script, a Java launcher, a Python wrapper). Both are accepted. A
-//! file that cannot run on this Mac is refused with the reason, before any
-//! process is started. Engines also run with the usual tool folders on `PATH`
-//! (Finder gives an app only a minimal one), and from their own folder, since
-//! many engines load their data files relative to it.
+//! file that cannot run on this system is refused with the reason, before any
+//! process is started. Engines also run with the usual tool folders on
+//! `PATH` (a desktop launch may give the app only a minimal one), and from
+//! their own folder, since many engines load their data files relative to it.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -16,15 +16,19 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::protocol::EngineError;
 
-/// Folders an engine may need on `PATH` that a Finder launch does not have.
+/// Folders an engine may need on `PATH` that a GUI launch from a desktop
+/// environment or a minimal shell may not have.
+#[cfg(target_os = "macos")]
 const TOOL_FOLDERS: [&str; 6] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+#[cfg(not(target_os = "macos"))]
+const TOOL_FOLDERS: [&str; 5] = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 /// How many recent stderr lines are kept for a failure report.
 const STDERR_KEPT: usize = 5;
 
-/// Reject anything that cannot be started as an engine on this Mac, with the
-/// reason. A launcher script passes when its interpreter exists; whether the
-/// file really speaks UCI is decided by the handshake.
+/// Reject anything that cannot be started as an engine on this system, with
+/// the reason. A launcher script passes when its interpreter exists; whether
+/// the file really speaks UCI is decided by the handshake.
 pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
     let fail = |reason: String| EngineError::SpawnFailed {
         binary: Some(binary.to_path_buf()),
@@ -46,9 +50,13 @@ pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
     })?;
     match program_kind(&head) {
         ProgramKind::Script => check_interpreter(&head).map_err(fail),
-        ProgramKind::MachO => Ok(()),
-        ProgramKind::Foreign(what) => Err(fail(format!("it is {what}, which this Mac cannot run"))),
-        ProgramKind::Unknown => Err(fail("it is not a program this Mac can run".to_string())),
+        ProgramKind::Native => Ok(()),
+        ProgramKind::Foreign(what) => Err(fail(format!(
+            "it is {what}, which this system cannot run"
+        ))),
+        ProgramKind::Unknown => Err(fail(
+            "it is not a program this system can run".to_string()
+        )),
     }
 }
 
@@ -57,8 +65,8 @@ pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
 enum ProgramKind {
     /// A `#!` script; its interpreter is checked separately.
     Script,
-    /// A native macOS program (thin or universal).
-    MachO,
+    /// A native program for this operating system (thin or universal).
+    Native,
     /// A program or archive for another system, with a short name for it.
     Foreign(&'static str),
     /// Anything else (a text file, a document, a picture).
@@ -75,10 +83,26 @@ fn program_kind(head: &[u8]) -> ProgramKind {
     ];
     if head.starts_with(b"#!") {
         ProgramKind::Script
-    } else if head.len() >= 4 && MACH_O.iter().any(|magic| head[..4] == *magic) {
-        ProgramKind::MachO
     } else if head.starts_with(b"\x7fELF") {
-        ProgramKind::Foreign("a Linux program")
+        // Native on Linux; on macOS an ELF file cannot run.
+        #[cfg(target_os = "linux")]
+        {
+            ProgramKind::Native
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            ProgramKind::Foreign("a Linux program")
+        }
+    } else if MACH_O.iter().any(|magic| head.len() >= 4 && head[..4] == *magic) {
+        // Native on macOS; on Linux a Mach-O file cannot run.
+        #[cfg(target_os = "macos")]
+        {
+            ProgramKind::Native
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ProgramKind::Foreign("a macOS program")
+        }
     } else if head.starts_with(b"MZ") {
         ProgramKind::Foreign("a Windows program")
     } else if head.starts_with(b"PK\x03\x04") {
@@ -204,8 +228,19 @@ mod tests {
         let jar = write_file(dir.path(), "engine.jar", b"PK\x03\x04rest", 0o755);
         let err = check_executable(&jar).unwrap_err().to_string();
         assert!(err.contains("Java archive"), "{err}");
-        let linux = write_file(dir.path(), "engine-linux", b"\x7fELF\x02\x01", 0o755);
-        assert!(check_executable(&linux).unwrap_err().to_string().contains("Linux program"));
+        // The format of another operating system is refused with its name.
+        #[cfg(target_os = "linux")]
+        {
+            let macho = write_file(dir.path(), "engine-mac", &[0xCF, 0xFA, 0xED, 0xFE], 0o755);
+            let err = check_executable(&macho).unwrap_err().to_string();
+            assert!(err.contains("macOS program"), "{err}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let linux = write_file(dir.path(), "engine-linux", b"\x7fELF\x02\x01", 0o755);
+            let err = check_executable(&linux).unwrap_err().to_string();
+            assert!(err.contains("Linux program"), "{err}");
+        }
         let windows = write_file(dir.path(), "engine.exe", b"MZ\x90\x00", 0o755);
         assert!(check_executable(&windows).unwrap_err().to_string().contains("Windows program"));
         let text = write_file(dir.path(), "notes", b"just words\n", 0o755);
@@ -238,9 +273,8 @@ mod tests {
     fn the_engine_path_keeps_the_app_path_and_adds_the_tool_folders() {
         let path = engine_path();
         let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
-        assert!(folders.contains(&PathBuf::from("/opt/homebrew/bin")));
-        assert!(folders.contains(&PathBuf::from("/usr/bin")));
         for tool in TOOL_FOLDERS {
+            assert!(folders.contains(&PathBuf::from(tool)), "{tool} is missing");
             let count = folders.iter().filter(|folder| folder.as_os_str() == tool).count();
             assert!(count <= 1, "{tool} is listed {count} times");
         }

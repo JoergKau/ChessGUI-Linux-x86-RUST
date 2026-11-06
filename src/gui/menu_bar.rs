@@ -72,6 +72,9 @@ pub enum MenuAction {
     StopTournament,
     /// Tournament → Show tournament: reopen the tournament window.
     ShowTournament,
+    /// View → About SiliconBoard…: show the in-app About window (Linux; the
+    /// macOS panel is provided by the system menu instead).
+    ShowAbout,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
     /// Stop: stop all searches. Engines stay loaded and can be started again.
@@ -298,7 +301,10 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
             ui.separator();
             let session_log = ui
                 .add(egui::Button::selectable(state.session_log, "Session log"))
-                .on_hover_text("Write the session log to ~/Library/Logs/SiliconBoard");
+                .on_hover_text(format!(
+                    "Write the session log to {}",
+                    crate::logging::log_folder_for_display()
+                ));
             if session_log.clicked() {
                 action = Some(MenuAction::ToggleSessionLog);
                 ui.close();
@@ -406,6 +412,15 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 .on_disabled_hover_text("No tournament has been run yet.");
             if show.clicked() {
                 action = Some(MenuAction::ShowTournament);
+                ui.close();
+            }
+        });
+        // macOS gets the About panel from the system application menu
+        // (macos_about.rs); without that menu, offer the in-app window.
+        #[cfg(not(target_os = "macos"))]
+        ui.menu_button("Help", |ui| {
+            if ui.button("About SiliconBoard…").clicked() {
+                action = Some(MenuAction::ShowAbout);
                 ui.close();
             }
         });

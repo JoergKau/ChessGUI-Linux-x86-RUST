@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use crate::chess::clock::{Clock, TimeControl};
 use crate::chess::game_state::{Ending, MoveLine};
 use crate::chess::opening_book::BookPicker;
+use crate::about;
 use crate::chess::openings::{OpeningError, OpeningNames};
 use crate::chess::pgn::{self, PgnCollection, PgnError, PgnImport};
 use crate::chess::players::{accepts_draw, GameMode, Seat};
@@ -492,6 +493,9 @@ pub struct SiliconBoardApp {
     engine_settings: [BTreeMap<String, String>; 2],
     /// The engine options window, while it is open.
     options_dialog: Option<OptionsDialog>,
+    /// The in-app About window, while it is open (Linux; macOS uses the
+    /// system About panel).
+    about_open: bool,
     /// The slot whose engine is evaluating a pending draw offer.
     draw_offer: Option<usize>,
     /// What is kept between runs. Changed here and written back on each change.
@@ -662,6 +666,7 @@ impl SiliconBoardApp {
             game_started: false,
             engine_settings: [BTreeMap::new(), BTreeMap::new()],
             options_dialog: None,
+            about_open: false,
             draw_offer: None,
             settings: Settings::default(),
             saved_window_size: None,
@@ -1354,6 +1359,7 @@ impl SiliconBoardApp {
             MenuAction::ToggleFigurinesMoveList => self.toggle_figurines(false),
             MenuAction::ToggleFigurinesEval => self.toggle_figurines(true),
             MenuAction::OpenTournament => self.open_tournament_dialog(),
+            MenuAction::ShowAbout => self.about_open = true,
             MenuAction::StopTournament => self.stop_tournament(),
             MenuAction::ShowTournament => {
                 self.tournament_window_open = true;
@@ -1709,7 +1715,7 @@ impl SiliconBoardApp {
         crate::logging::set_file_enabled(self.settings.session_log);
         self.save_settings();
         let text = if self.settings.session_log {
-            "Session log: on, in ~/Library/Logs/SiliconBoard.".to_string()
+            format!("Session log: on, in {}.", crate::logging::log_folder_for_display())
         } else {
             "Session log: off.".to_string()
         };
@@ -3930,6 +3936,10 @@ impl eframe::App for SiliconBoardApp {
                 OptionsAction::ResetAll => self.reset_all_engine_options(slot),
                 OptionsAction::Press { name } => self.press_engine_button(slot, &name),
             }
+        }
+
+        if self.about_open {
+            about::show(&ctx, &mut self.about_open);
         }
 
         if let Some(dialog) = self.time_dialog.as_mut() {
