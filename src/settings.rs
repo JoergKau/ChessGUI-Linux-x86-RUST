@@ -86,6 +86,16 @@ pub struct PanelSizes {
     pub right_width: f32,
     /// Height of the move list at the bottom.
     pub bottom_height: f32,
+    /// Height of the docked PGN games list (the bottom sub-panel of the
+    /// evaluation dashboard), while it is open. Settings written before this
+    /// field existed get the default.
+    #[serde(default = "default_game_list_height")]
+    pub game_list_height: f32,
+}
+
+/// The games-list height a fresh install (or an old settings file) uses.
+fn default_game_list_height() -> f32 {
+    360.0
 }
 
 impl Default for Settings {
@@ -110,6 +120,7 @@ impl Default for Settings {
             panels: Some(PanelSizes {
                 right_width: 637.0,
                 bottom_height: 190.0,
+                game_list_height: default_game_list_height(),
             }),
             board_theme: None,
             piece_set: None,
@@ -324,16 +335,23 @@ mod tests {
             panels: Some(PanelSizes {
                 right_width: 540.0,
                 bottom_height: 220.0,
+                game_list_height: 280.0,
             }),
             ..Settings::default()
         };
         let restored = parse(&to_json(&settings)).unwrap();
         assert_eq!(restored.panels, settings.panels);
+        // A settings file from before the games-list height existed still
+        // parses, and gets the default height.
+        let old = r#"{"right_width":540.0,"bottom_height":220.0}"#;
+        let restored: PanelSizes = serde_json::from_str(old).unwrap();
+        assert_eq!(restored.game_list_height, default_game_list_height());
         assert_eq!(
             Settings::default().panels,
             Some(PanelSizes {
                 right_width: 637.0,
-                bottom_height: 190.0
+                bottom_height: 190.0,
+                game_list_height: default_game_list_height(),
             }),
             "a fresh install opens at the reference panel sizes"
         );
@@ -462,7 +480,8 @@ mod tests {
             fresh.panels,
             Some(PanelSizes {
                 right_width: 637.0,
-                bottom_height: 190.0
+                bottom_height: 190.0,
+                game_list_height: default_game_list_height(),
             })
         );
         assert_eq!(fresh.engines, [None, None], "no engine is preloaded");

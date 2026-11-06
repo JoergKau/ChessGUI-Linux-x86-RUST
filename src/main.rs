@@ -170,6 +170,7 @@ mod tests {
             panels: Some(PanelSizes {
                 right_width: 917.0,
                 bottom_height: 465.0,
+                game_list_height: 360.0,
             }),
             ..Default::default()
         };

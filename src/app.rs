@@ -98,6 +98,10 @@ const DEFAULT_MOVE_LIST_HEIGHT: f32 = 190.0;
 /// Smallest useful move list, so a dragged panel can always be grabbed again.
 const MIN_MOVE_LIST_HEIGHT: f32 = 80.0;
 
+/// Smallest height of the docked PGN games list, matching the sub-panel's
+/// `min_size` in the update loop.
+const MIN_GAME_LIST_HEIGHT: f32 = 160.0;
+
 /// How serious the message in the status line is. Warnings and errors are
 /// drawn in colour so they cannot be missed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -2818,10 +2822,11 @@ impl SiliconBoardApp {
     /// user drags them, so the next launch opens the same layout. The sizes are
     /// rounded to whole points, and clamped to the allowed range, so a frame
     /// during a drag does not write a different value than the stored one.
-    fn save_panel_sizes(&mut self, bottom_height: f32, right_width: f32) {
+    fn save_panel_sizes(&mut self, bottom_height: f32, right_width: f32, game_list_height: f32) {
         let sizes = settings::PanelSizes {
             right_width: right_width.round().max(eval_panel::MIN_WIDTH),
             bottom_height: bottom_height.round().max(MIN_MOVE_LIST_HEIGHT),
+            game_list_height: game_list_height.round().max(MIN_GAME_LIST_HEIGHT),
         };
         if self.settings.panels == Some(sizes) {
             return;
@@ -3885,6 +3890,15 @@ impl eframe::App for SiliconBoardApp {
         // space below the cards; the cards keep the rest. A row click and the
         // Close button are handled after the panel closes.
         let mut list_action = pgn_panel::GameListAction::None;
+        // The height the games list was dragged to, kept in the settings and
+        // restored at the next launch (like the dashboard width). The value
+        // is only refreshed while the list is open; closed it keeps the last
+        // one.
+        let saved_list_height = self
+            .settings
+            .panels
+            .map_or(360.0, |sizes| sizes.game_list_height);
+        let mut list_height: Option<f32> = None;
         let game_list = if self.pgn_browser_list_open {
             self.pgn_collection.as_ref()
         } else {
@@ -3896,9 +3910,9 @@ impl eframe::App for SiliconBoardApp {
             .min_size(eval_panel::MIN_WIDTH)
             .show(ui, |ui| {
                 if let Some(collection) = game_list {
-                    egui::Panel::bottom("pgn_games_list")
+                    let list_panel = egui::Panel::bottom("pgn_games_list")
                         .resizable(true)
-                        .default_size(360.0)
+                        .default_size(saved_list_height)
                         .min_size(160.0)
                         .show(ui, |ui| {
                             list_action = pgn_panel::show_game_list_panel(
@@ -3907,6 +3921,7 @@ impl eframe::App for SiliconBoardApp {
                                 self.pgn_browser_selected,
                             );
                         });
+                    list_height = Some(list_panel.response.rect.height());
                 }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -3924,6 +3939,7 @@ impl eframe::App for SiliconBoardApp {
         self.save_panel_sizes(
             move_list.response.rect.height(),
             dashboard.response.rect.width(),
+            list_height.unwrap_or(saved_list_height),
         );
 
         if let Some(dialog) = self.options_dialog.as_mut() {
@@ -4318,6 +4334,20 @@ mod game_flow_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    fn the_games_list_height_is_kept_and_clamped() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        // The height the user dragged the games list to is kept.
+        app.save_panel_sizes(190.0, 637.0, 411.0);
+        let sizes = app.settings.panels.expect("panel sizes saved");
+        assert_eq!(sizes.game_list_height, 411.0);
+        // Below the sub-panel's minimum it is clamped, like the other sizes.
+        app.save_panel_sizes(190.0, 637.0, 40.0);
+        let sizes = app.settings.panels.unwrap();
+        assert_eq!(sizes.game_list_height, MIN_GAME_LIST_HEIGHT);
     }
 
     #[test]
