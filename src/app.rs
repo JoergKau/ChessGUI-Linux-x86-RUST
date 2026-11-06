@@ -499,8 +499,7 @@ pub struct SiliconBoardApp {
     options_dialog: Option<OptionsDialog>,
     /// The in-app About window, while it is open (Linux; macOS uses the
     /// system About panel).
-    about_open: bool,
-    /// The slot whose engine is evaluating a pending draw offer.
+    about_open: bool,    /// The slot whose engine is evaluating a pending draw offer.
     draw_offer: Option<usize>,
     /// What is kept between runs. Changed here and written back on each change.
     settings: Settings,

@@ -2,9 +2,9 @@
 //!
 //! On macOS the winit application menu provides the standard **About
 //! SiliconBoard** panel (`macos_about.rs`). Linux window managers give an
-//! immediate-mode app no such menu, so the View menu carries **About
-//! SiliconBoard…**, which opens this small movable window: name, version,
-//! project page and licence — the same facts the macOS panel shows.
+//! immediate-mode app no such menu, so the top bar's **Help** menu carries
+//! **About SiliconBoard…**, which opens this small movable window: name,
+//! version, project page and licence — the same facts the macOS panel shows.
 
 use eframe::egui::{self, Color32, RichText};
 
