@@ -54,7 +54,8 @@ pub struct Settings {
     /// A fresh install opens at the reference layout (1316 × 844).
     pub window_size: Option<WindowSize>,
     /// The evaluation and move-list panel sizes, restored at the next launch.
-    /// A fresh install opens with the reference layout (right 637, bottom 190).
+    /// A fresh install opens with the reference layout (right 780, bottom
+    /// 190, games list 271).
     pub panels: Option<PanelSizes>,
     /// Board image file name from `public/images/board/`, e.g. `blue.png`.
     pub board_theme: Option<String>,
@@ -93,16 +94,18 @@ pub struct PanelSizes {
     pub game_list_height: f32,
 }
 
-/// The games-list height a fresh install (or an old settings file) uses.
-fn default_game_list_height() -> f32 {
-    360.0
+/// The games-list height a fresh install (or an old settings file) uses: the
+/// reference layout's docked games-list height.
+pub fn default_game_list_height() -> f32 {
+    271.0
 }
 
 impl Default for Settings {
     /// No clock, book play off (the menu item waits for a loaded book, which
     /// only the user loads — there is no default book), no saved engine options.
     /// A fresh install opens at the reference layout: a 1316 × 844 window with
-    /// a 637-point right panel and a 190-point move list.
+    /// a 780-point right panel, a 190-point move list and a 271-point games
+    /// list.
     fn default() -> Self {
         Self {
             time_control: None,
@@ -118,7 +121,7 @@ impl Default for Settings {
                 height: 844.0,
             }),
             panels: Some(PanelSizes {
-                right_width: 637.0,
+                right_width: 780.0,
                 bottom_height: 190.0,
                 game_list_height: default_game_list_height(),
             }),
@@ -349,7 +352,7 @@ mod tests {
         assert_eq!(
             Settings::default().panels,
             Some(PanelSizes {
-                right_width: 637.0,
+                right_width: 780.0,
                 bottom_height: 190.0,
                 game_list_height: default_game_list_height(),
             }),
@@ -462,9 +465,10 @@ mod tests {
     }
 
     /// A brand-new user gets the reference layout the owner uses: a
-    /// 1316 × 844 window with a 637-point right panel and a 190-point move
-    /// list. Everything else is the documented default (no clock, no book,
-    /// A/B empty, figurines in the move list only).
+    /// 1316 × 844 window with a 780-point right panel, a 190-point move
+    /// list and a 271-point games list. Everything else is the documented
+    /// default (no clock, no book, A/B empty, figurines in the move list
+    /// only).
     #[test]
     fn a_fresh_install_opens_at_the_reference_layout() {
         let dir = tempfile::tempdir().unwrap();
@@ -479,7 +483,7 @@ mod tests {
         assert_eq!(
             fresh.panels,
             Some(PanelSizes {
-                right_width: 637.0,
+                right_width: 780.0,
                 bottom_height: 190.0,
                 game_list_height: default_game_list_height(),
             })

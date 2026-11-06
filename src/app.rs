@@ -3897,7 +3897,9 @@ impl eframe::App for SiliconBoardApp {
         let saved_list_height = self
             .settings
             .panels
-            .map_or(360.0, |sizes| sizes.game_list_height);
+            .map_or(settings::default_game_list_height(), |sizes| {
+                sizes.game_list_height
+            });
         let mut list_height: Option<f32> = None;
         let game_list = if self.pgn_browser_list_open {
             self.pgn_collection.as_ref()
