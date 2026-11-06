@@ -7,8 +7,8 @@
 //!    decoded once at load time; the board picker comes later).
 //! 2. The twelve cburnett chess-piece sprites (`public/piece/cburnett/<w|b><K|Q|R|B|N|P>.svg`)
 //!    which we **rasterise at load time** through the `usvg`/`resvg`/`tiny-skia`
-//!    stack. That gives us vector-sharpness at any board scale on Apple
-//!    Retina displays without paying a per-frame SVG-decoding cost.
+//!    stack. That gives us vector-sharpness at any board scale on any
+//!    display without paying a per-frame SVG-decoding cost.
 //!
 //! [`Assets`] ties the two together; [`BoardTexture`] and [`PieceTextures`]
 //! stay independently cloneable so the widgets can hold their own borrow.
@@ -23,7 +23,7 @@ use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 /// Width × height (in pixels) of every rasterised piece sprite.
 ///
 /// 512 is generously above what any sane chess-board square will ever
-/// reach on screen (a 4K Apple display squeezed into an 8×8 grid is
+/// reach on screen (even a 4K display squeezed into an 8×8 grid is
 /// already in the 300-px range). Bigger rasterisations cost memory; smaller
 /// risk looking soft.
 pub const PIECE_RASTER_SIZE: u32 = 512;
@@ -612,20 +612,7 @@ fn resolve_asset_root_from(env_override: Option<&str>, exe_dir: Option<&Path>) -
         );
     }
 
-    // (2) A macOS .app bundle: exe is Contents/MacOS/<binary>, assets live in
-    // Contents/Resources (either as Resources/public or directly in Resources).
-    if let Some(exe_dir) = exe_dir {
-        if let Some(contents) = exe_dir.parent() {
-            let resources = contents.join("Resources");
-            for candidate in [resources.join("public"), resources] {
-                if looks_like_asset_root(&candidate) {
-                    return candidate;
-                }
-            }
-        }
-    }
-
-    // (3) Walk up from the executable's folder looking for `public/`.
+    // (2) Walk up from the executable's folder looking for `public/`.
     if let Some(start) = exe_dir {
         let mut cursor: Option<&Path> = Some(start);
         let mut steps = 0usize;
@@ -642,7 +629,7 @@ fn resolve_asset_root_from(env_override: Option<&str>, exe_dir: Option<&Path>) -
         }
     }
 
-    // (4) Fallback — current working directory.
+    // (3) Fallback — current working directory.
     PathBuf::from("public")
 }
 
@@ -956,34 +943,6 @@ mod tests {
 
         let chosen = resolve_asset_root_from(Some("/definitely/not/a/public/tree"), Some(&exe_dir));
         assert_eq!(chosen, exe_root);
-    }
-
-    #[test]
-    fn a_macos_bundle_finds_resources_public() {
-        let dir = tempfile::tempdir().unwrap();
-        let contents = dir.path().join("SiliconBoard.app").join("Contents");
-        let public = fake_public_tree(&contents.join("Resources"));
-        let macos = contents.join("MacOS");
-        std::fs::create_dir_all(&macos).unwrap();
-
-        let chosen = resolve_asset_root_from(None, Some(&macos));
-        assert_eq!(chosen, public);
-    }
-
-    #[test]
-    fn a_macos_bundle_finds_assets_directly_in_resources() {
-        let dir = tempfile::tempdir().unwrap();
-        let contents = dir.path().join("SiliconBoard.app").join("Contents");
-        let resources = contents.join("Resources");
-        std::fs::create_dir_all(resources.join("images").join("board")).unwrap();
-        std::fs::create_dir_all(resources.join("piece").join("cburnett")).unwrap();
-        std::fs::write(resources.join("images").join("board").join("blue.png"), b"x").unwrap();
-        std::fs::write(resources.join("piece").join("cburnett").join("wK.svg"), b"x").unwrap();
-        let macos = contents.join("MacOS");
-        std::fs::create_dir_all(&macos).unwrap();
-
-        let chosen = resolve_asset_root_from(None, Some(&macos));
-        assert_eq!(chosen, resources);
     }
 
     #[test]

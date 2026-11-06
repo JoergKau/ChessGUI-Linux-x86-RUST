@@ -15,7 +15,7 @@
 //! ## Testing strategy
 //!
 //! Unit tests live at the bottom of this file. They include real lines
-//! captured from a live Stockfish 19 invocation (`/opt/homebrew/bin/stockfish`)
+//! captured from a live Stockfish 19 invocation (`/usr/games/stockfish`)
 //! so we know the parser handles the engine output the project will see in
 //! production.
 

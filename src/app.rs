@@ -497,9 +497,9 @@ pub struct SiliconBoardApp {
     engine_settings: [BTreeMap<String, String>; 2],
     /// The engine options window, while it is open.
     options_dialog: Option<OptionsDialog>,
-    /// The in-app About window, while it is open (Linux; macOS uses the
-    /// system About panel).
-    about_open: bool,    /// The slot whose engine is evaluating a pending draw offer.
+    /// The in-app About window, while it is open (opened by the ⓘ button).
+    about_open: bool,
+    /// The slot whose engine is evaluating a pending draw offer.
     draw_offer: Option<usize>,
     /// What is kept between runs. Changed here and written back on each change.
     settings: Settings,

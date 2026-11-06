@@ -18,9 +18,6 @@ use crate::engine::protocol::EngineError;
 
 /// Folders an engine may need on `PATH` that a GUI launch from a desktop
 /// environment or a minimal shell may not have.
-#[cfg(target_os = "macos")]
-const TOOL_FOLDERS: [&str; 6] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-#[cfg(not(target_os = "macos"))]
 const TOOL_FOLDERS: [&str; 5] = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 /// How many recent stderr lines are kept for a failure report.
@@ -65,7 +62,7 @@ pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
 enum ProgramKind {
     /// A `#!` script; its interpreter is checked separately.
     Script,
-    /// A native program for this operating system (thin or universal).
+    /// A native Linux program (ELF).
     Native,
     /// A program or archive for another system, with a short name for it.
     Foreign(&'static str),
@@ -75,38 +72,20 @@ enum ProgramKind {
 
 /// Classify a file by its first bytes.
 fn program_kind(head: &[u8]) -> ProgramKind {
-    const MACH_O: [[u8; 4]; 4] = [
-        [0xCF, 0xFA, 0xED, 0xFE],
-        [0xCE, 0xFA, 0xED, 0xFE],
-        [0xCA, 0xFE, 0xBA, 0xBE],
-        [0xBE, 0xBA, 0xFE, 0xCA],
-    ];
     if head.starts_with(b"#!") {
         ProgramKind::Script
     } else if head.starts_with(b"\x7fELF") {
-        // Native on Linux; on macOS an ELF file cannot run.
-        #[cfg(target_os = "linux")]
-        {
-            ProgramKind::Native
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            ProgramKind::Foreign("a Linux program")
-        }
-    } else if MACH_O.iter().any(|magic| head.len() >= 4 && head[..4] == *magic) {
-        // Native on macOS; on Linux a Mach-O file cannot run.
-        #[cfg(target_os = "macos")]
-        {
-            ProgramKind::Native
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            ProgramKind::Foreign("a macOS program")
-        }
+        ProgramKind::Native
     } else if head.starts_with(b"MZ") {
         ProgramKind::Foreign("a Windows program")
     } else if head.starts_with(b"PK\x03\x04") {
         ProgramKind::Foreign("a Java archive or zip file; choose the script that starts it")
+    } else if head.len() >= 4
+        && [[0xCF, 0xFA, 0xED, 0xFE], [0xCE, 0xFA, 0xED, 0xFE], [0xCA, 0xFE, 0xBA, 0xBE], [0xBE, 0xBA, 0xFE, 0xCA]]
+            .iter()
+            .any(|magic| head[..4] == *magic)
+    {
+        ProgramKind::Foreign("a macOS program")
     } else {
         ProgramKind::Unknown
     }
@@ -229,18 +208,9 @@ mod tests {
         let err = check_executable(&jar).unwrap_err().to_string();
         assert!(err.contains("Java archive"), "{err}");
         // The format of another operating system is refused with its name.
-        #[cfg(target_os = "linux")]
-        {
-            let macho = write_file(dir.path(), "engine-mac", &[0xCF, 0xFA, 0xED, 0xFE], 0o755);
-            let err = check_executable(&macho).unwrap_err().to_string();
-            assert!(err.contains("macOS program"), "{err}");
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let linux = write_file(dir.path(), "engine-linux", b"\x7fELF\x02\x01", 0o755);
-            let err = check_executable(&linux).unwrap_err().to_string();
-            assert!(err.contains("Linux program"), "{err}");
-        }
+        let macho = write_file(dir.path(), "engine-mac", &[0xCF, 0xFA, 0xED, 0xFE], 0o755);
+        let err = check_executable(&macho).unwrap_err().to_string();
+        assert!(err.contains("macOS program"), "{err}");
         let windows = write_file(dir.path(), "engine.exe", b"MZ\x90\x00", 0o755);
         assert!(check_executable(&windows).unwrap_err().to_string().contains("Windows program"));
         let text = write_file(dir.path(), "notes", b"just words\n", 0o755);

@@ -324,7 +324,8 @@ mod tests {
     use crate::engine::watchdog::{StallReason, Timing};
     use std::time::{Duration, Instant};
 
-    /// Same fixture order as the engine tests: env override, Homebrew Stockfish, Triumviratus.
+/// Same fixture order as the engine tests: env override, then Stockfish in
+/// the usual system locations.
     /// Pump the host until `done` holds or the timeout passes.
     fn pump_until(host: &mut EngineHost, timeout: Duration, mut done: impl FnMut(&EngineView) -> bool) -> bool {
         let start = Instant::now();

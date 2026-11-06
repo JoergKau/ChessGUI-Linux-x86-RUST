@@ -727,9 +727,9 @@ async fn run_supervisor(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The UCI engine used by the real-engine tests. Search order:
-/// `SILICONBOARD_TEST_ENGINE`, Stockfish in its usual system locations, then
-/// the workspace Triumviratus build. Panics when none exists: a silently
-/// skipped test would pass without testing anything.
+/// `SILICONBOARD_TEST_ENGINE`, then Stockfish in its usual system locations.
+/// Panics when none exists: a silently skipped test would pass without
+/// testing anything.
 #[cfg(test)]
 pub(crate) fn test_engine_path() -> PathBuf {
     let mut tried = Vec::new();
@@ -741,13 +741,8 @@ pub(crate) fn test_engine_path() -> PathBuf {
         tried.push(p);
     }
     let candidates = [
-        #[cfg(target_os = "macos")]
-        "/opt/homebrew/bin/stockfish".to_string(),
-        #[cfg(not(target_os = "macos"))]
         "/usr/games/stockfish".to_string(),
-        #[cfg(not(target_os = "macos"))]
         "/usr/local/bin/stockfish".to_string(),
-        #[cfg(not(target_os = "macos"))]
         "/usr/bin/stockfish".to_string(),
     ];
     for candidate in candidates {
@@ -757,14 +752,6 @@ pub(crate) fn test_engine_path() -> PathBuf {
         }
         tried.push(stockfish);
     }
-    let triumviratus = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("Triumviratus")
-        .join("Triumviratus_8.0_macos_arm");
-    if triumviratus.exists() {
-        return triumviratus;
-    }
-    tried.push(triumviratus);
     panic!(
         "no test engine found; install Stockfish or set SILICONBOARD_TEST_ENGINE (tried {:?})",
         tried

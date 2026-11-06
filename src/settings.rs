@@ -4,9 +4,8 @@
 //! figurine switches, the window and panel sizes, and the last tournament
 //! configuration.
 //!
-//! The file is JSON, kept in the platform's user configuration folder
-//! (`~/.config/siliconboard/` on Linux, `~/Library/Application
-//! Support/SiliconBoard/` on macOS). `SILICONBOARD_SETTINGS` overrides the
+//! The file is JSON, kept in `~/.config/siliconboard/` (XDG).
+//! `SILICONBOARD_SETTINGS` overrides the
 //! path. A missing file means the defaults. A file that cannot be read or
 //! parsed is reported, and the defaults are used until the user changes
 //! something.
@@ -183,10 +182,8 @@ impl std::error::Error for SettingsError {
     }
 }
 
-/// Where the settings file lives: `SILICONBOARD_SETTINGS` if set, else the
-/// user's configuration folder — `~/.config/siliconboard/settings.json` on
-/// Linux (XDG), `~/Library/Application Support/SiliconBoard/settings.json`
-/// on macOS.
+/// Where the settings file lives: `SILICONBOARD_SETTINGS` if set, else
+/// `~/.config/siliconboard/settings.json` (XDG).
 pub fn settings_path() -> Result<PathBuf, SettingsError> {
     if let Some(path) = std::env::var_os("SILICONBOARD_SETTINGS") {
         return Ok(PathBuf::from(path));
@@ -197,24 +194,15 @@ pub fn settings_path() -> Result<PathBuf, SettingsError> {
 }
 
 /// The per-user configuration folder for the app, `siliconboard` beneath the
-/// platform's configuration root. `home` is the user's home directory; the
-/// root itself honours `XDG_CONFIG_HOME` on Linux.
+/// configuration root. `home` is the user's home directory; the root itself
+/// honours `XDG_CONFIG_HOME`.
 fn config_folder(home: &std::ffi::OsStr) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = home;
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Library/Application Support/SiliconBoard")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-            if !xdg.is_empty() && PathBuf::from(&xdg).is_absolute() {
-                return PathBuf::from(xdg).join("siliconboard");
-            }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() && PathBuf::from(&xdg).is_absolute() {
+            return PathBuf::from(xdg).join("siliconboard");
         }
-        PathBuf::from(home).join(".config").join("siliconboard")
     }
+    PathBuf::from(home).join(".config").join("siliconboard")
 }
 
 /// Read the settings at `path`. A missing file gives the defaults.

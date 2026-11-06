@@ -286,11 +286,11 @@ impl TournamentConfig {
 /// The default destination for tournament games: `engine-match.pgn` in a
 /// writable folder under the user's home.
 ///
-/// It must not be relative to the process working directory: a macOS app
-/// launched from Finder starts with `/` as its working directory, and `/` is
-/// read-only, so a relative default fails with “Could not create /tournament:
-/// Read-only file system”. `~/Documents/SiliconBoard` always exists or can be
-/// created, and the file is easy to find in Finder.
+/// It must not be relative to the process working directory: an app launched
+/// from a desktop environment starts with `/` (or another arbitrary folder)
+/// as its working directory, so a relative default fails on a read-only
+/// path. `~/Documents/SiliconBoard` always exists or can be created, and
+/// the file is easy to find in the file manager.
 pub fn default_pgn_path() -> PathBuf {
     default_output_dir().join("engine-match.pgn")
 }

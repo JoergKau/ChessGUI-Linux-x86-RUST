@@ -1,6 +1,6 @@
 //! SiliconBoard — entry point.
 //!
-//! Boots eframe on wgpu (Metal on macOS, Vulkan on Linux), creates the Tokio
+//! Boots eframe on wgpu, creates the Tokio
 //! runtime that serves engines and background I/O, and hands both to
 //! [`app::SiliconBoardApp`]. All the behaviour lives in the modules below.
 
@@ -13,8 +13,6 @@ mod chess;
 mod engine;
 mod gui;
 mod logging;
-#[cfg(target_os = "macos")]
-mod macos_about;
 mod settings;
 mod tournament;
 
@@ -83,11 +81,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let log_file = logging::init(settings.session_log);
-
-    // The About panel shows the project credits and link (macOS: the native
-    // panel; Linux: View → About SiliconBoard… opens the in-app window).
-    #[cfg(target_os = "macos")]
-    macos_about::install();
 
     log::info!(
         "SiliconBoard {} starting on {} {} — booting eframe on wgpu",
