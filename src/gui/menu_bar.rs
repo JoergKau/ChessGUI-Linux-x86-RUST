@@ -72,8 +72,8 @@ pub enum MenuAction {
     StopTournament,
     /// Tournament → Show tournament: reopen the tournament window.
     ShowTournament,
-    /// Help → About SiliconBoard…: show the in-app About window (Linux; the
-    /// macOS panel is provided by the system menu instead).
+    /// The toolbar's ⓘ button: show the in-app About window (Linux; macOS
+    /// additionally has the system About panel).
     ShowAbout,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
@@ -415,15 +415,6 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 ui.close();
             }
         });
-        // macOS gets the About panel from the system application menu
-        // (macos_about.rs); without that menu, offer the in-app window.
-        #[cfg(not(target_os = "macos"))]
-        ui.menu_button("Help", |ui| {
-            if ui.button("About SiliconBoard…").clicked() {
-                action = Some(MenuAction::ShowAbout);
-                ui.close();
-            }
-        });
 
         ui.separator();
         let start = egui::Button::new(RichText::new("Start").color(Color32::BLACK).strong())
@@ -441,12 +432,15 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         ui.label(RichText::new("FEN").color(theme::MUTED).size(14.0));
         let fen_id = ui.make_persistent_id("fen_field");
         let selection = crate::gui::text_field::selection_before(ui, fen_id);
+        // The ⓘ button sits to the right of the field, so the field leaves
+        // room for it instead of running to the window's edge.
+        let field_width = (ui.available_width() - 40.0).max(120.0);
         let field = ui
             .add(
                 egui::TextEdit::singleline(fen_input)
                     .id(fen_id)
                     .font(FontId::monospace(15.0))
-                    .desired_width(ui.available_width().max(120.0))
+                    .desired_width(field_width)
                     .hint_text("paste a FEN and press Enter"),
             )
             .on_hover_text("Enter loads this position");
@@ -454,6 +448,15 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         // A single-line field gives up focus when Enter is pressed.
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = Some(MenuAction::LoadFen);
+        }
+        // About panel (the Linux equivalent of the macOS About window):
+        // an always-visible ⓘ button, as in MD-Viewer.
+        if ui
+            .add(egui::Button::new(RichText::new("ⓘ").size(15.0)))
+            .on_hover_text("About SiliconBoard")
+            .clicked()
+        {
+            action = Some(MenuAction::ShowAbout);
         }
     });
     action
