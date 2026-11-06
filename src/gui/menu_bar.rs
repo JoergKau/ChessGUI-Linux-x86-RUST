@@ -38,6 +38,9 @@ pub enum MenuAction {
     OpenEngineOptions(usize),
     /// Engine → Session log: switch the session log file on or off.
     ToggleSessionLog,
+    /// Engine → Tablebases in engines: switch the configured tablebases on
+    /// or off for the engines.
+    ToggleTablebases,
     /// File → Open PGN…
     OpenPgn,
     /// File → PGN games…: show the multi-game list again.
@@ -91,6 +94,8 @@ pub struct MenuState<'a> {
     pub book_in_games: bool,
     /// Whether the session log file is being written.
     pub session_log: bool,
+    /// Whether the configured tablebases are used (switch; needs a path).
+    pub tablebases_in_engines: bool,
     /// `true` while a game against an engine is running, so the human can
     /// resign or offer a draw.
     pub vs_engine_live: bool,
@@ -325,6 +330,30 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 });
             if tablebases.clicked() {
                 action = Some(MenuAction::OpenTablebases);
+                ui.close();
+            }
+            // The switch mirrors "Book moves in games": greyed until
+            // tablebases are configured, and kept in the settings.
+            let tablebases_available = state.tablebase_path.is_some();
+            let switch = ui
+                .add_enabled(
+                    tablebases_available,
+                    egui::Button::selectable(
+                        state.tablebases_in_engines,
+                        "Tablebases in engines",
+                    ),
+                )
+                .on_disabled_hover_text("Load tablebases first (Engine menu).")
+                .on_hover_text(format!(
+                    "{} the loaded engines and every engine started afterwards{}",
+                    if state.tablebases_in_engines { "Stop using" } else { "Use" },
+                    match state.tablebase_path {
+                        Some(path) => format!(" the path {}", path),
+                        None => String::new(),
+                    }
+                ));
+            if switch.clicked() {
+                action = Some(MenuAction::ToggleTablebases);
                 ui.close();
             }
         });
