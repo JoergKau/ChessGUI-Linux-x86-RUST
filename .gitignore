@@ -35,5 +35,14 @@ doc/
 # zip (SiliconBoard-<version>-macos-arm64.zip) is committed to the repository.
 /SiliconBoard.app/
 
+# Build artefacts: the Linux release folder and its tarball (package-linux.sh).
+/SiliconBoard-*-linux-*/
+/SiliconBoard-*-linux-*.tar.gz
+
+# macOS dropped files that appear when the repository is copied from or to a
+# Mac; they are never ours.
+._*
+.DS_Store
+
 # Tournament output (the Engine match writes its PGN here by default)
 /tournament/

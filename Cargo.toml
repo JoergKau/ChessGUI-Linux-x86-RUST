@@ -2,7 +2,7 @@
 name = "siliconboard"
 version = "1.0.0"
 edition = "2021"
-description = "SiliconBoard — A modern, high-performance UCI Chess GUI for Apple Silicon written in Rust"
+description = "SiliconBoard — A modern, high-performance UCI Chess GUI for macOS and Linux, written in Rust"
 authors = ["SiliconBoard Contributors"]
 license = "MIT"
 repository = "https://github.com/JoergKau"
@@ -54,8 +54,9 @@ tokio = { version = "1.40", features = [
     "macros",
 ] }
 
-# ── Native macOS file open / save dialogs for engines, PGNs, books ─────────
-# Default features pick Cocoa dialogs on macOS automatically.
+# ── Native file open / save dialogs for engines, PGNs, books ────────────────
+# Cocoa panels on macOS, GTK dialogs on Linux — the default features pick
+# the platform's own dialogs automatically.
 rfd = "0.17"
 
 # Clipboard writing goes through `egui::Context::copy_text`; no clipboard crate
@@ -65,18 +66,23 @@ rfd = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# ── macOS About panel (src/macos_about.rs): Objective-C bindings ────────────
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSAttributedString", "NSImage", "NSParagraphStyle", "NSText", "objc2-core-foundation"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSAttributedString", "NSRange", "NSURL", "NSBundle"] }
-
 # ── Process signals for engine process groups (registry, stall kills) ───────
 libc = "0.2"
 
 # ── Diagnostic logging ───────────────────────────────────────────────────────
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+# Platform-specific dependencies come last: everything below a target section
+# header belongs to that target, so nothing may follow it. (On macOS, libc,
+# log and env_logger sat behind the objc2 section and were silently dropped
+# on Linux — they now stay above it.)
+
+# ── macOS About panel (src/macos_about.rs): Objective-C bindings ────────────
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSAttributedString", "NSImage", "NSParagraphStyle", "NSText", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSAttributedString", "NSRange", "NSURL", "NSBundle"] }
 
 [dev-dependencies]
 # Tests run alongside `cargo test`; lightweight helpers.
