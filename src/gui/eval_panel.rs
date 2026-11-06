@@ -383,21 +383,57 @@ fn score_badge(ui: &mut Ui, text: &str) {
 /// The principal variation as wrapped text: move numbers are muted, moves use
 /// the text colour. At most [`PV_LINES`] lines are shown; the rest is replaced
 /// by "…", and the full line is available as a tooltip.
+///
+/// The area is always [`PV_LINES`] rows tall, whatever the line currently
+/// shows. A PV that grows from one row to two must not push the card below
+/// down (and a shorter one must not let it jump back), so the height is
+/// reserved even when the text does not fill it.
 fn pv_flow(ui: &mut Ui, tokens: &[String], figurines: bool) {
+    let size = Vec2::new(ui.available_width(), PV_LINES as f32 * pv_row_height(ui));
     if tokens.is_empty() {
-        ui.label(RichText::new("PV: --").color(theme::MUTED).small());
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let small = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Small)
+            .cloned()
+            .unwrap_or_default();
+        ui.painter()
+            .text(rect.min, Align2::LEFT_TOP, "PV: --", small, theme::MUTED);
         return;
     }
     let job = pv_job(ui, tokens, figurines);
     // Paint the laid-out galley directly: `Label` would replace the wrap
     // settings (and with them the two-line limit) with its own.
     let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-    let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().galley(rect.min, galley, theme::TEXT);
     // Built only when the card is hovered, not on every frame.
     response.on_hover_ui(|ui| {
         ui.label(tokens.join(" "));
     });
+}
+
+/// The height of one PV row: the tallest of the fonts a row may mix — the
+/// body text and, with figurines on, the figurine family at the same size.
+/// One probe galley holding both fonts answers with the larger metrics.
+fn pv_row_height(ui: &Ui) -> f32 {
+    let body = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .cloned()
+        .unwrap_or_default();
+    let mut probe = egui::text::LayoutJob::default();
+    probe.append("Ag", 0.0, egui::TextFormat::simple(body.clone(), theme::TEXT));
+    let figurine = FontId::new(body.size, egui::FontFamily::Name(theme::FIGURINE_FAMILY.into()));
+    probe.append("N", 0.0, egui::TextFormat::simple(figurine, theme::TEXT));
+    let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(probe));
+    galley
+        .rows
+        .iter()
+        .map(|placed| placed.row.size.y)
+        .fold(0.0_f32, f32::max)
 }
 
 /// Lay the PV out as one wrapped text job, truncated after [`PV_LINES`] rows.
