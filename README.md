@@ -1,10 +1,8 @@
 # SiliconBoard
 
-A native **macOS (Apple Silicon) UCI chess GUI** written in Rust, ported to
-**Linux** on the `linux` branch. The layout
-takes its cues from the Nibbler analysis GUI: board on the left, live engine
-analysis on the right, move list along the bottom, and a flat toolbar across
-the top.
+A native **Linux UCI chess GUI** written in Rust. The layout takes its cues
+from the Nibbler analysis GUI: board on the left, live engine analysis on the
+right, move list along the bottom, and a flat toolbar across the top.
 
 - **Analysis:** two engine slots with live depth, nodes, speed, evaluation
   and principal variation; Start / Abort; per-card play/pause. Each card's
@@ -23,54 +21,51 @@ the top.
   match on the main board (time control, books, adjudication, PGN output).
 - **Everything else:** PolyGlot opening books, PGN open/save including a
   multi-game browser, FEN import/export, board themes and piece sets,
-  figurine piece letters, persistent settings, a session log.
+  figurine piece letters, persistent settings, a session log, an ⓘ About
+  panel in the toolbar.
 
 A short summary of what SiliconBoard does lives in
 [features-list.md](features-list.md); what ships in v1.0 is in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## The ready-to-run app
+## The ready-to-run release
 
-The repository contains the built, signed app:
+Each release carries a built, packed binary:
 
 ```
-SiliconBoard-1.0.0-macos-arm64.zip
+SiliconBoard-1.0.0-linux-x86_64.tar.gz
 ```
 
-It is the same bundle the packaging script produces — one folder
-(`SiliconBoard-1.0.0/`) holding `SiliconBoard.app`, `LICENSE` and this
-README — and it is **committed to the repository**, so no build is needed to
-run SiliconBoard. It is for macOS on Apple Silicon.
+(one folder — `SiliconBoard-1.0.0-linux-x86_64/` — holding the binary in
+`bin/`, the asset tree in `public/`, the start-up PGN in `PGN/`, `LICENSE`
+and this README). The SHA-256 is printed by `./package-linux.sh` and listed
+with each release; check a download with:
+
+```shell
+sha256sum SiliconBoard-1.0.0-linux-x86_64.tar.gz
+```
 
 To use it:
 
-1. Download the zip (or clone the repository) and double-click the zip.
-2. Drag `SiliconBoard.app` from the unpacked folder into `/Applications`
-   (or run it from the folder).
-3. The first launch may be blocked by macOS because the download is
-   quarantined: **right-click the app → Open**, then confirm **Open**.
-   SiliconBoard is ad-hoc signed but not notarized, so this one-time step is
-   expected.
+1. Unpack the tarball: `tar -xzf SiliconBoard-1.0.0-linux-x86_64.tar.gz`
+2. Run straight from the folder:
+   `SiliconBoard-1.0.0-linux-x86_64/bin/siliconboard`
+3. For desktop integration — a menu entry, and the dock/taskbar icon (also
+   for minimised windows) — run `./package-linux.sh` once from the unpacked
+   folder. It installs into `~/.local` (see *Packaging* below) and you can
+   then start SiliconBoard from the desktop menu or with `siliconboard`.
 4. The app ships no engine. Load yours via _Engine → Load engine A…_ (and B
    if you want two engines); see the next section.
 
-The SHA-256 of the zip is printed by `./package-macos.sh` when it rebuilds
-the app and is listed with each release; check a download with:
-
-```shell
-shasum -a 256 SiliconBoard-1.0.0-macos-arm64.zip
-```
-
 ## Requirements
 
-- macOS on Apple Silicon, **or Linux on x86-64/aarch64** (X11 or Wayland;
-  a Vulkan-capable GPU driver, or llvmpipe as a software fallback)
-- Rust 2021 edition (`cargo`)
+- Linux on x86-64 or aarch64 (X11 or Wayland; a Vulkan-capable GPU driver,
+  or llvmpipe as a software fallback)
 - At least one **UCI engine** of your choice — SiliconBoard ships none; see
   the next section to install one
 
-On Debian/Ubuntu, building the Linux version needs the usual GUI development
-packages (rfd's file dialogs use GTK 3, wgpu uses Vulkan):
+For **building from source**, the usual GUI development packages are needed
+(rfd's file dialogs use GTK 3, wgpu uses Vulkan):
 
 ```shell
 sudo apt install build-essential pkg-config libgtk-3-dev \
@@ -78,35 +73,30 @@ sudo apt install build-essential pkg-config libgtk-3-dev \
 ```
 
 At runtime the desktop session usually provides everything; on a minimal
-setup install `libgtk-3-0` and a Vulkan loader such as
-`libvulkan1` (or Mesa's).
+setup install `libgtk-3-0` and a Vulkan loader such as `libvulkan1` (or
+Mesa's).
 
-## Where the files live (Linux)
+## Where the files live
 
-- **Settings:** `~/.config/siliconboard/settings.json` (XDG; macOS keeps
-  `~/Library/Application Support/SiliconBoard/`)
-- **Session logs:** `~/.local/state/siliconboard/logs/` (macOS keeps
-  `~/Library/Logs/SiliconBoard/`)
+- **Settings:** `~/.config/siliconboard/settings.json` (XDG)
+- **Session logs:** `~/.local/state/siliconboard/logs/`
 - **Default match PGN:** `~/Documents/SiliconBoard/engine-match.pgn`
 - The `SILICONBOARD_SETTINGS` and `SILICONBOARD_LOG_FILE` environment
-  variables override the first two, as on macOS.
+  variables override the first two.
 
 ## Loading a UCI engine (example: Stockfish)
 
 No engine is distributed with SiliconBoard: _Engine → Load engine A…_ and
-_Load engine B…_ always open the native file picker, and whichever engine
-the user points them at fills the slot (loading into an occupied slot
-replaces it). The chosen file is checked before it starts — a launcher
-script must name an existing interpreter, and a non-program or a non-UCI
-binary is refused with the reason. Each engine keeps its own option values,
-which are sent again after a restart and restored at the next launch.
+_Load engine B…_ always open the file picker, and whichever engine the user
+points them at fills the slot (loading into an occupied slot replaces it).
+The chosen file is checked before it starts — a launcher script must name an
+existing interpreter, a non-ELF file or a non-UCI binary is refused with the
+reason. Each engine keeps its own option values, which are sent again after
+a restart and restored at the next launch.
 
 Installing the free Stockfish:
 
-1. On Linux: `sudo apt install stockfish` (the binary lands in
-   `/usr/games/stockfish`). On macOS: download from
-   <https://stockfishchess.org/download/>, unpack, the UCI binary is
-   `stockfish-macos-universal`.
+1. `sudo apt install stockfish` (the binary lands in `/usr/games/stockfish`)
 2. In the GUI, _Engine → Load engine A…_ and point it at that binary.
 
 The process is the same for any other UCI engine: unpack it and point the
@@ -129,8 +119,8 @@ via `$SILICONBOARD_PUBLIC_ROOT`, by walking up from the executable, or as
 `./public` (the bundled copy is normally found by the walk-up);
 `$SILICONBOARD_PUBLIC_ROOT` points a development setup at a different tree.
 The workspace copy is refreshed from the canonical shared tree with
-`./sync-public.sh`. The window icon is compiled
-in from `assets/icon/` (`siliconboard-512.png`).
+`./sync-public.sh`. The window icon is compiled in from `assets/icon/`
+(`siliconboard-512.png`).
 
 SiliconBoard does **not** ship an opening book and loads none by default:
 the app starts bookless. Load one via _Engine → Load PolyGlot book…_ —
@@ -149,10 +139,9 @@ several folders) and press Apply. The path is kept in the settings and sent
 to every loaded engine — and to every engine loaded later — as the
 `SyzygyPath` option.
 
-- Several folders are joined into **one string**, separated by `:` on macOS
-  and Linux (`;` on Windows). This matters when the 5-men and 6-men files
-  live in different folders, as in
-  `/Users/you/EGTB/Syzygy-3-4-5:/Users/you/EGTB/Syzygy-6`.
+- Several folders are joined into **one string**, separated by `:`. This
+  matters when the 5-men and 6-men files live in different folders, as in
+  `/home/you/EGTB/Syzygy-3-4-5:/home/you/EGTB/Syzygy-6`.
 - Applying an empty line clears the tablebases again: the loaded engines get
   an empty path, and engines started afterwards get none.
 - The GUI forwards the string untouched — which folder holds which files,
@@ -163,65 +152,7 @@ to every loaded engine — and to every engine loaded later — as the
   what to download are described at
   [syzygy-tables.info](https://syzygy-tables.info/).
 
-## Release as a macOS `.app` bundle
-
-```shell
-./package-macos.sh
-```
-
-The script runs `cargo build --release`, then assembles
-`SiliconBoard.app` in the repository root: the binary as
-`Contents/MacOS/SiliconBoard`, the icon and the asset tree as
-`Contents/Resources/public` — the layout the asset resolver checks first in
-a bundle (unit-tested in `src/assets.rs`) — and writes
-`Contents/Info.plist` with the version taken from `Cargo.toml`, the bundle
-identifier `org.chess-gui.SiliconBoard` and the About-panel copyright
-(`macos_about.rs` reads both from the bundle). `plutil -lint` guards the
-plist, and the bundle is signed sign ad-hoc:
-
-```shell
-codesign --force --deep --sign - SiliconBoard.app   # the script does this
-```
-
-The `.app` bundle is a build artefact and stays out of git. The distributable
-zip is committed to the repository at the repo root, so the download sits next
-to the source.
-
-**Distribution:** the script also packs the signed app into
-`SiliconBoard-<version>-macos-arm64.zip` — one folder holding the app plus
-`LICENSE` and `README.md` — and prints the zip's SHA-256 for the release
-listing. The app is signed _before_ it is zipped (modifying a signed app
-breaks the seal), and the zip is verified by unzipping it and re-checking
-the signature.
-
-**Install locally:** `./package-macos.sh` installs the freshly signed bundle
-into `/Applications` by default, replacing an existing copy there, and then
-**removes the repo copy and unregisters it with Launch Services** — so
-exactly one app entry ever exists, and it always lives in `/Applications`.
-(Installing is the default: a bundle left in the dev folder
-gets registered by Launch Services as well and Launchpad shows two icons.)
-The old `--install`/`-i` flags still work and mean the same; `--no-install`
-(or `-n`) skips the install and leaves the bundle in the repo folder. An
-unknown argument is rejected with the usage line. If `/Applications`
-cannot be written, the script asks once for administrator rights; cancelling
-keeps the bundle in the repo folder, where it can be dragged by hand.
-
-**What to do with it:** double-click to launch, or drag it to
-`/Applications`. A copy that came over the internet is quarantined by
-macOS: right-click → **Open** the first time.
-
-Besides the assets, the bundle carries the start-up PGN
-(`Contents/Resources/PGN/WorldChamp1972.pgn`), so launch opens
-Spassky–Fischer, game 1, and the multi-game list is ready. On first
-launch you still load the rest:
-
-2. Load an engine via _Engine → Load engine A…_ (and B as needed) — no UCI
-   engine is distributed with SiliconBoard; the engines keep running from
-   wherever their binaries live (e.g. `~/engines/`).
-3. For opening-book play in games, load your book once via _Engine → Load
-   PolyGlot book…_ — the choice is remembered across starts.
-
-## Release as a Linux folder and tarball
+## Packaging
 
 ```shell
 ./package-linux.sh
@@ -234,29 +165,22 @@ layout the resolver finds by walking up from the executable (unit-tested in
 `src/assets.rs`) — plus a `.desktop` launcher, the menu icon, `LICENSE` and
 `README.md`. It packs the folder into
 `SiliconBoard-<version>-linux-<arch>.tar.gz`, verifies the tarball by
-unpacking it again, and prints the SHA-256 for the release listing. The
-tarball is a build artefact and stays out of git.
+unpacking it again, and prints the SHA-256 for the release listing. That
+tarball is the **published release artifact**.
 
-**Install locally:** the script **installs by default**, replacing the
-installed copy, so the daily-use app is always the one just built: the
-binary, assets and PGN go under `~/.local/share/siliconboard/`, a wrapper
-goes on `$PATH` at `~/.local/bin/siliconboard`, and the launcher and icon go
-into `~/.local/share/` — after that SiliconBoard starts from the desktop
-menu. The installed launcher is also where the **taskbar/dock icon comes
-from on Wayland**: the desktop environment matches the window's `app_id`
-(`siliconboard`, set in `main.rs`) against the `siliconboard.desktop`
-entry and shows its icon, also for minimised windows. Without an installed
-launcher — e.g. a plain `cargo run` — Wayland shows a generic icon there;
-the X11 and macOS paths take the icon compiled into the binary instead.
+The script **installs by default**, replacing the installed copy, so the
+daily-use app is always the one just built: the binary, assets and PGN go
+under `~/.local/share/siliconboard/`, a wrapper goes on `$PATH` at
+`~/.local/bin/siliconboard`, and the launcher and icons (16–512 px) go into
+`~/.local/share/` — after that SiliconBoard starts from the desktop menu.
+The installed launcher is also where the **taskbar/dock icon comes from on
+Wayland**: the desktop environment matches the window's `app_id`
+(`siliconboard`, set in `main.rs`) against the `siliconboard.desktop` entry
+and shows its icon, also for minimised windows. Without an installed
+launcher — e.g. a plain `cargo run` — Wayland shows a generic icon there.
 `--no-install` (or `-n`) skips the install step and leaves the assembled
 folder in the repository; the old `--install` (or `-i`) flags still work
 and mean the same; an unknown argument is rejected.
-
-To run straight from the folder:
-
-```shell
-SiliconBoard-1.0.0-linux-x86_64/bin/siliconboard
-```
 
 ## Development
 
@@ -265,9 +189,11 @@ cargo test --bin siliconboard     # unit + real-engine integration tests
 cargo clippy --all-targets        # zero warnings
 ```
 
-The real-engine tests need an available UCI engine fixture; it fails
-(rather than skips) when it is missing. The opening-book tests use small
-built-in books, so no external `.bin` file is needed.
+The real-engine tests look for Stockfish in the usual system locations
+(`/usr/games/stockfish`, `/usr/local/bin`, `/usr/bin`) or take
+`SILICONBOARD_TEST_ENGINE`; the test fails (rather than skips) when no
+engine is found. The opening-book tests use small built-in books, so no
+external `.bin` file is needed.
 
 ## AI Assisted by DeepSeek V.4.1 Flash
 
