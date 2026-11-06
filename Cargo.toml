@@ -2,20 +2,19 @@
 name = "siliconboard"
 version = "1.0.0"
 edition = "2021"
-description = "SiliconBoard — A modern, high-performance UCI Chess GUI for macOS and Linux, written in Rust"
+description = "SiliconBoard — A modern, high-performance UCI Chess GUI for Linux, written in Rust"
 authors = ["SiliconBoard Contributors"]
 license = "MIT"
 repository = "https://github.com/JoergKau"
 keywords = ["chess", "uci", "gui", "egui", "shakmaty"]
 categories = ["games", "gui"]
 
-# Use the Apple Silicon Metal backend by default. Per Apple, wgpu picks Metal
-# automatically on macOS; pinning the target here makes the build artifacts
-# reproducible and unambiguous.
+# wgpu picks the platform's GPU backend automatically (Vulkan on Linux),
+# which makes the build artifacts reproducible and unambiguous.
 default-run = "siliconboard"
 
 [dependencies]
-# ── GUI framework: immediate-mode UI on top of wgpu (Metal on macOS) ─────────
+# ── GUI framework: immediate-mode UI on top of wgpu ──────────────────────────
 eframe = { version = "0.37", features = ["default", "wgpu"] }
 egui = "0.37"
 egui_extras = { version = "0.37", features = ["default", "image"] }
@@ -34,8 +33,8 @@ byteorder = "1.5"
 # ── SVG piece rasterization (cburnett sprites live as .svg in public/piece/)
 # `resvg` is the high-level renderer, `usvg` parses SVG into the tree it
 # consumes, and `tiny-skia` is the underlying 2D graphics backend. All three
-# are pure Rust with no C dependencies, so they build cleanly on Apple
-# Silicon without any extra toolchain install.
+# are pure Rust with no C dependencies, so they build without any extra
+# toolchain install.
 resvg = "0.49"
 usvg = "0.49"
 tiny-skia = "0.12"
@@ -55,8 +54,7 @@ tokio = { version = "1.40", features = [
 ] }
 
 # ── Native file open / save dialogs for engines, PGNs, books ────────────────
-# Cocoa panels on macOS, GTK dialogs on Linux — the default features pick
-# the platform's own dialogs automatically.
+# GTK dialogs on Linux (the platform's own dialogs, picked automatically).
 rfd = "0.17"
 
 # Clipboard writing goes through `egui::Context::copy_text`; no clipboard crate
@@ -73,22 +71,11 @@ libc = "0.2"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 
-# Platform-specific dependencies come last: everything below a target section
-# header belongs to that target, so nothing may follow it. (On macOS, libc,
-# log and env_logger sat behind the objc2 section and were silently dropped
-# on Linux — they now stay above it.)
-
-# ── macOS About panel (src/macos_about.rs): Objective-C bindings ────────────
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSAttributedString", "NSImage", "NSParagraphStyle", "NSText", "objc2-core-foundation"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSAttributedString", "NSRange", "NSURL", "NSBundle"] }
-
 [dev-dependencies]
 # Tests run alongside `cargo test`; lightweight helpers.
 tempfile = "3.10"
 
-# ── Build profile: tuned for Apple Silicon desktop GUI workloads ────────────
+# ── Build profile: tuned for desktop GUI workloads ──────────────────────────
 [profile.dev]
 opt-level = 1
 debug = true

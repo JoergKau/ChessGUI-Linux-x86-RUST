@@ -2,9 +2,9 @@
 
 ## v1.0
 
-A native macOS (Apple Silicon) UCI chess GUI in Rust: board on the left, live
+A native Linux UCI chess GUI in Rust: board on the left, live
 engine analysis on the right, move list along the bottom, and a flat toolbar
-across the top.
+across the top. Published as `SiliconBoard-<version>-linux-<arch>.tar.gz`.
 
 ### What works
 
@@ -30,7 +30,7 @@ across the top.
   (ECO table) and keeps the last known name after the line leaves the book.
 - **Syzygy tablebases:** _Engine → Load tablebases…_ takes the user's
   tablebase folder(s) — several folders are joined into one string
-  (`:` on macOS/Linux, `;` on Windows) — and sends it as the `SyzygyPath`
+  (`:`) — and sends it as the `SyzygyPath`
   option to the loaded engines and to every engine started afterwards.
 - **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
   (Game → Claim draw (threefold)), with the result written to the PGN.
@@ -78,7 +78,7 @@ across the top.
   Engine A/B options window is a grouped settings page: engine header, dashed
   sections, labeled fields in two columns, and a Default button that resets
   every option.
-- **Diagnostics:** one session log per run in `~/Library/Logs/SiliconBoard/`;
+- **Diagnostics:** one session log per run in `~/.local/state/siliconboard/logs/`;
   the newest five are kept. A log continues in a numbered file at 5 MB, so the
   folder stays below about 25 MB.
   It records lifecycle messages, UCI commands, engine replies (`readyok`,
@@ -95,16 +95,16 @@ across the top.
   stall or exit ends the whole group, helpers included. Engines left running by
   a crash or a forced quit are stopped at the next start.
 - **Engine files:** launcher scripts (shell, Java and Python wrappers) can be
-  loaded. A file that cannot run on this Mac is refused with the reason before
+  loaded. A file that cannot run on Linux is refused with the reason before
   it starts. An engine runs from its own folder, and a failed start shows the
   exit status and the engine's last message.
 - **Players on the board:** a loaded PGN shows its White and Black names on the
   player bars. A new game, a FEN, a play mode or a tournament replaces them.
-- **About:** the About item of the app menu shows the standard macOS panel:
+- **About:** the toolbar's ⓘ button opens the About panel:
   "SiliconBoard", "Version 1.0", the project page as a clickable link
   (https://github.com/JoergKau) and the licence, with the application icon.
-- **Icon:** the application icon is shown in the window and is included as
-  `SiliconBoard.icns` for the app bundle.
+- **Icon:** the application icon is shown in the window, and installed as
+  the desktop entry's icon (hicolor sizes 16–512 px).
 - **Warnings:** setting Threads whose total over both engines exceeds the core
   count, or MultiPV above 1, shows a warning; the value is still applied.
 - **Performance:** engine output wakes the window directly, coalesced to about
@@ -114,7 +114,7 @@ across the top.
 
 ### Requirements
 
-- macOS on Apple Silicon.
+- Linux (X11 or Wayland; Vulkan for the GPU path).
 - A UCI engine binary (Stockfish 19 is used in the tests).
 - The workspace `public/` asset tree, or `SILICONBOARD_PUBLIC_ROOT` pointing at
   one.

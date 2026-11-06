@@ -1,8 +1,7 @@
 //! Session logging: the console plus one file for the whole run.
 //!
-//! Each run writes its own file, `siliconboard-<UTC time>.log`, in the
-//! session-log folder (`~/.local/state/siliconboard/logs/` on Linux,
-//! `~/Library/Logs/SiliconBoard/` on macOS). The newest five are kept. Set
+//! Each run writes its own file, `siliconboard-<UTC time>.log`, in
+//! `~/.local/state/siliconboard/logs/`. The newest five are kept. Set
 //! `SILICONBOARD_LOG_FILE` to choose one file instead (it is truncated).
 //!
 //! The console keeps the `RUST_LOG` behaviour. The file defaults to
@@ -140,10 +139,9 @@ const KEEP_LOGS: usize = 5;
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 /// The file for this run: `SILICONBOARD_LOG_FILE` when set, otherwise a new
-/// file named by the start time in the session-log folder —
-/// `~/.local/state/siliconboard/logs/` on Linux (XDG),
-/// `~/Library/Logs/SiliconBoard/` on macOS. The working directory is not
-/// used: a launcher-launched app starts in an arbitrary one.
+/// file named by the start time in `~/.local/state/siliconboard/logs/` (XDG).
+/// The working directory is not used: a launcher-launched app starts in an
+/// arbitrary one.
 fn session_log_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SILICONBOARD_LOG_FILE") {
         return Some(PathBuf::from(path));
@@ -155,24 +153,15 @@ fn session_log_path() -> Option<PathBuf> {
     )))
 }
 
-/// The per-user session-log folder. It honours `XDG_STATE_HOME` on Linux;
-/// macOS keeps the Library path.
+/// The per-user session-log folder; honours `XDG_STATE_HOME`.
 fn log_folder(home: &std::ffi::OsStr) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = home;
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Logs/SiliconBoard")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let state = match std::env::var_os("XDG_STATE_HOME") {
-            Some(state) if !state.is_empty() && PathBuf::from(&state).is_absolute() => {
-                PathBuf::from(state)
-            }
-            _ => PathBuf::from(home).join(".local/state"),
-        };
-        state.join("siliconboard/logs")
-    }
+    let state = match std::env::var_os("XDG_STATE_HOME") {
+        Some(state) if !state.is_empty() && PathBuf::from(&state).is_absolute() => {
+            PathBuf::from(state)
+        }
+        _ => PathBuf::from(home).join(".local/state"),
+    };
+    state.join("siliconboard/logs")
 }
 
 /// Opens this run's log. A file given by `SILICONBOARD_LOG_FILE` is truncated

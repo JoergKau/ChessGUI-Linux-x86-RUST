@@ -3,8 +3,8 @@
 //!
 //! Syzygy tablebases live in ordinary folders of `.rtbw` / `.rtbz` files; 5-men
 //! and 6-men files often sit in different folders. Engines take one path
-//! string, with the folders joined by the platform separator (`:` on macOS and
-//! Linux, `;` on Windows — the same rule en-croissant uses). The dialog edits
+//! string, with the folders joined by `:` (the same rule en-croissant uses).
+//! The dialog edits
 //! that one string; the app sends it to every loaded engine and gives it to
 //! each engine started afterwards. The app applies the string as it is: what
 //! counts as a usable tablebase installation is the engine's business, not the
@@ -114,13 +114,9 @@ impl TablebaseDialog {
                 });
                 ui.label(
                     RichText::new(format!(
-                        "Separate folders with `{}` ({})",
+                        "Separate folders with `{}`{}",
                         separator,
-                        if cfg!(windows) {
-                            "this machine is Windows"
-                        } else {
-                            "on macOS and Linux; use `;` on Windows"
-                        }
+                        if cfg!(windows) { " on Windows" } else { "" }
                     ))
                     .color(theme::MUTED)
                     .small(),

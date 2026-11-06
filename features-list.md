@@ -1,6 +1,6 @@
 # SiliconBoard — Features
 
-SiliconBoard is a native macOS UCI chess GUI for Apple Silicon. The board
+SiliconBoard is a native Linux UCI chess GUI. The board
 sits on the left, the engine analysis on the right, and the move list along
 the bottom — with a clean dark theme.
 

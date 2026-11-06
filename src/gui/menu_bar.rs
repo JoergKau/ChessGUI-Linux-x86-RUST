@@ -72,8 +72,7 @@ pub enum MenuAction {
     StopTournament,
     /// Tournament → Show tournament: reopen the tournament window.
     ShowTournament,
-    /// The toolbar's ⓘ button: show the in-app About window (Linux; macOS
-    /// additionally has the system About panel).
+    /// The toolbar's ⓘ button: show the in-app About window.
     ShowAbout,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
@@ -449,8 +448,7 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = Some(MenuAction::LoadFen);
         }
-        // About panel (the Linux equivalent of the macOS About window):
-        // an always-visible ⓘ button, as in MD-Viewer.
+        // About panel: an always-visible ⓘ button, as in MD-Viewer.
         if ui
             .add(egui::Button::new(RichText::new("ⓘ").size(15.0)))
             .on_hover_text("About SiliconBoard")

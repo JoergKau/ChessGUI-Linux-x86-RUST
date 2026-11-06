@@ -1,11 +1,9 @@
-//! About panel for Linux (and any platform without the native macOS panel).
+//! About panel for Linux.
 //!
-//! On macOS the winit application menu provides the standard **About
-//! SiliconBoard** panel (`macos_about.rs`). Linux window managers give an
-//! immediate-mode app no such menu, so the toolbar carries an **ⓘ** button
-//! (MD-Viewer's approach), which opens this modal: app icon, name, version,
-//! a short description, the project link and the licence. It closes on OK,
-//! the backdrop or Esc.
+//! Linux window managers give an immediate-mode app no About menu, so the
+//! toolbar carries an **ⓘ** button (MD-Viewer's approach), which opens this
+//! modal: app icon, name, version, a short description, the project link and
+//! the licence. It closes on OK, the backdrop or Esc.
 
 use std::sync::OnceLock;
 
