@@ -80,12 +80,6 @@ fn program_kind(head: &[u8]) -> ProgramKind {
         ProgramKind::Foreign("a Windows program")
     } else if head.starts_with(b"PK\x03\x04") {
         ProgramKind::Foreign("a Java archive or zip file; choose the script that starts it")
-    } else if head.len() >= 4
-        && [[0xCF, 0xFA, 0xED, 0xFE], [0xCE, 0xFA, 0xED, 0xFE], [0xCA, 0xFE, 0xBA, 0xBE], [0xBE, 0xBA, 0xFE, 0xCA]]
-            .iter()
-            .any(|magic| head[..4] == *magic)
-    {
-        ProgramKind::Foreign("a macOS program")
     } else {
         ProgramKind::Unknown
     }
@@ -208,9 +202,6 @@ mod tests {
         let err = check_executable(&jar).unwrap_err().to_string();
         assert!(err.contains("Java archive"), "{err}");
         // The format of another operating system is refused with its name.
-        let macho = write_file(dir.path(), "engine-mac", &[0xCF, 0xFA, 0xED, 0xFE], 0o755);
-        let err = check_executable(&macho).unwrap_err().to_string();
-        assert!(err.contains("macOS program"), "{err}");
         let windows = write_file(dir.path(), "engine.exe", b"MZ\x90\x00", 0o755);
         assert!(check_executable(&windows).unwrap_err().to_string().contains("Windows program"));
         let text = write_file(dir.path(), "notes", b"just words\n", 0o755);
