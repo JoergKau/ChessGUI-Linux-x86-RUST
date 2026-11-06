@@ -237,19 +237,20 @@ layout the resolver finds by walking up from the executable (unit-tested in
 unpacking it again, and prints the SHA-256 for the release listing. The
 tarball is a build artefact and stays out of git.
 
-**Install locally:** `./package-linux.sh --install` puts the binary under
-`~/.local/share/siliconboard/bin/` (next to its assets, under
-`~/.local/share/siliconboard/`), a wrapper on `$PATH` at
-`~/.local/bin/siliconboard`, and the launcher and icon into
-`~/.local/share/` — after that SiliconBoard starts from the desktop menu.
-The installed launcher is also where the **taskbar/dock icon comes from on
-Wayland**: the desktop environment matches the window's `app_id`
+**Install locally:** the script **installs by default**, replacing the
+installed copy, so the daily-use app is always the one just built: the
+binary, assets and PGN go under `~/.local/share/siliconboard/`, a wrapper
+goes on `$PATH` at `~/.local/bin/siliconboard`, and the launcher and icon go
+into `~/.local/share/` — after that SiliconBoard starts from the desktop
+menu. The installed launcher is also where the **taskbar/dock icon comes
+from on Wayland**: the desktop environment matches the window's `app_id`
 (`siliconboard`, set in `main.rs`) against the `siliconboard.desktop`
 entry and shows its icon, also for minimised windows. Without an installed
 launcher — e.g. a plain `cargo run` — Wayland shows a generic icon there;
 the X11 and macOS paths take the icon compiled into the binary instead.
-Without `--install` nothing is installed and the assembled folder is simply
-left in the repository.
+`--no-install` (or `-n`) skips the install step and leaves the assembled
+folder in the repository; the old `--install` (or `-i`) flags still work
+and mean the same; an unknown argument is rejected.
 
 To run straight from the folder:
 

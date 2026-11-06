@@ -13,11 +13,15 @@
 #      `SiliconBoard-<version>-linux-<arch>.tar.gz` and print its SHA-256
 #      for the release listing.
 #
-# By default nothing is installed; `--install` (or `-i`) copies the folder
-# into `$HOME/.local` (binary to `bin/`, icon and `.desktop` file to
-# `share/`, assets and PGN to `share/siliconboard/`) and refreshes the
-# desktop database. `--no-install` (or `-n`) is accepted for symmetry and
-# does the same as the default; an unknown argument is an error.
+# By default the freshly built app is also installed into `$HOME/.local`
+# (like the macOS script installs into /Applications), so the daily-use app
+# is always the one just built: binary, assets and launcher land under
+# `~/.local/share/siliconboard` and `~/.local`, and the dock/menu icon
+# works. Installing is the default because the user forgets the flag; a
+# build left in the dev folder otherwise never shows an icon in the dock.
+# `--no-install` (or `-n`) skips the install step and leaves the folder in
+# the repo; the old `--install` (or `-i`) flags still mean the same; an
+# unknown argument is rejected.
 #
 # The tarball is a build artefact; it is listed in .gitignore.
 
@@ -26,12 +30,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 
-INSTALL=0
+INSTALL=1
 for arg in "$@"; do
     case "$arg" in
-        -i|--install) INSTALL=1 ;;
-        -n|--no-install) ;;
-        *) { echo "No such argument: $arg (use --install / --no-install)"; exit 1; } ;;
+        -i|--install) ;;
+        -n|--no-install) INSTALL=0 ;;
+        *) { echo "No such argument: $arg (use --no-install to skip the install)"; exit 1; } ;;
     esac
 done
 
@@ -73,7 +77,7 @@ Exec=siliconboard
 Icon=siliconboard
 Terminal=false
 Categories=Game;BoardGame;
-# Wayland matches the window by its app_id (`siliconboard`, set in main.rs);
+# Wayland matches the window by its app_id, "siliconboard" (set in main.rs);
 # X11 by the WM_CLASS, which winit derives from the binary name.
 StartupWMClass=siliconboard
 EOF
@@ -133,7 +137,7 @@ EOF
     fi
     echo "  Installed. Start it from the menu or with: siliconboard"
 else
-    echo "▶ Folder ready: $app_dir"
+    echo "▶ Folder ready (not installed): $app_dir"
     echo "  Run it with: $app_dir/bin/siliconboard"
-    echo "  (Re-run with --install to add a launcher to $HOME/.local.)"
+    echo "  (The install step was skipped with --no-install.)"
 fi
