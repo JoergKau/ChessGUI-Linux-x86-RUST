@@ -72,7 +72,7 @@ pub enum MenuAction {
     StopTournament,
     /// Tournament → Show tournament: reopen the tournament window.
     ShowTournament,
-    /// View → About SiliconBoard…: show the in-app About window (Linux; the
+    /// Help → About SiliconBoard…: show the in-app About window (Linux; the
     /// macOS panel is provided by the system menu instead).
     ShowAbout,
     /// Start: analyse the displayed position with every loaded engine.
