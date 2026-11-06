@@ -762,6 +762,7 @@ impl SiliconBoardApp {
         self.play_engine_moves();
         self.finish_draw_offer();
         self.play_book_reply(ctx);
+        self.adjudicate_engine_vs_engine();
         // A game that ends (or is replaced) switches its engines off, so each
         // card's button reads Start again and the engine rests.
         let live = self.live_play();
@@ -853,6 +854,37 @@ impl SiliconBoardApp {
                     );
                 }
             }
+        }
+    }
+
+    /// End an engine-vs-engine game automatically when a draw is due that no
+    /// engine can claim: threefold repetition (FIDE 9.2) and the fifty-move
+    /// rule (9.3) are both claims, and an engine game has no claimant. The
+    /// tournament loop already adjudicates the same way (`tournament_tick`);
+    /// this reuses that mechanism for a play-mode engine game. The reference
+    /// is en-croissant's `game.rs`, which ends every engine game on exactly
+    /// these two rules; the tournament's score-based `Adjudicator` stays
+    /// tournament-only, because a cp threshold is match policy, not a rule —
+    /// it must not draw a winning position here.
+    ///
+    /// A human-vs-engine game is untouched: there the human holds the claim
+    /// (Game → Claim draw (threefold)).
+    fn adjudicate_engine_vs_engine(&mut self) {
+        if !matches!(self.mode, GameMode::EngineVsEngine) || !self.live_play() {
+            return;
+        }
+        if self.game.is_threefold_repetition() {
+            self.ending = Some(Ending::ThreefoldRepetition);
+            self.set_status(
+                StatusLevel::Info,
+                "Draw by threefold repetition (adjudicated).".to_string(),
+            );
+        } else if self.game.is_fifty_move_rule() {
+            self.ending = Some(Ending::FiftyMoveRule);
+            self.set_status(
+                StatusLevel::Info,
+                "Draw by the fifty-move rule (adjudicated).".to_string(),
+            );
         }
     }
 
@@ -4375,6 +4407,55 @@ mod game_flow_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// An engine-vs-engine game ends by adjudication when a draw is due that
+    /// no engine can claim. The shuffle cycle from the owner's chaos game:
+    /// the start position recurs, and the third occurrence ends the game.
+    #[test]
+    fn an_engine_game_ends_on_threefold_repetition() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.mode = GameMode::EngineVsEngine;
+        app.game_started = true;
+        // A knight shuffle: the start position recurs (plies 0, 4, 8) and the
+        // black-to-move variant a third time (plies 2, 6, 10).
+        for mv in ["g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6"] {
+            app.game.apply_uci(mv).unwrap();
+        }
+        app.adjudicate_engine_vs_engine();
+        assert_eq!(app.ending, Some(Ending::ThreefoldRepetition));
+        assert_eq!(app.status, "Draw by threefold repetition (adjudicated).");
+        assert!(!app.live_play(), "the adjudicated game is over");
+    }
+
+    /// The user's queen-up endgame: no capture and no pawn move is possible
+    /// any more, so the halfmove clock climbs to 100 and the fifty-move rule
+    /// ends the game. (A Q+B vs K position is trivially winning while the
+    /// clock is low — the adjudication only fires when the rule says so.)
+    #[test]
+    fn an_engine_game_ends_on_the_fifty_move_rule() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.mode = GameMode::EngineVsEngine;
+        app.game_started = true;
+        app.game = GameState::from_fen("8/8/2K5/8/8/2k1B3/8/3Q4 b - - 100 120").unwrap();
+        app.adjudicate_engine_vs_engine();
+        assert_eq!(app.ending, Some(Ending::FiftyMoveRule));
+        assert_eq!(app.status, "Draw by the fifty-move rule (adjudicated).");
+    }
+
+    /// A human-vs-engine game keeps the claim to the human (FIDE 9.2/9.3):
+    /// the GUI must not end it by itself.
+    #[test]
+    fn a_human_engine_game_is_not_adjudicated() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.mode = GameMode::HumanVsEngine { human: PieceColor::White, engine: 0 };
+        app.game_started = true;
+        app.game = GameState::from_fen("8/8/2K5/8/8/2k1B3/8/3Q4 b - - 100 120").unwrap();
+        app.adjudicate_engine_vs_engine();
+        assert_eq!(app.ending, None, "the human holds the claim");
     }
 
     #[test]
