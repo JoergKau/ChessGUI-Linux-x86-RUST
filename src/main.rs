@@ -128,7 +128,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
-        .with_min_inner_size(min_size);
+        .with_min_inner_size(min_size)
+        // Wayland ignores the embedded window icon: the taskbar/dock icon
+        // comes from the installed .desktop entry, matched by this app_id
+        // (X11 uses the WM_CLASS, which winit derives from the binary name —
+        // also `siliconboard`).
+        .with_app_id("siliconboard");
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }

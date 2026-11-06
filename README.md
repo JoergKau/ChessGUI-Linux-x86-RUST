@@ -242,6 +242,12 @@ tarball is a build artefact and stays out of git.
 `~/.local/share/siliconboard/`), a wrapper on `$PATH` at
 `~/.local/bin/siliconboard`, and the launcher and icon into
 `~/.local/share/` — after that SiliconBoard starts from the desktop menu.
+The installed launcher is also where the **taskbar/dock icon comes from on
+Wayland**: the desktop environment matches the window's `app_id`
+(`siliconboard`, set in `main.rs`) against the `siliconboard.desktop`
+entry and shows its icon, also for minimised windows. Without an installed
+launcher — e.g. a plain `cargo run` — Wayland shows a generic icon there;
+the X11 and macOS paths take the icon compiled into the binary instead.
 Without `--install` nothing is installed and the assembled folder is simply
 left in the repository.
 

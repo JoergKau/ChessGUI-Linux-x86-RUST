@@ -73,7 +73,9 @@ Exec=siliconboard
 Icon=siliconboard
 Terminal=false
 Categories=Game;BoardGame;
-StartupWMClass=SiliconBoard
+# Wayland matches the window by its app_id (`siliconboard`, set in main.rs);
+# X11 by the WM_CLASS, which winit derives from the binary name.
+StartupWMClass=siliconboard
 EOF
 if [[ -f "$REPO_ROOT/assets/icon/siliconboard-512.png" ]]; then
     cp "$REPO_ROOT/assets/icon/siliconboard-512.png" \
