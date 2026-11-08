@@ -63,7 +63,7 @@ const CLOCK_REFRESH: Duration = Duration::from_millis(100);
 const EVALUATION_MS: u64 = 1_000;
 
 /// Opening-book replies stop after this many plies, so the book covers the
-/// opening only. Same default as en-croissant's game setting.
+/// opening only.
 const BOOK_MAX_PLIES: usize = 40;
 
 /// Restarts of one engine slot are counted over this window. Once an engine has
@@ -861,10 +861,10 @@ impl SiliconBoardApp {
     /// engine can claim: threefold repetition (FIDE 9.2) and the fifty-move
     /// rule (9.3) are both claims, and an engine game has no claimant. The
     /// tournament loop already adjudicates the same way (`tournament_tick`);
-    /// this reuses that mechanism for a play-mode engine game. The reference
-    /// is en-croissant's `game.rs`, which ends every engine game on exactly
-    /// these two rules; the tournament's score-based `Adjudicator` stays
-    /// tournament-only, because a cp threshold is match policy, not a rule —
+    /// this reuses that mechanism for a play-mode engine game: every
+    /// engine-vs-engine game ends on exactly these two rules. The
+    /// tournament's score-based `Adjudicator` stays tournament-only, because
+    /// a cp threshold is match policy, not a rule —
     /// it must not draw a winning position here.
     ///
     /// A human-vs-engine game is untouched: there the human holds the claim
@@ -1402,6 +1402,7 @@ impl SiliconBoardApp {
             }
             MenuAction::ToggleSessionLog => self.toggle_session_log(),
             MenuAction::ToggleTablebases => self.toggle_tablebases(),
+            MenuAction::ToggleAnalysisArrows => self.toggle_analysis_arrows(),
         }
     }
 
@@ -1917,6 +1918,18 @@ impl SiliconBoardApp {
         );
     }
 
+    /// Flip View → Analysis arrows and save it.
+    fn toggle_analysis_arrows(&mut self) {
+        self.settings.analysis_arrows = !self.settings.analysis_arrows;
+        self.save_settings();
+        let state = if self.settings.analysis_arrows {
+            "on"
+        } else {
+            "off"
+        };
+        self.set_status(StatusLevel::Info, format!("Analysis arrows: {state}."));
+    }
+
     /// Show the tournament configuration window, starting from the saved
     /// configuration and the engines the app already knows.
     fn open_tournament_dialog(&mut self) {
@@ -2411,7 +2424,7 @@ impl SiliconBoardApp {
     }
 
     /// A book move has no engine score; it resets the adjudication counters,
-    /// as cutechess does for forced/book moves.
+    /// as a forced or book move does.
     fn tournament_observe_book_move(&mut self) {
         let Some(session) = self.tournament.as_mut() else {
             return;
@@ -2459,7 +2472,7 @@ impl SiliconBoardApp {
             .observe(mover, score, last_move, fullmove);
         let ply = self.game.total_plies();
         // The window shows White's point of view; the adjudication above used
-        // the engine's own score, as cutechess does.
+        // the engine's own score.
         let score_text = score.map(|score| white_score_label(score, mover));
         if let Some(session) = &mut self.tournament {
             if let Some(game) = session.status.current.first_mut() {
@@ -2771,18 +2784,20 @@ impl SiliconBoardApp {
 
     /// Switch the configured tablebases on or off (Engine → Tablebases in
     /// engines) and keep the choice. Off stops giving the engines the
-    /// `SyzygyPath`: the loaded engines get an empty path at once, and
+    /// `SyzygyPath`: the loaded engines get the clear sentinel at once, and
     /// engines started afterwards get none.
     fn toggle_tablebases(&mut self) {
         self.settings.tablebases_in_engines = !self.settings.tablebases_in_engines;
         self.save_settings();
         let used = self.settings.tablebases_in_engines;
-        // The value the engines are given now: the saved path, or an empty
-        // one that clears theirs (as when the path is cleared in the dialog).
+        // `""` is not a reliable clear: PawnForge (and engines with the same
+        // parser) report "Unknown option: SyzygyPath value" and keep their
+        // loaded path. The Stockfish sentinel `<empty>` clears both it and
+        // Stockfish.
         let value = if used {
             self.settings.tablebase_path.clone().unwrap_or_default()
         } else {
-            String::new()
+            tablebases::SYZYGY_EMPTY.to_string()
         };
         for host in self.engines.iter_mut().flatten() {
             host.set_option(tablebases::SYZYGY_PATH, &value);
@@ -2800,8 +2815,8 @@ impl SiliconBoardApp {
     /// Apply the `SyzygyPath` string from the Load-tablebases dialog: keep
     /// it in the settings, send it to every loaded engine now, and give it
     /// to every engine started afterwards. An empty string clears the
-    /// tablebases again (the engines take an empty path until they are
-    /// restarted, after which they get none).
+    /// tablebases again (the loaded engines get the `<empty>` sentinel, and
+    /// engines started afterwards get none).
     fn set_tablebase_path(&mut self, raw: &str) {
         let value = raw.trim().to_string();
         let cleared = value.is_empty();
@@ -2826,9 +2841,10 @@ impl SiliconBoardApp {
         }
         self.save_settings();
         // The loaded engines get the path only when the switch is on; an
-        // empty string clears theirs.
+        // empty string is not a reliable clear, so the `<empty>` sentinel
+        // goes out instead (PawnForge rejects a bare empty value).
         let sent = if cleared || !self.settings.tablebases_in_engines {
-            ""
+            tablebases::SYZYGY_EMPTY
         } else {
             value.as_str()
         };
@@ -3128,8 +3144,8 @@ impl SiliconBoardApp {
             // The book answers this move, so the engine does not search.
             return SearchGoal::Rest;
         }
-        // In a play mode an engine thinks only when it is to move, as in
-        // en-croissant: nothing is searched on the other side's time.
+        // In a play mode an engine thinks only when it is to move:
+        // nothing is searched on the other side's time.
         if self.mode == GameMode::Analysis
             && !self.tournament.as_ref().is_some_and(TournamentSession::active)
         {
@@ -3721,6 +3737,63 @@ impl SiliconBoardApp {
         });
     }
 
+    /// Analysis-mode evaluation arrows: the first move of each live engine's
+    /// principal variation. Engine A draws green, engine B red. A new search
+    /// (a new evaluation) moves the arrow. When both engines choose the same
+    /// move only one arrow is drawn, deduped by from/to squares; engine A's
+    /// green arrow wins.
+    ///
+    /// An arrow belongs to a search that is **running right now** on the
+    /// displayed position: an engine that was switched off (Abort or its card
+    /// toggle), and statistics that belong to an earlier position, draw
+    /// nothing. That keeps the board from showing a stale "best move".
+    fn eval_arrows(&self) -> Vec<board_view::EvalArrow> {
+        if self.mode != GameMode::Analysis || !self.settings.analysis_arrows {
+            return Vec::new();
+        }
+        let fen = self.game.fen();
+        let mut arrows: Vec<board_view::EvalArrow> = Vec::new();
+        for slot in [0usize, 1] {
+            if !self.analysis_on[slot] {
+                continue;
+            }
+            let Some(host) = self.engines[slot].as_ref() else {
+                continue;
+            };
+            let view = host.view();
+            if view.status != AnalysisStatus::Thinking {
+                continue;
+            }
+            if view.searched_fen.as_deref() != Some(fen.as_str()) {
+                continue;
+            }
+            let Some((from, to)) = view
+                .stats
+                .pv
+                .first()
+                .and_then(|uci| board_view::arrow_endpoints(uci))
+            else {
+                continue;
+            };
+            if arrows
+                .iter()
+                .any(|arrow| arrow.from == from && arrow.to == to)
+            {
+                continue;
+            }
+            arrows.push(board_view::EvalArrow {
+                from,
+                to,
+                color: if slot == 0 {
+                    theme::ARROW_ENGINE_A
+                } else {
+                    theme::ARROW_ENGINE_B
+                },
+            });
+        }
+        arrows
+    }
+
     /// Snapshot of the evaluation panel for this frame.
     fn eval_summary(&mut self) -> EvalSummary {
         let fen = self.game.fen();
@@ -3817,6 +3890,7 @@ impl eframe::App for SiliconBoardApp {
             tablebases_in_engines: self.settings.tablebases_in_engines,
             figurines_move_list: self.settings.figurines_move_list,
             figurines_eval: self.settings.figurines_eval,
+            analysis_arrows: self.settings.analysis_arrows,
             board_themes: &self.board_themes,
             board_theme: Some(
                 self.settings
@@ -4088,7 +4162,7 @@ impl eframe::App for SiliconBoardApp {
 
         let mut board_action = BoardAction::None;
         egui::CentralPanel::default().show(ui, |ui| {
-            // en-croissant layout: a player bar above and below the board. The top
+            // Layout: a player bar above and below the board. The top
             // bar belongs to the side at the top, so flipping the board swaps them.
             let area = ui.available_rect_before_wrap();
             ui.allocate_rect(area, egui::Sense::hover());
@@ -4107,7 +4181,15 @@ impl eframe::App for SiliconBoardApp {
                     ui.label(err.to_string());
                 }
                 Some(Ok(assets)) => {
-                    board_action = board_view::show(ui, &self.game, assets, &mut self.view, human_to_move);
+                    let arrows = self.eval_arrows();
+                    board_action = board_view::show(
+                        ui,
+                        &self.game,
+                        assets,
+                        &mut self.view,
+                        human_to_move,
+                        &arrows,
+                    );
                 }
             });
         });
@@ -5284,6 +5366,40 @@ mod game_flow_tests {
     }
 
     #[test]
+    fn the_tablebases_switch_keeps_the_path_but_turns_it_on_and_off() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
+        app.set_tablebase_path("/tb/5:/tb/6");
+        assert!(app.settings.tablebases_in_engines);
+
+        app.toggle_tablebases();
+        assert!(
+            !app.settings.tablebases_in_engines,
+            "the switch turns the tablebases off"
+        );
+        assert_eq!(
+            app.settings.tablebase_path.as_deref(),
+            Some("/tb/5:/tb/6"),
+            "switching off keeps the configured path"
+        );
+
+        app.toggle_tablebases();
+        assert!(
+            app.settings.tablebases_in_engines,
+            "the switch turns them on again"
+        );
+
+        // Applying a new path after switching off means using it again.
+        app.toggle_tablebases();
+        assert!(!app.settings.tablebases_in_engines);
+        app.set_tablebase_path("/tb/new");
+        assert!(
+            app.settings.tablebases_in_engines,
+            "applying a path switches the tablebases on"
+        );
+    }
+
+    #[test]
     fn applying_tablebases_keeps_the_path_and_removes_stale_per_engine_values() {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let mut app = SiliconBoardApp::unloaded(runtime, egui::Context::default());
@@ -5312,6 +5428,128 @@ mod game_flow_tests {
             !app.engine_settings[0].contains_key(tablebases::SYZYGY_PATH),
             "a cold restart of an engine gets no path again"
         );
+    }
+
+    #[test]
+    fn switching_the_tablebases_off_sends_the_empty_sentinel() {
+        // A fake engine that records every command it receives. PawnForge
+        // rejects `setoption name SyzygyPath value ` (nothing after `value`)
+        // and keeps the loaded path; the app must send `<empty>` instead.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("commands.log");
+        let script = dir.path().join("logger.sh");
+        let body = format!(
+            "#!/bin/sh\nlog='{}'\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> \"$log\"\n  case \"$line\" in\n    uci) echo 'id name Logger'; echo uciok;;\n    isready) echo readyok;;\n    go*) echo 'bestmove e2e4';;\n    quit) exit 0;;\n  esac\ndone\n",
+            log.display()
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        let process = app.runtime.block_on(EngineProcess::spawn(&script)).unwrap();
+        app.engines[0] = Some(EngineHost::attach_with_settings(process, BTreeMap::new()));
+        assert!(run_until(&mut app, &ctx, |a| a.engines[0]
+            .as_ref()
+            .is_some_and(|host| host.status() == AnalysisStatus::Ready)));
+
+        app.settings.tablebase_path = Some("/tb/5".into());
+        app.settings.tablebases_in_engines = true;
+        app.toggle_tablebases();
+        assert!(!app.settings.tablebases_in_engines);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            if text
+                .lines()
+                .any(|line| line == "setoption name SyzygyPath value <empty>")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the engine never received the clear sentinel; commands:\n{text}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let process = app.engines[0].as_mut().unwrap().shutdown();
+        app.runtime.block_on(process.terminate()).unwrap();
+    }
+
+    /// In analysis mode each running engine's best move is an arrow on the
+    /// board (green for A, red for B), and Abort clears the arrows again —
+    /// no stale "best move" may stay on the board.
+    #[test]
+    fn an_analysis_arrow_is_drawn_for_a_running_search_and_cleared_by_abort() {
+        let mut app = app_with_two_engines();
+        let ctx = egui::Context::default();
+        assert!(
+            app.settings.analysis_arrows,
+            "the arrows are on unless turned off"
+        );
+        app.perform(MenuAction::StartAnalysis, &ctx);
+        assert!(
+            run_until(&mut app, &ctx, |a| !a.eval_arrows().is_empty()),
+            "a running analysis puts an arrow on the board"
+        );
+        // Once both engines search the displayed position there is still at
+        // most one arrow per move: identical arrows are deduped, engine A's
+        // colour winning.
+        assert!(run_until(&mut app, &ctx, |a| {
+            a.engines.iter().flatten().all(|host| host.status() == AnalysisStatus::Thinking)
+        }));
+        let arrows = app.eval_arrows();
+        assert!(!arrows.is_empty());
+        for (i, arrow) in arrows.iter().enumerate() {
+            assert!(
+                arrows[..i].iter().all(|other| other.from != arrow.from || other.to != arrow.to),
+                "identical arrows are deduped, found a duplicate: {arrow:?}"
+            );
+            assert!(
+                arrow.color == theme::ARROW_ENGINE_A || arrow.color == theme::ARROW_ENGINE_B,
+                "an arrow uses an engine colour"
+            );
+        }
+
+        // Abort stops the searches: the arrows disappear at once.
+        app.perform(MenuAction::StopAnalysis, &ctx);
+        assert!(
+            run_until(&mut app, &ctx, |a| a.eval_arrows().is_empty()),
+            "abort clears the arrows"
+        );
+    }
+
+    /// View → Analysis arrows switches the arrows off; the engines keep
+    /// analysing.
+    #[test]
+    fn the_analysis_arrows_switch_hides_the_arrows_but_not_the_analysis() {
+        let mut app = app_with_two_engines();
+        let ctx = egui::Context::default();
+        app.perform(MenuAction::ToggleAnalysisArrows, &ctx);
+        assert!(!app.settings.analysis_arrows);
+        app.perform(MenuAction::StartAnalysis, &ctx);
+        assert!(
+            run_until(&mut app, &ctx, |a| a.engines
+                .iter()
+                .flatten()
+                .all(|host| host.status() == AnalysisStatus::Thinking)),
+            "the engines analyse with the arrows off"
+        );
+        assert!(
+            app.eval_arrows().is_empty(),
+            "the switch off draws no arrow"
+        );
+        app.perform(MenuAction::StopAnalysis, &ctx);
     }
 
     #[test]

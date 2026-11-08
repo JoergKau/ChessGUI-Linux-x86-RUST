@@ -118,8 +118,7 @@ if [[ "$INSTALL" == 1 ]]; then
         cp -R "$app_dir/PGN" "$data_dir/siliconboard/PGN"
     fi
     # Icon theme entries in the usual sizes, so the dock, the app grid and
-    # the window list all find a fitting one (MD-Viewer's build.sh is the
-    # reference recipe).
+    # the window list all find a fitting one.
     for size in 16 32 128 256 512; do
         icon="assets/icon/siliconboard-$size.png"
         if [[ -f "$icon" ]]; then

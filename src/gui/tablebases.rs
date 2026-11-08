@@ -3,8 +3,8 @@
 //!
 //! Syzygy tablebases live in ordinary folders of `.rtbw` / `.rtbz` files; 5-men
 //! and 6-men files often sit in different folders. Engines take one path
-//! string, with the folders joined by `:` (the same rule en-croissant uses).
-//! The dialog edits
+//! string, with the folders joined by the platform separator (`:` on Linux,
+//! `;` on Windows). The dialog edits
 //! that one string; the app sends it to every loaded engine and gives it to
 //! each engine started afterwards. The app applies the string as it is: what
 //! counts as a usable tablebase installation is the engine's business, not the
@@ -20,9 +20,14 @@ use crate::gui::theme;
 /// `setoption name SyzygyPath value …`.
 pub const SYZYGY_PATH: &str = "SyzygyPath";
 
+/// Value that clears `SyzygyPath`. Stockfish-derived engines (Stockfish,
+/// PawnForge, …) accept the literal `<empty>`, while several of them do not
+/// parse a missing value and keep their old path when sent an empty string.
+pub const SYZYGY_EMPTY: &str = "<empty>";
+
 /// Separator between tablebase folders in `SyzygyPath`: `;` on Windows,
 /// `:` everywhere else ([UCI spec](https://www.shredderchess.com/chess-features/
-/// chess-software-features/uci-protocol.html), en-croissant `EnginesPage.tsx`).
+/// chess-software-features/uci-protocol.html)).
 pub fn path_separator() -> char {
     if cfg!(windows) { ';' } else { ':' }
 }
@@ -69,8 +74,8 @@ impl TablebaseDialog {
     }
 
     /// Replace the draft with `dirs` joined as one `SyzygyPath` string. Used
-    /// when the folder picker reports its selection; it replaces, not
-    /// extends, the text (as en-croissant's picker does).
+    /// when the folder picker reports its selection; it replaces the text
+    /// rather than extending it.
     pub fn set_draft_dirs<I, P>(&mut self, dirs: I)
     where
         I: IntoIterator<Item = P>,
@@ -168,6 +173,14 @@ mod tests {
         let expected = if cfg!(windows) { ';' } else { ':' };
         assert_eq!(path_separator(), expected);
         assert_eq!(join_paths(["/a/egtb/5", "/b/egtb/6"]), format!("/a/egtb/5{expected}/b/egtb/6"));
+    }
+
+    #[test]
+    fn the_clear_value_is_the_stockfish_empty_sentinel() {
+        // PawnForge refuses an empty value ("Unknown option: SyzygyPath
+        // value") and keeps the loaded path; Stockfish and PawnForge both
+        // clear on `<empty>`.
+        assert_eq!(SYZYGY_EMPTY, "<empty>");
     }
 
     #[test]
