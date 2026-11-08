@@ -1185,6 +1185,29 @@ mod tests {
         );
     }
 
+    /// Owner report (FEN `8/1p6/1P1K4/pk6/8/8/5B2/8 b - - 3 56`): two engines
+    /// picking Kb4 and Kc4 — different destinations from the same b5 —
+    /// showed only one arrow. Both must paint cap, shaft and head.
+    #[test]
+    fn two_arrows_from_the_same_square_both_paint() {
+        let board_rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(800.0));
+        let square = 100.0;
+        let green = EvalArrow { from: sq("b5"), to: sq("c4"), color: Color32::GREEN };
+        let red = EvalArrow { from: sq("b5"), to: sq("b4"), color: Color32::RED };
+        for orientation in [true, false] {
+            let arrows = [green, red];
+            assert_eq!(
+                shortened_arrows(orientation, square, board_rect, &arrows),
+                vec![false, false],
+                "different destinations never shorten"
+            );
+            for arrow in arrows {
+                let shapes = arrow_shapes(orientation, square, board_rect, arrow, false);
+                assert_eq!(shapes.len(), 3, "{arrow:?} paints cap, shaft and head");
+            }
+        }
+    }
+
     #[test]
     fn an_arrow_that_shares_its_destination_is_shortened() {
         let board_rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(800.0));

@@ -1442,7 +1442,13 @@ impl SiliconBoardApp {
     /// instead, and a tournament match stops.
     fn report_stalled_engines(&mut self) {
         for slot in 0..2 {
-            let stalled = self.engine_live(slot) && self.engines[slot].as_ref().is_some_and(EngineHost::is_stalled);
+            // A stalled host is handled whether it is still live or already
+            // offline: the monitor task kills the process the moment it
+            // declares the stall, so the next frame usually sees an offline
+            // host — skipping it here would leave the engine offline forever,
+            // its card frozen on the last evaluation and its analysis arrow
+            // gone (BUG-8-06).
+            let stalled = self.engines[slot].as_ref().is_some_and(EngineHost::is_stalled);
             if !stalled {
                 continue;
             }
@@ -5549,6 +5555,155 @@ mod game_flow_tests {
             app.eval_arrows().is_empty(),
             "the switch off draws no arrow"
         );
+        app.perform(MenuAction::StopAnalysis, &ctx);
+    }
+
+    /// A scripted UCI engine that keeps searching (a background loop prints
+    /// `info` lines while the flag file exists), answers `isready` and `stop`
+    /// like a real engine, and reports `pv`.
+    fn write_script_engine(dir: &std::path::Path, slot: usize, pv: &str) -> std::path::PathBuf {
+        let script = dir.join(format!("engine{slot}.sh"));
+        let flag = dir.join(format!("search{slot}.flag"));
+        let body = format!(
+            "#!/bin/sh\nFLAG='{flag_path}'\n( while :; do\n  if [ -e \"$FLAG\" ]; then\n    echo \"info depth 20 score cp 10 pv {pv}\"\n  fi\n  sleep 0.05\ndone ) &\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Arrow{slot}'; echo uciok;;\n    isready) echo readyok;;\n    position*) ;;\n    go*) touch \"$FLAG\";;\n    stop) rm -f \"$FLAG\"; echo 'bestmove 0000';;\n    quit) exit 0;;\n  esac\ndone\n",
+            flag_path = flag.display(),
+            slot = slot,
+            pv = pv,
+        );
+        std::fs::write(&script, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// Owner report (FEN `8/1p6/1P1K4/pk6/8/8/5B2/8 b - - 3 56`): with two
+    /// engines analysing the displayed position and picking different moves
+    /// from the same from-square (Kc4 vs Kb4), only one arrow appeared.
+    /// Both arrows must be on the board.
+    #[test]
+    fn two_engines_picking_different_moves_show_two_arrows() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        for (slot, pv) in ["b5c4", "b5b4"].iter().enumerate() {
+            let script = write_script_engine(dir.path(), slot, pv);
+            let process = app.runtime.block_on(EngineProcess::spawn(&script)).unwrap();
+            app.engines[slot] = Some(EngineHost::attach_with_settings(process, BTreeMap::new()));
+        }
+        app.game = GameState::from_fen("8/1p6/1P1K4/pk6/8/8/5B2/8 b - - 3 56").unwrap();
+        app.perform(MenuAction::StartAnalysis, &ctx);
+        assert!(
+            run_until(&mut app, &ctx, |a| a
+                .engines
+                .iter()
+                .flatten()
+                .all(|h| h.status() == AnalysisStatus::Thinking)),
+            "both engines analyse the FEN position"
+        );
+        assert!(
+            run_until(&mut app, &ctx, |a| a.eval_arrows().len() == 2),
+            "both arrows are on the board: {:?}",
+            app.eval_arrows()
+        );
+        app.perform(MenuAction::StopAnalysis, &ctx);
+    }
+
+    /// Same report, but with browsing: the engines start on one position and
+    /// the user then moves to the reported FEN while both are searching, so
+    /// both run a stop → bestmove → restart cycle. After it, both arrows
+    /// must be back and stay.
+    #[test]
+    fn both_arrows_survive_browsing_to_the_reported_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        for (slot, pv) in ["a1a2", "a1a3"].iter().enumerate() {
+            let script = write_script_engine(dir.path(), slot, pv);
+            let process = app.runtime.block_on(EngineProcess::spawn(&script)).unwrap();
+            app.engines[slot] = Some(EngineHost::attach_with_settings(process, BTreeMap::new()));
+        }
+        app.perform(MenuAction::StartAnalysis, &ctx);
+        assert!(
+            run_until(&mut app, &ctx, |a| a.eval_arrows().len() == 2),
+            "both arrows are on the board on the first position"
+        );
+        // The user browses to the reported position.
+        app.game = GameState::from_fen("8/1p6/1P1K4/pk6/8/8/5B2/8 b - - 3 56").unwrap();
+        // The restart transient (searched_fen still the old position) may
+        // briefly show nothing; once both engines search the new position,
+        // both arrows must be back and stay.
+        assert!(
+            run_until(&mut app, &ctx, |a| a.eval_arrows().len() == 2),
+            "both arrows return after browsing: {:?} — statuses {:?}, fens {:?}, stalls {:?}",
+            app.eval_arrows(),
+            app.engines.iter().map(|h| h.as_ref().map(|h| h.status())).collect::<Vec<_>>(),
+            app.engines.iter().map(|h| h.as_ref().map(|h| h.view().searched_fen)).collect::<Vec<_>>(),
+            app.engines.iter().map(|h| h.as_ref().and_then(|h| h.stall_reason())).collect::<Vec<_>>(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            app.logic_frame(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(
+                app.eval_arrows().len(),
+                2,
+                "both arrows stay on the board"
+            );
+        }
+        app.perform(MenuAction::StopAnalysis, &ctx);
+    }
+
+    /// BUG-8-06: an engine that misses a watchdog deadline (here: it never
+    /// answers `stop` when the user browses on) is killed by the monitor task
+    /// and the host flips to Offline in the same frame. The stall restart must
+    /// still happen, so the arrow — like the card — comes back. Before the
+    /// fix the slot stayed Offline forever while its card kept showing the
+    /// last evaluation, which looked like a missing arrow.
+    #[test]
+    fn an_engine_killed_by_the_watchdog_returns_and_draws_its_arrow_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        // Slot 0 misbehaves once the user browses: it prints `info` lines in a
+        // loop and never reads the `stop` that the position change sends.
+        for (slot, pv, stuck) in [("0", "b5c4", true), ("1", "b5b4", false)].iter() {
+            let body = format!(
+                "#!/bin/sh\nn=1\nwhile IFS= read -r line; do\n  case \"$line\" in\n    uci) echo 'id name Arrow{slot}'; echo uciok;;\n    isready) echo readyok;;\n    position*) ;;\n    go*)\n      while :; do\n        echo \"info depth $n score cp 10 pv {pv}\"\n        n=$((n+1))\n        sleep 0.05\n      done;;\n    stop) {stop_reply};;\n    quit) exit 0;;\n  esac\ndone\n",
+                slot = slot,
+                pv = pv,
+                stop_reply = if *stuck { " ;; # stuck: no bestmove" } else { "echo 'bestmove 0000'" },
+            );
+            let script = dir.path().join(format!("engine{slot}.sh"));
+            std::fs::write(&script, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let process = app.runtime.block_on(EngineProcess::spawn(&script)).unwrap();
+            app.engines[slot.parse::<usize>().unwrap()] =
+                Some(EngineHost::attach_with_settings(process, BTreeMap::new()));
+        }
+        app.perform(MenuAction::StartAnalysis, &ctx);
+        assert!(
+            run_until(&mut app, &ctx, |a| a.eval_arrows().len() == 2),
+            "both arrows are on the board before browsing"
+        );
+        // The user browses on: engine A misses the stop deadline, the monitor
+        // kills it, and the app must restart it and show its arrow again.
+        app.game = GameState::from_fen("8/1p6/1P1K4/pk6/8/8/5B2/8 b - - 3 56").unwrap();
+        assert!(
+            run_until(&mut app, &ctx, |a| a.eval_arrows().len() == 2),
+            "both arrows return after the stall restart: {:?} — statuses {:?}",
+            app.eval_arrows(),
+            app.engines.iter().map(|h| h.as_ref().map(|h| h.status())).collect::<Vec<_>>(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            app.logic_frame(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(app.eval_arrows().len(), 2, "both arrows stay on the board");
+        }
         app.perform(MenuAction::StopAnalysis, &ctx);
     }
 
