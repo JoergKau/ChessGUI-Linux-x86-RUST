@@ -1,5 +1,21 @@
 # SiliconBoard — Release Notes
 
+## v1.1.0
+
+**New: Setup Board.** _Game → Setup board…_ opens an editor in the right
+dashboard, in place of the two engine cards. Pick a piece from either colour
+palette and left-click a square to place it; right-click removes a piece.
+Clear the board, choose the side to move, set White/Black O-O and O-O-O, or
+paste a FEN into the editor (or the top FEN bar) and press Enter or **Apply**.
+The editor checks the position and names every problem — missing or extra
+kings, pawns on the backranks, too much material, the side not to move in
+check, adjacent kings, invalid castling rights, impossible checks, checkmate
+and stalemate — and keeps **Close** disabled until the position is sound.
+Closing makes the position a fresh game, ready for any play mode.
+
+**Also:** a fresh install now opens at 1316 × 844 with an 834-point right
+panel, a 197-point move list and a 160-point PGN games list.
+
 ## v1.0.1
 
 **New in analysis mode:** each engine's current best move is drawn as an arrow

@@ -21,8 +21,9 @@ use app::SiliconBoardApp;
 /// Application identifier for the eframe window.
 const APP_NAME: &str = "SiliconBoard";
 
-/// Initial window size (board, evaluation dashboard and move list).
-const INITIAL_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
+/// Initial window size (board, evaluation dashboard and move list) when an
+/// old settings file has no saved size.
+const INITIAL_WINDOW_SIZE: [f32; 2] = [1316.0, 844.0];
 
 /// Smallest board edge (in points) that the window may leave visible. This is
 /// the size the board has in the user's saved layout, so shrinking the window
@@ -33,7 +34,7 @@ const MIN_BOARD_SIDE: f32 = 320.0;
 const PANEL_GAP: f32 = 8.0;
 
 /// Width of the right panel before a panel layout has been saved.
-const DEFAULT_RIGHT_WIDTH: f32 = 520.0;
+const DEFAULT_RIGHT_WIDTH: f32 = 834.0;
 
 /// Smallest window height, kept for the top bar, board and both engine cards.
 const MIN_WINDOW_HEIGHT: f32 = 640.0;
