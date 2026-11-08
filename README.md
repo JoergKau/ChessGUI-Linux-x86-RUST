@@ -15,6 +15,14 @@ across the top.
 - **Play from a position:** paste a FEN into the top bar and choose
   _Game → Start from here…_ — two engines play on from that position with the
   current time control, and the saved PGN starts there (`SetUp`/`FEN`).
+- **Setup Board:** _Game → Setup board…_ opens an editor in the right panel.
+  Pick a piece from either colour palette, left-click a square to place it,
+  right-click to remove it, clear the board, paste a FEN and press Enter or
+  Apply, choose the side to move and set the castling rights. The editor
+  checks the position (one king per side, no
+  check against the side not to move, no checkmate or stalemate, legal
+  castling rights and material) and keeps Close disabled until it is sound.
+  Closing makes the position a fresh game, ready for any play mode.
 - **Engine care:** a watchdog restarts or stops an unresponsive engine,
   launcher scripts and broken files are checked before start, failed starts
   report a reason.
@@ -26,7 +34,7 @@ across the top.
   panel in the toolbar.
 
 A short summary of what SiliconBoard does lives in
-[features-list.md](features-list.md); what ships in v1.0 is in
+[features-list.md](features-list.md); what ships in the latest release is in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## The ready-to-run release
@@ -34,23 +42,23 @@ A short summary of what SiliconBoard does lives in
 Each release carries a built, packed binary:
 
 ```
-SiliconBoard-1.0.1-linux-x86_64.tar.gz
+SiliconBoard-1.1.0-linux-x86_64.tar.gz
 ```
 
-(one folder — `SiliconBoard-1.0.1-linux-x86_64/` — holding the binary in
+(one folder — `SiliconBoard-1.1.0-linux-x86_64/` — holding the binary in
 `bin/`, the asset tree in `public/`, the start-up PGN in `PGN/`, `LICENSE`
 and this README). The SHA-256 is printed by `./package-linux.sh` and listed
 with each release; check a download with:
 
 ```shell
-sha256sum SiliconBoard-1.0.1-linux-x86_64.tar.gz
+sha256sum SiliconBoard-1.1.0-linux-x86_64.tar.gz
 ```
 
 To use it:
 
-1. Unpack the tarball: `tar -xzf SiliconBoard-1.0.1-linux-x86_64.tar.gz`
+1. Unpack the tarball: `tar -xzf SiliconBoard-1.1.0-linux-x86_64.tar.gz`
 2. Run straight from the folder:
-   `SiliconBoard-1.0.1-linux-x86_64/bin/siliconboard`
+   `SiliconBoard-1.1.0-linux-x86_64/bin/siliconboard`
 3. For desktop integration — a menu entry, and the dock/taskbar icon (also
    for minimised windows) — run `./package-linux.sh` once from the unpacked
    folder. It installs into `~/.local` (see *Packaging* below) and you can

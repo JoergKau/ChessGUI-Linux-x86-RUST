@@ -29,10 +29,11 @@ use crate::chess::players::{accepts_draw, GameMode, Seat};
 use crate::chess::{BookError, GameState, PieceColor, PolyglotBook};
 use crate::engine::protocol::GoControl;
 use crate::engine::{AnalysisStatus, EngineError, EngineHost, EngineProcess, EngineWake, SearchGoal};
-use crate::gui::board_view::{self, BoardAction, BoardView};
+use crate::gui::board_view::{self, BoardAction, BoardView, SetupBoardAction};
 use crate::gui::eval_panel::{self, EvalCard, EvalSummary};
 use crate::gui::menu_bar::{self, MenuAction, MenuState};
 use crate::gui::options_dialog::{default_value, OptionsAction, OptionsDialog};
+use crate::gui::setup_board::{self, SetupAction, SetupBoard};
 use crate::gui::tablebases::{self, TablebaseDialog, TablebaseOutcome};
 use crate::gui::tournament_dialog::{
     self, ProgressAction, TournamentAction, TournamentDialog, TournamentSide,
@@ -93,7 +94,7 @@ const ENGINE_TICK: Duration = Duration::from_millis(500);
 const ENGINE_WAKE_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Default height of the move list when no size has been saved yet.
-const DEFAULT_MOVE_LIST_HEIGHT: f32 = 190.0;
+const DEFAULT_MOVE_LIST_HEIGHT: f32 = 197.0;
 
 /// Smallest useful move list, so a dragged panel can always be grabbed again.
 const MIN_MOVE_LIST_HEIGHT: f32 = 80.0;
@@ -517,6 +518,14 @@ pub struct SiliconBoardApp {
     settings_save_due: Option<Instant>,
     /// Board widget state (interaction, orientation).
     view: BoardView,
+    /// The Setup Board editor, while it is open. The right dashboard shows it
+    /// in place of the engine cards and the board edits this position instead
+    /// of playing moves.
+    setup: Option<SetupBoard>,
+    /// The editor revision last copied into the top FEN field. The field is
+    /// left alone while the user types in it, and refreshed only when the
+    /// editor's position actually changed.
+    setup_fen_revision: u64,
     /// Engine slots: A and B.
     engines: [Option<EngineHost>; 2],
     /// `true` while a file dialog or spawn for a slot is in flight.
@@ -679,6 +688,8 @@ impl SiliconBoardApp {
             settings_save_pending: false,
             settings_save_due: None,
             view: BoardView::default(),
+            setup: None,
+            setup_fen_revision: 0,
             engines: [None, None],
             engine_loading: [false, false],
             analysis_on: [false, false],
@@ -829,6 +840,11 @@ impl SiliconBoardApp {
     /// was searched for the displayed position, so it is played only if it is
     /// still legal there, and only if the game has not been decided on the clock.
     fn play_engine_moves(&mut self) {
+        // The board is being edited: a bestmove still in flight belongs to the
+        // old position and must not be played into it.
+        if self.setup.is_some() {
+            return;
+        }
         for slot in 0..2 {
             let Some(uci) = self.engines[slot].as_mut().and_then(EngineHost::take_engine_move) else {
                 continue;
@@ -1301,6 +1317,17 @@ impl SiliconBoardApp {
             );
             return;
         }
+        if self.setup.is_some() && action == MenuAction::LoadFen {
+            self.load_setup_fen();
+            return;
+        }
+        if self.setup.is_some() && action_conflicts_with_setup(action) {
+            self.set_status(
+                StatusLevel::Warning,
+                "Finish or cancel Setup Board first.".to_string(),
+            );
+            return;
+        }
         match action {
             MenuAction::NewGame => {
                 // A fresh game is not part of the loaded PGN: the games list
@@ -1318,6 +1345,7 @@ impl SiliconBoardApp {
                 }
                 self.set_status(StatusLevel::Info, "New game.".to_string());
             }
+            MenuAction::OpenSetupBoard => self.open_setup_board(),
             MenuAction::StartFromFen => self.start_from_fen(),
             MenuAction::FlipBoard => self.view.flip(),
             MenuAction::SetMode(mode) => self.set_mode(mode),
@@ -3516,6 +3544,128 @@ impl SiliconBoardApp {
             .unwrap_or_else(|| format!("Engine {}", slot_letter(slot)))
     }
 
+    /// Game → Setup board…: edit the displayed position in the right panel.
+    /// A running game is paused first, so an engine cannot move while the
+    /// position is being changed; the game itself is replaced only when the
+    /// user closes the editor on a valid position.
+    fn open_setup_board(&mut self) {
+        if self
+            .tournament
+            .as_ref()
+            .is_some_and(TournamentSession::active)
+        {
+            self.set_status(
+                StatusLevel::Warning,
+                "Stop the tournament before editing the position.".to_string(),
+            );
+            return;
+        }
+        if self.setup.is_some() {
+            self.set_status(StatusLevel::Info, "Setup Board is already open.".to_string());
+            return;
+        }
+        self.game_started = false;
+        if let Some(clock) = self.clock.as_mut() {
+            clock.pause();
+        }
+        for slot in 0..2 {
+            if self.engine_live(slot) {
+                self.set_engine_analysis(slot, false);
+            }
+        }
+        self.setup = Some(SetupBoard::from_position(&self.game.position()));
+        self.sync_setup_fen_field();
+        self.view.clear_selection();
+        self.set_status(
+            StatusLevel::Info,
+            "Setup Board: choose a piece, then click a square. Right-click removes a piece."
+                .to_string(),
+        );
+    }
+
+    /// Keep the top FEN field on the edited position, but only after an actual
+    /// change in the editor. Copying it every frame would erase what the user
+    /// is typing there, because Enter loads that field into the editor.
+    fn sync_setup_fen_field(&mut self) {
+        let Some(setup) = &self.setup else {
+            return;
+        };
+        if setup.revision() == self.setup_fen_revision {
+            return;
+        }
+        self.fen_input = setup.fen();
+        self.setup_fen_revision = setup.revision();
+    }
+
+    /// Enter in the top FEN field while Setup Board is open: load the typed
+    /// position into the editor instead of replacing the game.
+    fn load_setup_fen(&mut self) {
+        let Some(setup) = self.setup.as_mut() else {
+            return;
+        };
+        match setup.set_fen(&self.fen_input.clone()) {
+            Ok(()) => {
+                self.set_status(StatusLevel::Info, "FEN loaded into Setup Board.".to_string());
+                self.sync_setup_fen_field();
+            }
+            Err(err) => self.set_status(StatusLevel::Error, err),
+        }
+    }
+
+    /// Apply the Setup Board position and return to the normal board. The
+    /// editors refuse to close while errors exist, so this ends in a playable
+    /// position; the user then picks a game mode and presses Start.
+    fn close_setup_board(&mut self) {
+        let Some(setup) = self.setup.as_ref() else {
+            return;
+        };
+        let chess = match setup.to_chess() {
+            Ok(chess) => chess,
+            Err(errors) => {
+                if let Some(setup) = self.setup.as_mut() {
+                    setup.refresh_errors();
+                }
+                let text = errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "The position is not valid.".to_string());
+                self.set_status(StatusLevel::Error, format!("Setup Board: {}", text));
+                return;
+            }
+        };
+        self.game = GameState::from_position(chess);
+        self.ending = None;
+        self.pgn_termination = None;
+        self.pgn_players = None;
+        self.game_started = false;
+        self.clear_pgn_browser();
+        self.reset_clock();
+        self.view.clear_selection();
+        self.setup = None;
+        for host in self.engines.iter_mut().flatten() {
+            host.new_game();
+        }
+        self.sync_position(true);
+        self.set_status(
+            StatusLevel::Info,
+            "Position set. Choose a game mode, then press Start.".to_string(),
+        );
+    }
+
+    /// Leave Setup Board without changing the game.
+    fn cancel_setup_board(&mut self) {
+        if self.setup.take().is_none() {
+            return;
+        }
+        self.sync_position(true);
+        let text = if self.mode == GameMode::Analysis {
+            "Setup cancelled. Press Start to analyse again."
+        } else {
+            "Setup cancelled. Press Start to continue the game."
+        };
+        self.set_status(StatusLevel::Info, text.to_string());
+    }
+
     /// Game → Start from here…: two engines play the position in the FEN
     /// field with the current time control. The game's start position is that
     /// FEN, so the PGN carries `SetUp`/`FEN` and the moves from there.
@@ -4056,11 +4206,25 @@ impl eframe::App for SiliconBoardApp {
         } else {
             None
         };
+        let mut setup_action = SetupAction::None;
         let dashboard = egui::Panel::right("evaluation")
             .resizable(true)
             .default_size(dashboard_width)
             .min_size(eval_panel::MIN_WIDTH)
             .show(ui, |ui| {
+                if let Some(setup) = self.setup.as_mut() {
+                    match self.assets.as_ref() {
+                        Some(Ok(assets)) => setup_action = setup_board::show(ui, setup, assets),
+                        Some(Err(err)) => {
+                            ui.colored_label(theme::DANGER_RED, "Asset load failed:");
+                            ui.label(err.to_string());
+                        }
+                        None => {
+                            ui.label("Loading piece and board assets…");
+                        }
+                    }
+                    return;
+                }
                 if let Some(collection) = game_list {
                     let list_panel = egui::Panel::bottom("pgn_games_list")
                         .resizable(true)
@@ -4083,6 +4247,12 @@ impl eframe::App for SiliconBoardApp {
                         }
                     });
             });
+        match setup_action {
+            SetupAction::Close => self.close_setup_board(),
+            SetupAction::Cancel => self.cancel_setup_board(),
+            SetupAction::None => {}
+        }
+        self.sync_setup_fen_field();
         match list_action {
             pgn_panel::GameListAction::Select(index) => self.select_pgn_game(index),
             pgn_panel::GameListAction::Close => self.pgn_browser_list_open = false,
@@ -4167,6 +4337,7 @@ impl eframe::App for SiliconBoardApp {
         }
 
         let mut board_action = BoardAction::None;
+        let mut setup_board_action = SetupBoardAction::None;
         egui::CentralPanel::default().show(ui, |ui| {
             // Layout: a player bar above and below the board. The top
             // bar belongs to the side at the top, so flipping the board swaps them.
@@ -4187,19 +4358,32 @@ impl eframe::App for SiliconBoardApp {
                     ui.label(err.to_string());
                 }
                 Some(Ok(assets)) => {
-                    let arrows = self.eval_arrows();
-                    board_action = board_view::show(
-                        ui,
-                        &self.game,
-                        assets,
-                        &mut self.view,
-                        human_to_move,
-                        &arrows,
-                    );
+                    if let Some(setup) = self.setup.as_ref() {
+                        setup_board_action =
+                            board_view::show_setup(ui, setup.board(), assets, &mut self.view);
+                    } else {
+                        let arrows = self.eval_arrows();
+                        board_action = board_view::show(
+                            ui,
+                            &self.game,
+                            assets,
+                            &mut self.view,
+                            human_to_move,
+                            &arrows,
+                        );
+                    }
                 }
             });
         });
 
+        if let Some(setup) = self.setup.as_mut() {
+            match setup_board_action {
+                SetupBoardAction::Place { square } => setup.place(square),
+                SetupBoardAction::Remove { square } => setup.remove(square),
+                SetupBoardAction::None => {}
+            }
+        }
+        self.sync_setup_fen_field();
         self.apply_board_action(board_action);
         if let Some(action) = requested {
             self.perform(action, &ctx);
@@ -4243,6 +4427,7 @@ fn action_conflicts_with_tournament(action: MenuAction) -> bool {
     matches!(
         action,
         MenuAction::NewGame
+            | MenuAction::OpenSetupBoard
             | MenuAction::StartFromFen
             | MenuAction::SetMode(_)
             | MenuAction::OpenTimeControl
@@ -4256,6 +4441,32 @@ fn action_conflicts_with_tournament(action: MenuAction) -> bool {
             | MenuAction::Resign
             | MenuAction::OfferDraw
             | MenuAction::ClaimThreefold
+    )
+}
+
+/// Menu actions that would change the game, start/stop an engine, or open
+/// another board view while Setup Board is editing. Cosmetic actions, copying
+/// and saving files, the settings dialogs and the book remain available.
+fn action_conflicts_with_setup(action: MenuAction) -> bool {
+    matches!(
+        action,
+        MenuAction::NewGame
+            | MenuAction::OpenSetupBoard
+            | MenuAction::StartFromFen
+            | MenuAction::SetMode(_)
+            | MenuAction::OpenPgn
+            | MenuAction::ShowPgnGames
+            | MenuAction::LoadEngine(_)
+            | MenuAction::ToggleEngine(_)
+            | MenuAction::StartAnalysis
+            | MenuAction::StopAnalysis
+            | MenuAction::ToggleBookInGames
+            | MenuAction::Resign
+            | MenuAction::OfferDraw
+            | MenuAction::ClaimThreefold
+            | MenuAction::OpenTournament
+            | MenuAction::StopTournament
+            | MenuAction::ShowTournament
     )
 }
 
@@ -5760,5 +5971,104 @@ mod game_flow_tests {
             "a cleared tablebase path is not handed to a fresh engine"
         );
         assert_eq!(cleared.get("Hash").map(String::as_str), Some("256"));
+    }
+
+    #[test]
+    fn setup_board_opens_on_the_displayed_position_and_close_replaces_the_game() {
+        use shakmaty::{Piece, Role, Square};
+
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        app.game.apply_uci("e2e4").unwrap();
+        let displayed = app.game.fen();
+
+        app.perform(MenuAction::OpenSetupBoard, &ctx);
+        let setup = app.setup.as_ref().expect("the menu item opens Setup Board");
+        assert_eq!(setup.fen(), displayed, "editing starts from the displayed position");
+        assert!(
+            setup.errors().is_empty(),
+            "the displayed position is valid: {:?}",
+            setup.errors()
+        );
+
+        // Clear the board and build K vs K with Black to move.
+        let setup = app.setup.as_mut().unwrap();
+        setup.clear();
+        setup.set_selected(Some(Piece {
+            color: shakmaty::Color::White,
+            role: Role::King,
+        }));
+        setup.place(Square::E1);
+        setup.set_selected(Some(Piece {
+            color: shakmaty::Color::Black,
+            role: Role::King,
+        }));
+        setup.place(Square::E8);
+        setup.set_turn(shakmaty::Color::Black);
+
+        app.close_setup_board();
+        assert!(app.setup.is_none(), "close leaves the setup view");
+        assert_eq!(app.game.fen(), "4k3/8/8/8/8/8/8/4K3 b - - 0 1");
+        assert_eq!(app.game.total_plies(), 0, "the edited position starts a new history");
+        assert!(!app.game_started, "the user picks a mode and presses Start");
+    }
+
+    #[test]
+    fn the_top_fen_field_loads_into_an_open_setup_board() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        let game_before = app.game.fen();
+
+        app.perform(MenuAction::OpenSetupBoard, &ctx);
+        app.fen_input = "4k3/8/8/8/8/8/8/4K3 b - - 0 1".to_string();
+        app.perform(MenuAction::LoadFen, &ctx);
+
+        assert!(app.setup.is_some(), "the editor stays open");
+        assert_eq!(
+            app.setup.as_ref().unwrap().fen(),
+            "4k3/8/8/8/8/8/8/4K3 b - - 0 1",
+            "the typed FEN replaces the editor's position"
+        );
+        assert_eq!(
+            app.game.fen(),
+            game_before,
+            "the game itself is untouched until the editor closes"
+        );
+
+        app.close_setup_board();
+        assert_eq!(app.game.fen(), "4k3/8/8/8/8/8/8/4K3 b - - 0 1");
+    }
+
+    #[test]
+    fn setup_board_refuses_to_close_on_an_invalid_position() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        let before = app.game.fen();
+
+        app.perform(MenuAction::OpenSetupBoard, &ctx);
+        app.setup.as_mut().unwrap().clear();
+        app.close_setup_board();
+
+        assert!(app.setup.is_some(), "the editor stays open while the position is invalid");
+        assert_eq!(app.game.fen(), before, "the game is unchanged");
+        assert_eq!(app.status_level, StatusLevel::Error);
+        assert!(app.status.contains("no king"), "the status names the reason: {}", app.status);
+    }
+
+    #[test]
+    fn setup_board_blocks_a_menu_action_that_would_replace_the_game() {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(runtime, ctx.clone());
+        app.perform(MenuAction::OpenSetupBoard, &ctx);
+        app.perform(MenuAction::NewGame, &ctx);
+
+        assert!(app.setup.is_some(), "Setup Board keeps the board while it is open");
+        assert_eq!(app.status, "Finish or cancel Setup Board first.");
+        app.cancel_setup_board();
+        assert!(app.setup.is_none(), "cancel leaves the editor");
     }
 }

@@ -55,11 +55,11 @@ pub struct Settings {
     /// Bounded by [`ENGINE_HISTORY_LIMIT`]; duplicates are removed.
     pub engine_history: Vec<PathBuf>,
     /// The window's inner size in points, restored at the next launch.
-    /// A fresh install opens at the reference layout (1316 × 844).
+    /// A fresh install opens at the default layout (1316 × 844).
     pub window_size: Option<WindowSize>,
     /// The evaluation and move-list panel sizes, restored at the next launch.
-    /// A fresh install opens with the reference layout (right 780, bottom
-    /// 190, games list 271).
+    /// A fresh install opens with the default layout (right 834, bottom
+    /// 197, games list 160).
     pub panels: Option<PanelSizes>,
     /// Board image file name from `public/images/board/`, e.g. `blue.png`.
     pub board_theme: Option<String>,
@@ -102,9 +102,9 @@ pub struct PanelSizes {
 }
 
 /// The games-list height a fresh install (or an old settings file) uses: the
-/// reference layout's docked games-list height.
+/// default layout's docked games-list height.
 pub fn default_game_list_height() -> f32 {
-    271.0
+    160.0
 }
 
 /// Tablebases are used as soon as they are configured — the switch exists to
@@ -116,8 +116,8 @@ fn default_tablebases_in_engines() -> bool {
 impl Default for Settings {
     /// No clock, book play off (the menu item waits for a loaded book, which
     /// only the user loads — there is no default book), no saved engine options.
-    /// A fresh install opens at the reference layout: a 1316 × 844 window with
-    /// a 780-point right panel, a 190-point move list and a 271-point games
+    /// A fresh install opens at the default layout: a 1316 × 844 window with
+    /// an 834-point right panel, a 197-point move list and a 160-point games
     /// list.
     fn default() -> Self {
         Self {
@@ -135,8 +135,8 @@ impl Default for Settings {
                 height: 844.0,
             }),
             panels: Some(PanelSizes {
-                right_width: 780.0,
-                bottom_height: 190.0,
+                right_width: 834.0,
+                bottom_height: 197.0,
                 game_list_height: default_game_list_height(),
             }),
             board_theme: None,
@@ -332,7 +332,7 @@ mod tests {
                 width: 1316.0,
                 height: 844.0
             }),
-            "a fresh install opens at the reference window size"
+            "a fresh install opens at the default window size"
         );
     }
 
@@ -356,11 +356,11 @@ mod tests {
         assert_eq!(
             Settings::default().panels,
             Some(PanelSizes {
-                right_width: 780.0,
-                bottom_height: 190.0,
+                right_width: 834.0,
+                bottom_height: 197.0,
                 game_list_height: default_game_list_height(),
             }),
-            "a fresh install opens at the reference panel sizes"
+            "a fresh install opens at the default panel sizes"
         );
     }
 
@@ -482,13 +482,13 @@ mod tests {
         assert_eq!(loaded, Settings::default());
     }
 
-    /// A brand-new user gets the reference layout the owner uses: a
-    /// 1316 × 844 window with a 780-point right panel, a 190-point move
-    /// list and a 271-point games list. Everything else is the documented
+    /// A brand-new user gets the default layout: a 1316 × 844 window with
+    /// an 834-point right panel, a 197-point move list and a 160-point games
+    /// list. Everything else is the documented
     /// default (no clock, no book, A/B empty, figurines in the move list
     /// only).
     #[test]
-    fn a_fresh_install_opens_at_the_reference_layout() {
+    fn a_fresh_install_opens_at_the_default_layout() {
         let dir = tempfile::tempdir().unwrap();
         let fresh = load_sync(&dir.path().join("absent.json")).unwrap();
         assert_eq!(
@@ -501,8 +501,8 @@ mod tests {
         assert_eq!(
             fresh.panels,
             Some(PanelSizes {
-                right_width: 780.0,
-                bottom_height: 190.0,
+                right_width: 834.0,
+                bottom_height: 197.0,
                 game_list_height: default_game_list_height(),
             })
         );
