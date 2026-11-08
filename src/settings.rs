@@ -69,6 +69,9 @@ pub struct Settings {
     pub figurines_move_list: bool,
     /// Draw engine PV piece letters as figurines. Off by default.
     pub figurines_eval: bool,
+    /// Show the analysis best-move arrows on the board (View → Analysis
+    /// arrows). On by default.
+    pub analysis_arrows: bool,
     /// The last tournament configuration, so the dialog opens where the user
     /// left it.
     pub tournament: Option<TournamentConfig>,
@@ -140,6 +143,7 @@ impl Default for Settings {
             piece_set: None,
             figurines_move_list: true,
             figurines_eval: false,
+            analysis_arrows: true,
             tournament: None,
         }
     }
@@ -382,6 +386,20 @@ mod tests {
     }
 
     #[test]
+    fn analysis_arrows_are_on_by_default_and_round_trip() {
+        assert!(
+            Settings::default().analysis_arrows,
+            "the best-move arrows are on unless turned off"
+        );
+        let restored = parse(&to_json(&Settings::default())).unwrap();
+        assert!(restored.analysis_arrows);
+        let off = parse(r#"{"analysis_arrows":false}"#).unwrap();
+        assert!(!off.analysis_arrows);
+        // A settings file from before the field keeps the default (on).
+        assert!(parse("{}").unwrap().analysis_arrows);
+    }
+
+    #[test]
     fn the_board_theme_round_trips() {
         let settings = Settings {
             board_theme: Some("wood2.jpg".into()),
@@ -492,6 +510,7 @@ mod tests {
         assert!(fresh.engine_history.is_empty());
         assert!(fresh.figurines_move_list);
         assert!(!fresh.figurines_eval);
+        assert!(fresh.analysis_arrows, "the best-move arrows are on");
     }
 
     #[test]

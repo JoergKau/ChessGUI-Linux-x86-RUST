@@ -380,7 +380,7 @@ impl GameState {
     /// `true` when the last 50 moves by each side made no capture and no pawn
     /// move (halfmove clock ≥ 100, FIDE Article 9.3). The side to move may
     /// claim the draw; an engine-vs-engine game has no claimant, so the GUI
-    /// adjudicates it — as en-croissant does for its engine games.
+    /// adjudicates it.
     pub fn is_fifty_move_rule(&self) -> bool {
         self.position().halfmoves() >= 100
     }
@@ -708,8 +708,7 @@ pub enum Ending {
     ThreefoldRepetition,
     /// The fifty-move rule (FIDE Article 9.3): the last 50 moves by each side
     /// made no capture and no pawn move. In an engine-vs-engine game no one
-    /// can claim it, so the GUI adjudicates the draw (as en-croissant and
-    /// cutechess do for engine games).
+    /// can claim it, so the GUI adjudicates the draw.
     FiftyMoveRule,
     /// A tournament adjudicator awarded the game to `winner`.
     AdjudicatedWin {

@@ -1,5 +1,18 @@
 # SiliconBoard — Release Notes
 
+## v1.0.1
+
+**New in analysis mode:** each engine's current best move is drawn as an arrow
+on the board, from the centre of the from-square to the centre of the
+destination square. Engine A is green and engine B red, and the arrow follows
+the search as a new best move is found. When both engines choose the same move
+only one arrow is drawn. View → Analysis arrows switches the arrows on or off
+(on by default).
+
+**Also:** the `SyzygyPath` clear now sends the `<empty>` sentinel (some
+engines keep their old tablebases when given an empty value), and the source
+comments describe behaviour directly instead of naming other chess GUIs.
+
 ## v1.0
 
 A native Linux UCI chess GUI in Rust: board on the left, live

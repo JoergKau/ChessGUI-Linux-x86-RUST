@@ -69,6 +69,8 @@ pub enum MenuAction {
     ToggleFigurinesMoveList,
     /// View → Figurines in engine evaluation: toggle `♘f3` in the PV.
     ToggleFigurinesEval,
+    /// View → Analysis arrows: show or hide the engines' best-move arrows.
+    ToggleAnalysisArrows,
     /// Tournament → New tournament…: open the engine-match dialog.
     OpenTournament,
     /// Tournament → Stop tournament: stop the running match.
@@ -119,6 +121,8 @@ pub struct MenuState<'a> {
     pub figurines_move_list: bool,
     /// Whether the engine PV draws piece letters as figurines.
     pub figurines_eval: bool,
+    /// Whether the board shows the engines' best-move arrows.
+    pub analysis_arrows: bool,
     /// Number of moves played, shown in the Game menu.
     pub ply_count: usize,
     /// Whether a tournament is currently playing games.
@@ -410,6 +414,17 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 action = Some(MenuAction::ToggleFigurinesEval);
                 ui.close();
             }
+            if ui
+                .add(egui::Button::selectable(
+                    state.analysis_arrows,
+                    "Analysis arrows",
+                ))
+                .on_hover_text("Show each engine's best move as an arrow on the board")
+                .clicked()
+            {
+                action = Some(MenuAction::ToggleAnalysisArrows);
+                ui.close();
+            }
         });
         ui.menu_button("Tournament", |ui| {
             let new = ui
@@ -477,7 +492,7 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = Some(MenuAction::LoadFen);
         }
-        // About panel: an always-visible ⓘ button, as in MD-Viewer.
+        // About panel: an always-visible ⓘ button.
         if ui
             .add(egui::Button::new(RichText::new("ⓘ").size(15.0)))
             .on_hover_text("About SiliconBoard")

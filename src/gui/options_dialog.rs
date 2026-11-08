@@ -3,7 +3,7 @@
 //! [`OptionsAction`], and the app sends it to the engine. The dialog holds
 //! only the values it shows.
 //!
-//! The layout follows the settings page in en-croissant: dashed section
+//! The layout uses dashed section
 //! headings, labels above their fields, and a two-column grid so an engine
 //! with a dozen options reads as a page instead of a long list.
 
@@ -515,8 +515,8 @@ fn spin_speed(min: i64, max: i64) -> f64 {
     }
 }
 
-/// A dashed rule with its label in the middle, like en-croissant's section
-/// headings. Shared with the tournament dialog so both pages read alike.
+/// A dashed rule with its label in the middle.
+/// Shared with the tournament dialog so both pages read alike.
 pub(crate) fn section_heading(ui: &mut Ui, title: &str) {
     ui.add_space(6.0);
     let width = ui.available_width();

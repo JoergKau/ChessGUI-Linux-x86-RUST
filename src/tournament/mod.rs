@@ -3,8 +3,8 @@
 //!
 //! The pure parts live here so they can be tested without an engine process.
 //! The application drives the games on its normal board: one game at a time,
-//! with the move list, clocks and engine cards live. The behaviour follows
-//! cutechess where it matters for a two-engine match: colours alternate, an
+//! with the move list, clocks and engine cards live. The behaviour covers what
+//! a two-engine match needs: colours alternate, an
 //! EPD file supplies the starting positions, `resign`/`draw` adjudication uses
 //! the engines' own scores, and the PGN file receives one game per round.
 
@@ -277,7 +277,7 @@ impl TournamentConfig {
         options
     }
 
-    /// The PGN tag value for the clock, in cutechess's minutes+seconds form.
+    /// The PGN tag value for the clock, in minutes+seconds form.
     pub fn time_control_tag(&self) -> String {
         time_control_tag(&self.time_control)
     }
@@ -516,8 +516,7 @@ impl EpdBook {
 }
 
 /// Turn one EPD line into a six-field FEN. The first four fields are the
-/// position; `hmvc` and `fmvn` operations supply the move counters, as in
-/// cutechess's `EpdRecord`.
+/// position; `hmvc` and `fmvn` operations supply the move counters.
 pub fn parse_epd_line(line: &str) -> Option<String> {
     let trimmed = line.trim_start_matches('\u{feff}').trim();
     if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
@@ -671,7 +670,7 @@ pub enum Adjudication {
     Resign(PieceColor),
 }
 
-/// Resign and draw adjudication, mirroring cutechess's `GameAdjudicator`.
+/// Resign and draw adjudication for a match.
 #[derive(Clone, Debug)]
 pub struct Adjudicator {
     resign_move_count: u32,
@@ -699,7 +698,7 @@ impl Adjudicator {
 
     /// Observe the score of the side that just moved, at the position after
     /// its move. `last_move` resets the draw counter after captures and pawn
-    /// moves, as cutechess does.
+    /// moves.
     pub fn observe(
         &mut self,
         mover: PieceColor,

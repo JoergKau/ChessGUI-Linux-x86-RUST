@@ -1,7 +1,7 @@
 //! About panel for Linux.
 //!
 //! Linux window managers give an immediate-mode app no About menu, so the
-//! toolbar carries an **ⓘ** button (MD-Viewer's approach), which opens this
+//! toolbar carries an **ⓘ** button, which opens this
 //! modal: app icon, name, version, a short description, the project link and
 //! the licence. It closes on OK, the backdrop or Esc.
 
