@@ -1,5 +1,32 @@
 # SiliconBoard — Release Notes
 
+## v1.2.1
+
+**Reliability and performance audit.** A full code audit found several
+two-engine and long-match issues; this release fixes all of them.
+
+- **Tournament stop:** the red **Stop** button now ends a running match, even
+  after the live Tournament window has been closed. The end-of-match summary
+  always appears.
+- **Engines from a locale-less launch:** .NET engines such as Pedantic no
+  longer exit during start-up when the app inherits no `LANG`; they get
+  `LANG=en_US.UTF-8` when the inherited locale is only `C`/`POSIX`/`C.UTF-8`.
+  A failed start reports the stderr line that names the problem, and a
+  tournament names the failing engine and reason.
+- **Analysis:** the card greys the evaluation while the search has moved to a
+  deeper level than the score came from. A draw offer can no longer act on a
+  score of a position the game has already left.
+- **Two-engine performance:** four Tokio workers instead of two; engine events
+  are queued only at search boundaries (info is merged) with a 256-event frame
+  cap; the broadcast buffer is 256; the 500 ms timer runs only for a starting
+  handshake; analysis arrows allocate nothing per frame.
+- **Tournaments:** each game gets its own opening-book seed, so repeated
+  openings play different book lines.
+- **Files:** two quick Open PGN requests can no longer show the slower first
+  file. The standard-start check uses the PolyGlot Zobrist key.
+- **Packaging:** release builds keep their symbols for useful crash reports;
+  only the distributable folder is stripped.
+
 ## v1.1.0
 
 **New: Setup Board.** _Game → Setup board…_ opens an editor in the right

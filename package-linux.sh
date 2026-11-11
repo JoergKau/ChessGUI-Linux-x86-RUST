@@ -52,6 +52,9 @@ echo "▶ Assembling $app_dir (v$version)"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/bin"
 cp target/release/siliconboard "$app_dir/bin/"
+# Cargo keeps the symbol table in the release profile so dev/internal builds
+# give useful crash reports; only the folder that ships is stripped.
+strip --strip-unneeded "$app_dir/bin/siliconboard"
 cp -R public "$app_dir/public"
 # The start-up PGN rides along, so the installed app also opens
 # PGN/WorldChamp1972.pgn at launch and selects game 1.

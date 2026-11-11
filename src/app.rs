@@ -293,6 +293,21 @@ fn wakes_now(important: bool, since_last: Duration) -> bool {
     important || since_last >= ENGINE_WAKE_INTERVAL
 }
 
+/// Book-picker seed for one tournament game. The same match and game number
+/// always give the same seed, while different games (and different matches)
+/// get unrelated sequences, so repeated openings do not replay one book line.
+fn book_seed(tournament_generation: u64, game_number: u32) -> u64 {
+    tournament_generation.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(game_number)
+}
+
+/// Whether the 500 ms frame tick is needed for this engine state. Only a
+/// starting engine has a deadline that runs on the frame clock (the handshake
+/// timeout in `report_engine_start_up`); a searching engine is watched by its
+/// own monitor task and wakes the window on output or a stall.
+fn engine_tick_needed(status: AnalysisStatus) -> bool {
+    status == AnalysisStatus::Starting
+}
+
 /// Results of background work, delivered to the UI thread. `None` means the
 /// user cancelled a file dialog, which leaves the state unchanged.
 enum AppEvent {
@@ -312,8 +327,11 @@ enum AppEvent {
     OpeningNamesLoaded {
         outcome: Result<OpeningNames, OpeningError>,
     },
-    /// A PGN file was read and parsed.
+    /// A PGN file was read and parsed. `request` is the sequence number of the
+    /// Open request; a result from an older request is stale and is ignored, so
+    /// two quick opens cannot show the first file's game after the second one.
     PgnOpened {
+        request: u64,
         outcome: Option<Result<(String, PgnCollection), OpenPgnError>>,
     },
     /// File was written.
@@ -559,6 +577,9 @@ pub struct SiliconBoardApp {
     engine_status: [Option<AnalysisStatus>; 2],
     /// When each slot's engine was spawned, for the handshake timeout.
     engine_started: [Option<Instant>; 2],
+    /// Why the last spawn of a slot failed, so a tournament can name the
+    /// reason instead of only saying that an engine could not be started.
+    engine_spawn_error: [Option<String>; 2],
     /// The FEN text in the top bar. Follows the position unless the user edits it.
     fen_input: String,
     /// Board images found in `public/images/board/`, for the View menu.
@@ -581,6 +602,9 @@ pub struct SiliconBoardApp {
     tournament: Option<TournamentSession>,
     /// Counter used to reject late results from an older tournament.
     tournament_generation: u64,
+    /// Sequence number of the latest Open PGN request. A result whose number
+    /// is older than this belongs to a file the user has already replaced.
+    pgn_request: u64,
     /// A multi-game PGN whose games are listed on the right panel.
     pgn_collection: Option<PgnCollection>,
     /// Selected game in `pgn_collection` (zero-based).
@@ -705,6 +729,7 @@ impl SiliconBoardApp {
             status_level: StatusLevel::Info,
             engine_status: [None, None],
             engine_started: [None, None],
+            engine_spawn_error: [None, None],
             fen_input: GameState::new().fen(),
             board_themes: Vec::new(),
             piece_sets: Vec::new(),
@@ -716,6 +741,7 @@ impl SiliconBoardApp {
             tournament_dialog: None,
             tournament: None,
             tournament_generation: 0,
+            pgn_request: 0,
             pgn_collection: None,
             pgn_browser_selected: 0,
             pgn_termination: None,
@@ -757,15 +783,16 @@ impl SiliconBoardApp {
             ctx.request_repaint();
         }
         // Engine output wakes the window from the reader task, so a frame runs
-        // as soon as there is new analysis. The tick below only covers a
-        // starting handshake and the watchdog of a running search. An idle
-        // loaded engine costs no frames.
-        let engine_tick_needed = self.engines.iter().flatten().any(|host| {
-            matches!(
-                host.status(),
-                AnalysisStatus::Starting | AnalysisStatus::Thinking
-            )
-        });
+        // as soon as there is new analysis. The watchdog of a running search
+        // lives in the engine's own monitor task, which wakes the window when
+        // it declares a stall. Only the handshake timeout still needs a timer,
+        // so a searching engine no longer costs two extra frames per second
+        // (BUG-7-20). An idle loaded engine costs no frames either.
+        let engine_tick_needed = self
+            .engines
+            .iter()
+            .flatten()
+            .any(|host| engine_tick_needed(host.status()));
         if engine_tick_needed {
             ctx.request_repaint_after(ENGINE_TICK);
         }
@@ -991,6 +1018,7 @@ impl SiliconBoardApp {
                     match outcome {
                         None => self.set_status(StatusLevel::Info, "Engine selection cancelled.".to_string()),
                         Some(Ok(process)) => {
+                            self.engine_spawn_error[slot] = None;
                             let binary = process.binary().display().to_string();
                             let path = process.binary().to_path_buf();
                             if let Some(mut old) = self.engines[slot].take() {
@@ -1026,6 +1054,7 @@ impl SiliconBoardApp {
                         }
                         Some(Err(err)) => {
                             self.restarting[slot] = None;
+                            self.engine_spawn_error[slot] = Some(err.to_string());
                             log::error!("engine spawn failed: {}", err);
                             self.set_status(StatusLevel::Error, format!("Could not start engine {}: {}", slot_letter(slot), err));
                         }
@@ -1076,40 +1105,49 @@ impl SiliconBoardApp {
                     }
                     Err(err) => log::warn!("opening names not loaded: {}", err),
                 },
-                AppEvent::PgnOpened { outcome } => match outcome {
-                    None => self.set_status(StatusLevel::Info, "Open cancelled.".to_string()),
-                    Some(Ok((name, mut collection))) => {
-                        collection.name = name.clone();
-                        if collection.is_multi_game() {
-                            let total = collection.games.len();
-                            self.pgn_collection = Some(collection);
-                            self.pgn_browser_selected = 0;
-                            self.pgn_browser_list_open = true;
-                            self.select_pgn_game(0);
-                            self.set_status(
-                                StatusLevel::Info,
-                                format!(
-                                    "Opened {} — {} games. Pick a game in the games list on the right.",
-                                    name, total
-                                ),
-                            );
-                        } else {
-                            self.pgn_collection = None;
-                            self.pgn_browser_selected = 0;
-                            self.pgn_browser_list_open = false;
-                            match collection.load_game(0) {
-                                Ok(import) => self.load_pgn_game(&name, import, None),
-                                Err(err) => {
-                                    self.set_status(StatusLevel::Error, err.to_string())
+                AppEvent::PgnOpened { request, outcome } => {
+                    if request != self.pgn_request {
+                        log::debug!(
+                            "ignoring a PGN result from request {request}; the latest is {}",
+                            self.pgn_request
+                        );
+                        continue;
+                    }
+                    match outcome {
+                        None => self.set_status(StatusLevel::Info, "Open cancelled.".to_string()),
+                        Some(Ok((name, mut collection))) => {
+                            collection.name = name.clone();
+                            if collection.is_multi_game() {
+                                let total = collection.games.len();
+                                self.pgn_collection = Some(collection);
+                                self.pgn_browser_selected = 0;
+                                self.pgn_browser_list_open = true;
+                                self.select_pgn_game(0);
+                                self.set_status(
+                                    StatusLevel::Info,
+                                    format!(
+                                        "Opened {} — {} games. Pick a game in the games list on the right.",
+                                        name, total
+                                    ),
+                                );
+                            } else {
+                                self.pgn_collection = None;
+                                self.pgn_browser_selected = 0;
+                                self.pgn_browser_list_open = false;
+                                match collection.load_game(0) {
+                                    Ok(import) => self.load_pgn_game(&name, import, None),
+                                    Err(err) => {
+                                        self.set_status(StatusLevel::Error, err.to_string())
+                                    }
                                 }
                             }
                         }
+                        Some(Err(err)) => {
+                            log::error!("PGN open failed: {}", err);
+                            self.set_status(StatusLevel::Error, err.to_string());
+                        }
                     }
-                    Some(Err(err)) => {
-                        log::error!("PGN open failed: {}", err);
-                        self.set_status(StatusLevel::Error, err.to_string());
-                    }
-                },
+                }
                 AppEvent::BoardThemeLoaded { theme, outcome } => match outcome {
                     Ok(image) => {
                         let handle = ctx.load_texture(&theme.file, image, egui::TextureOptions::LINEAR);
@@ -1399,7 +1437,22 @@ impl SiliconBoardApp {
             MenuAction::ChooseEngine { slot, choice } => self.choose_engine(slot, choice),
             MenuAction::ToggleEngine(slot) => self.toggle_engine(slot),
             MenuAction::StartAnalysis => self.set_analysis(true),
-            MenuAction::StopAnalysis => self.set_analysis(false),
+            MenuAction::StopAnalysis => {
+                // The red Stop button is the obvious way out of a running
+                // match, especially once the user has closed the tournament
+                // window. Stopping only the searches would leave the match
+                // owning the board and unable to continue, so it stops the
+                // whole tournament (completed games stay in the PGN).
+                if self
+                    .tournament
+                    .as_ref()
+                    .is_some_and(TournamentSession::active)
+                {
+                    self.stop_tournament();
+                } else {
+                    self.set_analysis(false);
+                }
+            }
             MenuAction::LoadFen => match GameState::from_fen(self.fen_input.trim()) {
                 Ok(game) => {
                     self.game = game;
@@ -2212,6 +2265,50 @@ impl SiliconBoardApp {
         }
     }
 
+    /// Why a tournament engine is missing or offline: the slot, the engine and
+    /// its own diagnosis (exit status and the message that names the problem),
+    /// or the spawn error. The generic sentence alone hid cases such as
+    /// Pedantic exiting on a missing locale.
+    fn tournament_engine_failure(&self) -> String {
+        let mut problems = Vec::new();
+        for slot in 0..2 {
+            let problem = match self.engines[slot].as_ref() {
+                Some(host) if host.status() == AnalysisStatus::Offline => {
+                    let view = host.view();
+                    let name = view.name.filter(|name| !name.is_empty());
+                    Some(format!(
+                        "engine {} ({}) did not start: {}",
+                        slot_letter(slot),
+                        name.as_deref().unwrap_or(&view.binary_name),
+                        host.failure_detail()
+                    ))
+                }
+                Some(_) => None,
+                None => Some(self.engine_spawn_error[slot].as_ref().map_or_else(
+                    || format!("engine {} is not loaded", slot_letter(slot)),
+                    |error| {
+                        format!(
+                            "engine {} could not be started: {}",
+                            slot_letter(slot),
+                            error
+                        )
+                    },
+                )),
+            };
+            if let Some(problem) = problem {
+                problems.push(problem);
+            }
+        }
+        if problems.is_empty() {
+            "A tournament engine could not be started.".to_string()
+        } else {
+            format!(
+                "A tournament engine could not be started: {}.",
+                problems.join("; ")
+            )
+        }
+    }
+
     /// The EPD index finished on a blocking thread.
     fn handle_tournament_book_loaded(
         &mut self,
@@ -2326,6 +2423,14 @@ impl SiliconBoardApp {
         };
 
         let (game, white_slot, white_name, black_name, number, total, control, options) = prepared;
+        // A fresh per-game seed: games that start from the same position then
+        // get independent book lines instead of replaying one fixed sequence,
+        // which is what makes a match statistically meaningful (audit §2.7).
+        let generation = self
+            .tournament
+            .as_ref()
+            .map_or(0, |session| session.generation);
+        self.book_picker = BookPicker::with_seed(book_seed(generation, number));
         self.game = game;
         self.ending = None;
         self.pgn_termination = None;
@@ -2410,9 +2515,8 @@ impl SiliconBoardApp {
                 if ready {
                     self.start_tournament_game();
                 } else if failed && !loading {
-                    self.fail_tournament(
-                        "A tournament engine could not be started.".to_string(),
-                    );
+                    let message = self.tournament_engine_failure();
+                    self.fail_tournament(message);
                 }
             }
             TournamentPhase::BetweenGames => {
@@ -2643,6 +2747,9 @@ impl SiliconBoardApp {
             .as_ref()
             .is_some_and(|session| session.phase == TournamentPhase::Finished)
         {
+            // The summary pop-up appears even when the user closed the live
+            // tournament window earlier: closing it only hides the progress
+            // view, never the result of the match.
             self.tournament_window_open = false;
             self.tournament_finished_popup = true;
             self.set_status(StatusLevel::Info, summary);
@@ -3002,11 +3109,20 @@ impl SiliconBoardApp {
             log::info!("no start-up PGN: PGN/WorldChamp1972.pgn is not next to the assets");
             return;
         };
+        let request = self.next_pgn_request();
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let outcome = Some(read_pgn(&path).await);
-            tx.send(AppEvent::PgnOpened { outcome });
+            tx.send(AppEvent::PgnOpened { request, outcome });
         });
+    }
+
+    /// Take the next Open PGN sequence number. A result that arrives with an
+    /// older number is from a file the user has already replaced; the reader
+    /// ignores it (audit §2.5).
+    fn next_pgn_request(&mut self) -> u64 {
+        self.pgn_request = self.pgn_request.wrapping_add(1);
+        self.pgn_request
     }
 
     /// Load one parsed PGN game onto the board. `game_number` is set when it
@@ -3086,6 +3202,7 @@ impl SiliconBoardApp {
     /// Show the file picker for a PGN file, then read and parse it.
     fn open_pgn(&mut self) {
         self.set_status(StatusLevel::Info, "Choose a PGN file…".to_string());
+        let request = self.next_pgn_request();
         let tx = self.events_tx.clone();
         self.spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
@@ -3099,7 +3216,7 @@ impl SiliconBoardApp {
                     Some(read_pgn(&path).await)
                 }
             };
-            tx.send(AppEvent::PgnOpened { outcome });
+            tx.send(AppEvent::PgnOpened { request, outcome });
         });
     }
 
@@ -4436,7 +4553,6 @@ fn action_conflicts_with_tournament(action: MenuAction) -> bool {
             | MenuAction::LoadEngine(_)
             | MenuAction::ToggleEngine(_)
             | MenuAction::StartAnalysis
-            | MenuAction::StopAnalysis
             | MenuAction::ToggleBookInGames
             | MenuAction::Resign
             | MenuAction::OfferDraw
@@ -4583,6 +4699,25 @@ mod tests {
     }
 
     #[test]
+    fn only_a_starting_engine_needs_the_frame_tick() {
+        assert!(engine_tick_needed(AnalysisStatus::Starting));
+        assert!(
+            !engine_tick_needed(AnalysisStatus::Thinking),
+            "the monitor task watches a search and wakes the window itself"
+        );
+        assert!(!engine_tick_needed(AnalysisStatus::Ready));
+        assert!(!engine_tick_needed(AnalysisStatus::Offline));
+    }
+
+    #[test]
+    fn a_tournament_game_gets_its_own_book_seed() {
+        let first = book_seed(7, 1);
+        assert_eq!(first, book_seed(7, 1), "one game always gets the same seed");
+        assert_ne!(first, book_seed(7, 2), "the next game gets a new sequence");
+        assert_ne!(first, book_seed(8, 1), "a new match starts afresh");
+    }
+
+    #[test]
     fn frame_timer_reports_one_second_of_frames() {
         let start = Instant::now();
         let cost = Duration::from_millis(2);
@@ -4706,6 +4841,34 @@ mod game_flow_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// A tournament session in a chosen phase, with a PGN file in `dir`. Used
+    /// by the window and stop tests, which need no engines.
+    fn tournament_session_for_test(
+        dir: &tempfile::TempDir,
+        phase: TournamentPhase,
+        config: TournamentConfig,
+    ) -> TournamentSession {
+        let pgn_file = std::fs::File::create(dir.path().join("match.pgn")).unwrap();
+        let total_games = config.games;
+        TournamentSession {
+            adjudicator: Adjudicator::new(&config),
+            config,
+            phase,
+            book: None,
+            schedule: Vec::new(),
+            game_number: 1,
+            white_slot: 0,
+            pgn_file,
+            status: TournamentStatus {
+                running: phase != TournamentPhase::Finished,
+                total_games,
+                ..TournamentStatus::default()
+            },
+            next_game_due: None,
+            generation: 0,
+        }
     }
 
     /// An engine-vs-engine game ends by adjudication when a draw is due that
@@ -5338,6 +5501,7 @@ mod game_flow_tests {
         let text = "[Event \"One\"]\n[White \"A\"]\n[Black \"B\"]\n[Result \"1-0\"]\n\n1. e4 e5 1-0\n\n[Event \"Two\"]\n[White \"C\"]\n[Black \"D\"]\n[Result \"0-1\"]\n\n1. d4 d5 0-1\n";
         let collection = pgn::parse_pgn_collection(text).unwrap();
         app.events_tx.send(AppEvent::PgnOpened {
+            request: 0,
             outcome: Some(Ok(("multi.pgn".to_string(), collection))),
         });
         app.logic_frame(&ctx);
@@ -5403,6 +5567,7 @@ mod game_flow_tests {
         )
         .unwrap();
         app.events_tx.send(AppEvent::PgnOpened {
+            request: 0,
             outcome: Some(Ok(("result.pgn".to_string(), collection))),
         });
         app.logic_frame(&ctx);
@@ -6070,5 +6235,132 @@ mod game_flow_tests {
         assert_eq!(app.status, "Finish or cancel Setup Board first.");
         app.cancel_setup_board();
         assert!(app.setup.is_none(), "cancel leaves the editor");
+    }
+
+    #[test]
+    fn an_older_pgn_result_does_not_replace_a_newer_one() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        // The user has already opened a newer file; the first file's slow read
+        // arrives last and must be ignored.
+        app.pgn_request = 2;
+        let text = "[Event \"Old\"]\n\n1. e4 e5 1-0\n\n[Event \"Older\"]\n\n1. d4 d5 0-1\n";
+        let collection = pgn::parse_pgn_collection(text).unwrap();
+        app.events_tx.send(AppEvent::PgnOpened {
+            request: 1,
+            outcome: Some(Ok(("stale.pgn".to_string(), collection))),
+        });
+        app.logic_frame(&ctx);
+        assert!(
+            app.pgn_collection.is_none(),
+            "a result from an older Open request is discarded"
+        );
+    }
+
+    /// Owner report: after the user closes the tournament window, the red
+    /// Stop button in the top bar refused with "Stop the tournament before…",
+    /// so the match could not be stopped any more. It must stop the whole
+    /// tournament instead of being blocked.
+    #[test]
+    fn the_top_bar_stop_stops_a_running_tournament_after_its_window_was_closed() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        app.tournament = Some(tournament_session_for_test(
+            &dir,
+            TournamentPhase::BetweenGames,
+            TournamentConfig::default(),
+        ));
+        app.tournament_window_open = false; // the user closed the live window
+
+        app.perform(MenuAction::StopAnalysis, &ctx);
+
+        let session = app.tournament.as_ref().unwrap();
+        assert_eq!(session.phase, TournamentPhase::Finished);
+        assert!(!session.status.running);
+        assert!(session.status.cancelled, "the match counts as stopped");
+        assert!(
+            app.tournament_finished_popup,
+            "the summary opens when the user stops the match"
+        );
+        assert!(
+            !app.status.contains("Stop the tournament before"),
+            "the red Stop must not be refused: {}",
+            app.status
+        );
+    }
+
+    /// A tournament that cannot start must name the failing slot and the
+    /// reason instead of only the generic sentence.
+    #[test]
+    fn a_tournament_start_failure_names_the_engine_and_reason() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+            ctx,
+        );
+        app.engine_spawn_error[1] = Some("permission denied".to_string());
+        let message = app.tournament_engine_failure();
+        assert!(
+            message.starts_with("A tournament engine could not be started:"),
+            "{message}"
+        );
+        assert!(
+            message.contains("engine B could not be started: permission denied"),
+            "{message}"
+        );
+    }
+
+    /// The user may close the progress window while the match runs. The
+    /// end-of-match summary must still appear.
+    #[test]
+    fn a_closed_tournament_window_still_shows_the_summary_at_the_end() {
+        let ctx = egui::Context::default();
+        let mut app = SiliconBoardApp::unloaded(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+            ctx.clone(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = TournamentConfig {
+            games: 1,
+            ..TournamentConfig::default()
+        };
+        app.tournament = Some(tournament_session_for_test(
+            &dir,
+            TournamentPhase::Playing,
+            config,
+        ));
+        // The user closed the live window while the match still ran.
+        app.tournament_window_open = false;
+        // Fool's mate: the game is over, so the last scheduled game completes.
+        app.game =
+            GameState::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
+                .unwrap();
+
+        app.finish_tournament_game();
+
+        let session = app.tournament.as_ref().unwrap();
+        assert_eq!(session.phase, TournamentPhase::Finished);
+        assert_eq!(session.status.completed_games, 1);
+        assert!(
+            app.tournament_finished_popup,
+            "the summary must open even though the live window was closed"
+        );
+        assert!(!app.tournament_window_open);
     }
 }
