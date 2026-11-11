@@ -42,23 +42,23 @@ A short summary of what SiliconBoard does lives in
 Each release carries a built, packed binary:
 
 ```
-SiliconBoard-1.1.0-linux-x86_64.tar.gz
+SiliconBoard-1.2.1-linux-x86_64.tar.gz
 ```
 
-(one folder — `SiliconBoard-1.1.0-linux-x86_64/` — holding the binary in
+(one folder — `SiliconBoard-1.2.1-linux-x86_64/` — holding the binary in
 `bin/`, the asset tree in `public/`, the start-up PGN in `PGN/`, `LICENSE`
 and this README). The SHA-256 is printed by `./package-linux.sh` and listed
 with each release; check a download with:
 
 ```shell
-sha256sum SiliconBoard-1.1.0-linux-x86_64.tar.gz
+sha256sum SiliconBoard-1.2.1-linux-x86_64.tar.gz
 ```
 
 To use it:
 
-1. Unpack the tarball: `tar -xzf SiliconBoard-1.1.0-linux-x86_64.tar.gz`
+1. Unpack the tarball: `tar -xzf SiliconBoard-1.2.1-linux-x86_64.tar.gz`
 2. Run straight from the folder:
-   `SiliconBoard-1.1.0-linux-x86_64/bin/siliconboard`
+   `SiliconBoard-1.2.1-linux-x86_64/bin/siliconboard`
 3. For desktop integration — a menu entry, and the dock/taskbar icon (also
    for minimised windows) — run `./package-linux.sh` once from the unpacked
    folder. It installs into `~/.local` (see *Packaging* below) and you can
