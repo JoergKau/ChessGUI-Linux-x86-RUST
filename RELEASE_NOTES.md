@@ -1,0 +1,297 @@
+# SiliconBoard — Release Notes
+
+## v1.4.0
+
+**Tournaments:** the tournament window now offers three formats. **Match**
+keeps the two-engine, fixed-game schedule. **Round-Robin** loads three engines
+and plays every pairing in both colours for the chosen number of rounds.
+**Gauntlet** makes engine 1 play each of the other two engines, likewise in
+both colours and repeated for the chosen rounds. A third **Engine 3** row has
+its own file picker, and all three engines stay loaded in their own slots for
+the whole tournament. The running and finished windows show the per-engine
+standings for multi-engine formats, and the final points line in the result
+window is yellow.
+
+**PGN and databases:** the PGN splitter now understands comments that wrap
+onto a line beginning with an engine annotation such as `[%eval …]` or
+`[%wdl …]`, so those games load completely and the phantom entries disappear.
+Opening a large `.sbd` database shows a modal spinner while the file and its
+counts are read. **Remove Duplicates** and **Remove Empty Games** report real
+progress, honour Cancel, and Remove Empty Games deletes in batches. The
+Player filter ranks exact names first, and picking a name switches the filter
+to that exact stored player, so `NN` no longer returns every name containing
+`nn`.
+
+**Also in this build:** the Player label shows `Player (exact)` after picking
+a name; the tournament result points are highlighted; the three existing
+clippy warnings in the app and menu bar were fixed.
+
+**Linux release.** This is the same 1.4.0 feature set as the desktop
+release, built for Linux x86-64 (X11 or Wayland, Vulkan). The platform
+integration follows Linux conventions: settings live in
+`~/.config/siliconboard/` (XDG), session logs in
+`~/.local/state/siliconboard/logs/`, the database's **Show in file manager**
+button uses `xdg-open`, native engines are ELF programs or launcher scripts,
+and the toolbar's **ⓘ** button opens the in-app About panel. The
+`package-linux.sh` script builds the release folder and the
+`SiliconBoard-1.4.0-linux-x86_64.tar.gz` asset.
+
+## v1.3.0
+
+**Chess databases:** SiliconBoard now keeps collections of games in its own
+SQLite-backed `.sbd` files. Create one from a PGN file, or open an existing
+database, and browse it in a filterable, sortable table. Games are stored
+verbatim, so comments, variations, NAGs and unknown tags survive the import.
+
+- **Import:** PGN files and Scid `.si4`/`.si5` files. A repeated import adds
+  nothing, and an optional position index makes every position of every game
+  searchable.
+- **Browser:** filter by player (either colour or White/Black), Elo range,
+  event, result, year and position; sort by any column; scroll through pages
+  of games. Double-click a game to load it on the board.
+- **Overview:** name, description, file location, game/player/event counts,
+  and housekeeping actions — remove duplicates, remove empty games, add more
+  games, rebuild the position index and export the current selection to PGN.
+- **Player names:** the Player filter suggests matching stored names in a
+  popup while you type.
+- **Presentation:** the database windows now follow the main window's palette
+  and use one padded layout with equal left/right margins. Counts use the
+  system locale's thousands separator (`12.123` in German, `12,123` in
+  English), active filters turn yellow, and the key actions use the same green
+  and warning colours as the rest of the app.
+
+**Also in this build:** a loaded PGN shows each player's `WhiteElo`/`BlackElo`
+beside the name and its `Event · Date` under the FEN field, both in the light
+blue used by the NODES value. The database browser's filter line names how
+many games the active filter hides (`Filter: 63 games filtered out`) instead
+of repeating the filter fields. **Remove Duplicates** writes the games it
+deletes to `<database>-duplicates.pgn` first, and a game that appears twice
+inside one source file is imported both times so the housekeeping action can
+find it. **Remove Empty Games** now has header-only games to remove: the
+importer stores them and the PGN splitter keeps one from being merged into the
+following game.
+
+**Licensing:** the Scid reader (`chess-scid-rw`) is GPL-3.0-or-later, like
+`shakmaty`. The application as distributed therefore remains
+GPL-3.0-or-later; `LICENSE` and `THIRD-PARTY-NOTICES.md` already cover it.
+
+## v1.2.1
+
+**Stopping a tournament:** the red **Stop** button in the top bar now ends a
+running tournament, not just the engine searches. This is the way out when the
+live **Tournament** window has already been closed; completed games stay in the
+PGN. The end-of-match result pop-up appears whether or not that window is still
+open.
+
+**Engines launched from the desktop:** a desktop launch can inherit no
+`LANG`, and .NET engines such as Pedantic then use the invariant culture, whose
+OEM code page is 1; `Encoding.GetEncoding(1)` throws and the engine exits
+before the handshake. Engines now get `LANG=en_US.UTF-8` when the inherited
+locale is missing or only `C`/`POSIX`/`C.UTF-8`; a real terminal locale is
+kept. This fixes “A tournament engine could not be started” with Pedantic.
+
+**Clearer engine failures:** a failed start reports the stderr line that names
+the error (for example Pedantic's `Unhandled exception …` line) instead of only
+the last stack frame, and a tournament names the failing slot, engine and
+reason rather than using the generic sentence.
+
+## v1.2.0
+
+**Final-audit hardening:** the 2026-11-11 audit findings are applied. A draw
+offer can no longer act on an evaluation of a position the game has left, and
+an engine card greys its score out while the search has moved to a deeper
+level than the score came from (hover the score badge for the reason).
+
+**Fairer tournaments:** each game reseeds the opening-book picker, so games from
+the same EPD position get independent book lines instead of replaying one
+sequence.
+
+**Smoother PGN use:** a slow PGN read can no longer replace a file opened after
+it, and a Black-first game from a FEN round-trips through export and import.
+
+**Two-engine performance:** the Tokio runtime now uses four workers, the
+engine event queue carries only search-boundary lines with a 256-event frame
+cap, the 500 ms frame tick runs only while a handshake is pending, and analysis
+arrows no longer allocate on every frame. The broadcast buffer is smaller.
+
+**Diagnostics:** development and internal release builds keep their symbol
+table for useful crash reports; only the packaged release folder is stripped.
+
+## v1.1.0
+
+**Setup Board:** _Game → Setup board…_ opens a position editor in the right
+dashboard, in place of the engine cards. Pick a piece from the palette and
+left-click a square to place it; right-click removes a piece. Clear board,
+the side-to-move combo and the four castling-right checkboxes cover the rest.
+The FEN field follows every edit and also accepts a pasted position, and the
+editor lists every reason a position cannot be played. Close applies a valid
+position as a fresh game; Cancel leaves the current game unchanged.
+
+**Engine recovery:** an engine killed by the watchdog is now restarted even
+after its slot has turned offline, so its evaluation and analysis arrow come
+back instead of staying frozen.
+
+**Palette contrast:** the Setup Board piece palette uses a light-grey backing,
+so black pieces stay visible against the dark panel.
+
+**Documentation:** the README now has a short session-log section, covering the
+log location, rotation, the **Engine → Session log** switch and the
+`SILICONBOARD_LOG` / `SILICONBOARD_LOG_FILE` overrides.
+
+## v1.0.1
+
+**New in analysis mode:** each engine's current best move is drawn as an arrow
+on the board, from the centre of the from-square to the centre of the
+destination square. Engine A is green and engine B red, and the arrow follows
+the search as a new best move is found. When both engines choose the same move
+only one arrow is drawn. View → Analysis arrows switches the arrows on or off
+(on by default).
+
+## v1.0
+
+A native Linux UCI chess GUI in Rust: board on the left, live
+engine analysis on the right, move list along the bottom, and a flat toolbar
+across the top.
+
+### What works
+
+- **Analysis:** two engine slots (A and B), Start / Abort, per-card play/pause,
+  and each card's engine name is a pulldown of the loaded A/B engines and the
+  engines used before (remembered across launches) — the same list as the
+  tournament window — with Browse… for another file.
+  live depth, nodes, speed, evaluation and a two-line principal variation.
+  Figurine piece letters in the PV are optional (off by default).
+- **Play:** human vs engine (White or Black, against A or B) and engine A vs
+  engine B. Human moves by click-click or drag-and-drop, with promotion and
+  castling.
+- **Play from a FEN:** paste a position into the top-bar FEN field and choose
+  _Game → Start from here…_: both engines play on with the current time
+  control, and the PGN starts from that position (`SetUp`/`FEN` tags).
+- **Clocks:** no clock, sudden death, Fischer increment and fixed time per move;
+  player bars above and below the board; flags end the game.
+- **Opening book:** PolyGlot (`.bin`) books are loaded on demand —
+  Engine → Load PolyGlot book…, and the choice is remembered for the next
+  start-up; no book is loaded by default. Weighted-random book replies in
+  games are switchable — the switch starts off until a book is loaded.
+  The book box labels the current opening by name
+  (ECO table) and keeps the last known name after the line leaves the book.
+- **Syzygy tablebases:** _Engine → Load tablebases…_ takes the user's
+  tablebase folder(s) — several folders are joined into one string
+  (`:`) — and sends it as the `SyzygyPath`
+  option to the loaded engines and to every engine started afterwards.
+- **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
+  (Game → Claim draw (threefold)), with the result written to the PGN.
+- **Tournaments:** Tournament → New tournament… opens a two-engine match
+  window (engines, Hash/Nalimov cache, 4+1 clock, games, reverse colours, an
+  EPD start book and/or PolyGlot `.bin` move book, resign/draw adjudication and
+  a PGN path). Start plays the match on the main board, one game after another, with
+  the live move list, clocks and engine cards. EPD books record their start
+  position as `SetUp`/`FEN`; a `.bin` move book is replayed from move 1 when it
+  contains the line to that position, so the opening moves are in the PGN too. The movable Tournament window shows the head-to-head score in standard chess
+  notation (`A vs B: 2½–3½`, draws count half a point) and the results of
+  finished games; the end-of-match result pop-up lists them too.
+- **Files:** open and save PGN (mainline), copy PGN, copy/save FEN.
+- **Multi-game PGN:** opening a file with more than one game opens a movable
+  **PGN games** window with a scrollable list (#, White, Black, Result, Date,
+  Event, plus the PGN `Termination` reason next to the result when the file
+  provides it). Every row spans the full window width and the columns are
+  distributed across it. Click anywhere in a row to load that game into the
+  normal bottom move list; the window
+  stays open so another can be picked, even after choosing a game mode. The
+  bottom move list shows the result and the PGN `Termination` reason next to
+  it. Close it
+  with the top Close button or the title-bar X; File → PGN games… reopens it.
+- **Board themes:** View → Board theme picks any PNG/JPEG board from
+  `public/images/board/`; the choice is remembered between launches.
+- **Window layout:** the main window has a minimum width derived from the saved
+  right-panel width plus a 320-point board, so the board can no longer be
+  squeezed out of view. The saved layout (right panel 917, window 1246) is the
+  minimum for that configuration.
+- **Piece sets:** View → Piece set picks any complete cburnett-family set from
+  `public/piece/` (41 here); the choice is remembered between launches.
+- **Figurine notation:** View → Figurines in move list (on by default) and
+  Figurines in engine evaluation (off by default). Saved and copied PGN files
+  always stay standard SAN.
+- **Engines:** UCI handshake and options, a watchdog that restarts a stalled
+  or exited engine, loaded engines remembered between launches. While a search
+  runs, the watchdog enforces deadlines: `isready` answered within 10 s; a
+  `bestmove` within 3 s of `stop`; a move ends within its time plus 3 s; an
+  analysis shows progress (a new depth or node count) within 60 s. Only real
+  replies and progress count as signs of life, so noise does not keep a stuck
+  engine alive. The status line gives the reason for a stall. The deadlines are
+  checked by the engine's own monitor task, so they run while the window is
+  hidden. A slot may restart three times in ten minutes; after that the engine
+  stays offline, and in a match that stops the match. The
+  Engine A/B options window is a grouped settings page: engine header, dashed
+  sections, labeled fields in two columns, and a Default button that resets
+  every option.
+- **Diagnostics:** one session log per run in `~/.local/state/siliconboard/logs/`;
+  the newest five are kept. A log continues in a numbered file at 5 MB, so the
+  folder stays below about 25 MB.
+  It records lifecycle messages, UCI commands, engine replies (`readyok`,
+  `bestmove` with its timing), engine stderr, process exit status and the reason
+  for any stall, which is what is needed to diagnose an engine that goes offline.
+  Engine → Session log switches the file on or off (on by default, remembered
+  between launches). Idle engines are no longer pinged, so a finished match
+  leaves the log and the CPU alone.
+- **Settings:** time control, book play and the last loaded book, engine
+  option values, window size and
+  panel sizes survive a restart. The settings file is replaced atomically, so a
+  crash during a save keeps the previous settings.
+- **Process cleanup:** every engine runs in its own process group, and a stop,
+  stall or exit ends the whole group, helpers included. Engines left running by
+  a crash or a forced quit are stopped at the next start.
+- **Engine files:** launcher scripts (shell, Java and Python wrappers) can be
+  loaded. A file that cannot run on this system is refused with the reason before
+  it starts. An engine runs from its own folder, and a failed start shows the
+  exit status and the engine's last message.
+- **Players on the board:** a loaded PGN shows its White and Black names on the
+  player bars. A new game, a FEN, a play mode or a tournament replaces them.
+- **About:** the toolbar's ⓘ button opens the About panel: "SiliconBoard",
+  the version, a short description, the project page
+  (https://github.com/JoergKau) and the licence, with the application icon.
+- **Icon:** the application icon is shown in the window and is included as
+  `SiliconBoard.icns` for the app bundle.
+- **Warnings:** setting Threads whose total over both engines exceeds the core
+  count, or MultiPV above 1, shows a warning; the value is still applied.
+- **Performance:** engine output wakes the window directly, coalesced to about
+  30 fps; an idle loaded engine causes no redraws. The board paint measures
+  8–11 µs, and a live run with two Stockfish 19 instances (2.6–2.9 M NPS
+  combined) measured a 0.27 ms average CPU cost per frame, 10.15 ms worst.
+
+### Requirements
+
+- Linux on x86-64 (X11 or Wayland, Vulkan).
+- A UCI engine binary (Stockfish 19 is used in the tests).
+- The workspace `public/` asset tree, or `SILICONBOARD_PUBLIC_ROOT` pointing at
+  one.
+
+### Known limitations
+
+Tracked in `features-list.md`:
+
+- Linear history; browsing is read-only (variation trees are not built).
+- PGN import keeps the mainline only (no comments or variations on import).
+- One principal variation per engine (no multi-PV display).
+- SVG board themes in `public/images/board/svg/` are not offered.
+- The design's card extras (expand PV, copy PV, pin, settings) are not built.
+- Tablebases help endgame play only through the engines' own probing
+  (Syzygy via `SyzygyPath`); the GUI itself does not read tablebase files.
+
+### Verification
+
+```bash
+cd siliconboard
+cargo test --bin siliconboard
+cargo clippy --all-targets
+cargo build --release
+cargo test --release --bin siliconboard board_paint -- --ignored --nocapture
+```
+
+## Licence
+
+SiliconBoard's own source is MIT (`LICENSE-MIT`). The application links
+`shakmaty` (GPL-3.0-or-later), so the **distributed application as a whole is
+GPL-3.0-or-later**; the full text is in `LICENSE` (also inside the app bundle),
+and `THIRD-PARTY-NOTICES.md` lists every crate in the build. The corresponding
+source for this release is the repository at its release tag.

@@ -1,0 +1,44 @@
+# Cargo build artifacts
+target/
+
+# Cargo.lock is committed (binary-application best practice); do not add it
+# to .gitignore. Library crates ignore it; binaries commit it.
+
+# Local user state for egui / eframe
+.siliconboard/
+*.siliconboard
+
+# OS noise
+.DS_Store
+Thumbs.db
+._*
+
+# IDE config
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage / docs build output
+coverage/
+lcov.info
+doc/
+
+# Logs
+*.log
+/logs/
+
+# Generated demo / scratch files
+/scratch/
+/notes.md
+
+# Build artefacts: the assembled Linux release folder and its tarball
+# (package-linux.sh). The tarball is published as a GitHub release asset.
+/SiliconBoard-*-linux-*/
+/SiliconBoard-*-linux-*.tar.gz
+
+# Tournament output (the Engine match writes its PGN here by default)
+/tournament/
+
+# Python bytecode (tools/)
+__pycache__/

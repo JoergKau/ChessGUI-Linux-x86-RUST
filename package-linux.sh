@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# package-linux.sh — build SiliconBoard and assemble the Linux release folder.
+#
+# The steps are the manual ones from the README, scripted:
+#
+#   1. `cargo build --release`
+#   2. assemble `SiliconBoard-<version>-linux-<arch>/`: the binary in `bin/`,
+#      the asset tree in `public/` (where the resolver looks when walking up
+#      from the executable — unit-tested in src/assets.rs), the start-up PGN
+#      in `PGN/`, a `.desktop` launcher, the window icon, LICENSE (GPL),
+#      LICENSE-MIT, THIRD-PARTY-NOTICES.md, README.md, RELEASE_NOTES.md and
+#      features-list.md,
+#   3. build the distributable tarball
+#      `SiliconBoard-<version>-linux-<arch>.tar.gz` and print its SHA-256
+#      for the release listing.
+#
+# By default the freshly built app is also installed into `$HOME/.local`,
+# so the daily-use app is always the one just built: binary, assets and launcher land under
+# `~/.local/share/siliconboard` and `~/.local`, and the dock/menu icon
+# works. Installing is the default because the user forgets the flag; a
+# build left in the dev folder otherwise never shows an icon in the dock.
+# `--no-install` (or `-n`) skips the install step and leaves the folder in
+# the repo; the old `--install` (or `-i`) flags still mean the same; an
+# unknown argument is rejected.
+#
+# The release folder and tarball are build artefacts; they are listed in
+# .gitignore. The tarball is the published release asset.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$REPO_ROOT"
+
+INSTALL=1
+for arg in "$@"; do
+    case "$arg" in
+        -i|--install) ;;
+        -n|--no-install) INSTALL=0 ;;
+        *) { echo "No such argument: $arg (use --no-install to skip the install)"; exit 1; } ;;
+    esac
+done
+
+version="$(sed -n 's/^version = "\([^\"]*\)"$/\1/p' Cargo.toml | head -1)"
+[[ -n "$version" ]] || { echo "No version found in Cargo.toml." >&2; exit 1; }
+arch="$(uname -m)"
+
+app_dir="$REPO_ROOT/SiliconBoard-$version-linux-$arch"
+
+echo "▶ cargo build --release"
+cargo build --release
+
+echo "▶ Assembling $app_dir (v$version)"
+rm -rf "$app_dir"
+mkdir -p "$app_dir/bin"
+cp target/release/siliconboard "$app_dir/bin/"
+# Cargo keeps the symbol table in the release profile so dev/internal builds
+# give useful crash reports; only the folder that ships is stripped.
+strip --strip-unneeded "$app_dir/bin/siliconboard"
+cp -R public "$app_dir/public"
+# The start-up PGN rides along, so the installed app also opens
+# PGN/WorldChamp1972.pgn at launch and selects game 1.
+STARTUP_PGN="$REPO_ROOT/PGN/WorldChamp1972.pgn"
+if [[ -f "$STARTUP_PGN" ]]; then
+    mkdir -p "$app_dir/PGN"
+    cp "$STARTUP_PGN" "$app_dir/PGN/"
+else
+    echo "  ▲ $STARTUP_PGN is missing — the folder starts without the start-up PGN." >&2
+fi
+cp LICENSE LICENSE-MIT THIRD-PARTY-NOTICES.md README.md RELEASE_NOTES.md \
+    features-list.md "$app_dir/"
+
+# A launcher for desktop environments. `Exec` uses the binary name, so it
+# works both from the folder and after `--install` puts it on `$PATH`.
+mkdir -p "$app_dir/share/applications" "$app_dir/share/icons/hicolor/512x512/apps"
+cat > "$app_dir/share/applications/siliconboard.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=SiliconBoard
+GenericName=Chess GUI
+Comment=Play and analyse chess with UCI engines
+Exec=siliconboard
+Icon=siliconboard
+Terminal=false
+Categories=Game;BoardGame;
+# Wayland matches the window by its app_id, "siliconboard" (set in main.rs);
+# X11 by the WM_CLASS, which winit derives from the binary name.
+StartupWMClass=siliconboard
+StartupNotify=true
+EOF
+if [[ -f "$REPO_ROOT/assets/icon/siliconboard-512.png" ]]; then
+    cp "$REPO_ROOT/assets/icon/siliconboard-512.png" \
+       "$app_dir/share/icons/hicolor/512x512/apps/siliconboard.png"
+else
+    echo "  ▲ assets/icon/siliconboard-512.png is missing — no menu icon." >&2
+fi
+
+# The distributable tarball: the folder plus the licence texts, notices,
+# README, release notes and feature list, with the SHA-256 printed for the
+# release listing.
+echo "▶ Distribution tarball"
+tarball="$REPO_ROOT/SiliconBoard-$version-linux-$arch.tar.gz"
+rm -f "$tarball"
+tar -czf "$tarball" -C "$REPO_ROOT" "$(basename "$app_dir")"
+echo "  SHA-256 of $tarball:"
+sha256sum "$tarball" | awk '{print "  " $1}'
+
+# Round-trip check: the tarball must unpack to the assembled folder.
+verify="$(mktemp -d)"
+tar -xzf "$tarball" -C "$verify"
+diff -rq "$app_dir" "$verify/$(basename "$app_dir")" > /dev/null \
+    || { echo "Tarball round-trip mismatch." >&2; exit 1; }
+rm -rf "$verify"
+
+if [[ "$INSTALL" == 1 ]]; then
+    prefix="$HOME/.local"
+    data_dir="${XDG_DATA_HOME:-$prefix/share}"
+    echo "▶ Installing into $prefix"
+    # The real binary lives under share/siliconboard, next to its assets
+    # (the walk-up resolver and the PGN path both expect this layout); a
+    # wrapper on PATH points there and is what the launcher uses.
+    install -D "$app_dir/bin/siliconboard" "$data_dir/siliconboard/bin/siliconboard"
+    rm -rf "$data_dir/siliconboard/public" "$data_dir/siliconboard/PGN"
+    cp -R "$app_dir/public" "$data_dir/siliconboard/public"
+    if [[ -d "$app_dir/PGN" ]]; then
+        cp -R "$app_dir/PGN" "$data_dir/siliconboard/PGN"
+    fi
+    # Icon theme entries in the usual sizes, so the dock, the app grid and
+    # the window list all find a fitting one.
+    for size in 16 32 128 256 512; do
+        icon="assets/icon/siliconboard-$size.png"
+        if [[ -f "$icon" ]]; then
+            install -D "$icon" "$data_dir/icons/hicolor/${size}x${size}/apps/siliconboard.png"
+        else
+            echo "  ▲ $icon is missing — the dock icon may not show at every size." >&2
+        fi
+    done
+    # Desktop entry. StartupWMClass must match the Wayland app_id and the
+    # X11 WM_CLASS ("siliconboard", set in main.rs and derived from the
+    # binary name respectively). Exec carries the full path, so it works
+    # however the session's PATH is set.
+    install -D /dev/stdin "$data_dir/applications/siliconboard.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=SiliconBoard
+GenericName=Chess GUI
+Comment=Play and analyse chess with UCI engines
+Exec=$prefix/bin/siliconboard
+TryExec=$prefix/bin/siliconboard
+Icon=siliconboard
+Terminal=false
+Categories=Game;BoardGame;
+StartupWMClass=siliconboard
+StartupNotify=true
+DESKTOP
+    # The wrapper is written last so it replaces an old real binary cleanly.
+    install -Dm755 /dev/stdin "$prefix/bin/siliconboard" <<EOF
+#!/usr/bin/env bash
+export SILICONBOARD_PUBLIC_ROOT="\${SILICONBOARD_PUBLIC_ROOT:-$data_dir/siliconboard/public}"
+exec "$data_dir/siliconboard/bin/siliconboard" "\$@"
+EOF
+    if command -v update-desktop-database > /dev/null; then
+        update-desktop-database "$data_dir/applications" 2> /dev/null || true
+    fi
+    if command -v gtk-update-icon-cache > /dev/null; then
+        gtk-update-icon-cache -f -t "$data_dir/icons/hicolor" 2> /dev/null || true
+    fi
+    if ! [[ ":$PATH:" == *":$prefix/bin:"* ]]; then
+        echo "  ▲ $prefix/bin is not on your PATH — add it to use the launcher." >&2
+    fi
+    echo "  Installed. Start it from the menu or with: siliconboard"
+else
+    echo "▶ Folder ready (not installed): $app_dir"
+    echo "  Run it with: $app_dir/bin/siliconboard"
+    echo "  (The install step was skipped with --no-install.)"
+fi

@@ -1,0 +1,122 @@
+[package]
+name = "siliconboard"
+version = "1.4.0"
+edition = "2021"
+description = "SiliconBoard — A modern, high-performance UCI Chess GUI for Linux written in Rust"
+authors = ["SiliconBoard Contributors"]
+# The package as distributed is GPL-3.0-or-later: the binary links
+# `shakmaty` (GPL-3.0-or-later) statically. The author's own source files
+# are additionally available under MIT — see LICENSE (GPL), LICENSE-MIT and
+# THIRD-PARTY-NOTICES.md.
+license = "GPL-3.0-or-later"
+repository = "https://github.com/JoergKau"
+keywords = ["chess", "uci", "gui", "egui", "shakmaty"]
+categories = ["games", "gui"]
+
+# wgpu picks the platform's GPU backend automatically (Vulkan on Linux),
+# which makes the build artifacts reproducible and unambiguous.
+default-run = "siliconboard"
+
+[dependencies]
+# ── GUI framework: immediate-mode UI on top of wgpu ──────────────────────────
+eframe = { version = "0.37", features = ["default", "wgpu"] }
+egui = "0.37"
+egui_extras = { version = "0.37", features = ["default", "image"] }
+
+# ── Chess rules, move generation, SAN/FEN utilities ─────────────────────────
+shakmaty = "0.30"
+# shakmaty-syzygy (tablebases) is intentionally deferred — out of scope for
+# the current implementation plan and only available matching version ^0.28.
+
+# PolyGlot binary opening books store their 16-byte records in big-endian
+# format. We use byteorder for explicit, allocation-free decoding rather than
+# the byteorder crate's older "no-std" tricks — a 4-byte init cost is
+# negligible against the ~24 MB of typical opening books.
+byteorder = "1.5"
+
+# ── SVG piece rasterization (cburnett sprites live as .svg in public/piece/)
+# `resvg` is the high-level renderer, `usvg` parses SVG into the tree it
+# consumes, and `tiny-skia` is the underlying 2D graphics backend. All three
+# are pure Rust with no C dependencies, so they build without any extra
+# toolchain install.
+resvg = "0.49"
+usvg = "0.49"
+tiny-skia = "0.12"
+
+# ── Piece sprite / texture decoding (PNG) ───────────────────────────────────
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# ── Asynchronous runtime for UCI engine subprocess supervision ──────────────
+tokio = { version = "1.40", features = [
+    "rt-multi-thread",
+    "process",
+    "io-util",
+    "fs",
+    "sync",
+    "time",
+    "macros",
+] }
+
+# ── Native file open / save dialogs for engines, PGNs, books ────────────────
+# The XDG desktop portal on Linux (the platform's own dialogs).
+rfd = "0.17"
+
+# Clipboard writing goes through `egui::Context::copy_text`; no clipboard crate
+# is needed (BUG-7-19: `arboard` was unused and is removed).
+
+# ── Configuration persistence (engine options, layout, last PGN) ─────────────
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ── Process signals for engine process groups (registry, stall kills) ───────
+libc = "0.2"
+
+# ── Diagnostic logging ───────────────────────────────────────────────────────
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+# ── System locale for locale-aware digit grouping ───────────────────────────
+# Already present as a transitive dependency of egui's font provider. The
+# database windows use it for thousands separators ("12.123" in German,
+# "12,123" in English) instead of hard-coding one style.
+sys-locale = "0.3"
+
+# ── Database engine: one SQLite file per chess database (`.sbd`) ────────────
+# `bundled` compiles a private SQLite, so no system library is needed and the
+# file format is identical on every machine. MIT / public domain.
+rusqlite = { version = "0.41", features = ["bundled"] }
+
+# ── Scid 5.x / Scid vs PC files (`.si4`, `.si5`) as import and export ───────
+# GPL-3.0-or-later, like `shakmaty`; only `database/scid.rs` names it. Behind a
+# feature so a build without the crate still compiles and hides Scid support.
+chess-scid-rw = { version = "1.0", optional = true }
+
+
+[dev-dependencies]
+# Tests run alongside `cargo test`; lightweight helpers.
+tempfile = "3.10"
+
+[features]
+# Scid `.si4`/`.si5` import and export. Off: those files are refused and the
+# menu items are hidden, and the app builds without the extra GPL crate.
+default = ["scid"]
+scid = ["dep:chess-scid-rw"]
+
+# ── Build profile: tuned for desktop GUI workloads ──────────────────────────
+[profile.dev]
+opt-level = 1
+debug = true
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# Unwinding (the default) runs `Drop` on a panic, so the engine handles are
+# dropped and their processes are killed. With "abort" nothing runs, and the
+# engines are left behind (see BUG-7-09).
+#
+# Symbols are intentionally kept in the Cargo release profile: an internal or
+# development build then produces useful crash reports. `package-linux.sh`
+# strips the copy that goes into the distributable folder, so only the shipped
+# build trades diagnostics for size (audit §2.3).
