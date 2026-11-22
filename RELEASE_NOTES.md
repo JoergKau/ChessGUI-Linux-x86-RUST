@@ -36,6 +36,15 @@ and the toolbar's **ⓘ** button opens the in-app About panel. The
 `package-linux.sh` script builds the release folder and the
 `SiliconBoard-1.4.0-linux-x86_64.tar.gz` asset.
 
+**Crisp SVG pieces on 1x displays.** The piece sprites were always
+rasterised at 512 px and then minified into a board square of roughly 60–100
+px. The wgpu backend has no texture mipmaps, so that undersampled the thin
+piece outlines and made them look jagged — Retina displays only hid the
+problem because their squares have twice as many physical pixels. The app
+now rasterises each SVG at the square's real pixel size (and re-rasterises
+when the board is resized), so the texture is shown at about 1:1 and the
+outlines are anti-aliased as intended.
+
 ## v1.3.0
 
 **Chess databases:** SiliconBoard now keeps collections of games in its own

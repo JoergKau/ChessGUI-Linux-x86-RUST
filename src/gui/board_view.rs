@@ -247,6 +247,10 @@ pub struct BoardView {
     pub white_on_bottom: bool,
     /// Cached legal moves for the selected square.
     legal: Option<LegalCache>,
+    /// Physical pixels per board square on the last painted frame. The app
+    /// uses this to rasterise the SVG pieces at the size the display shows,
+    /// so thin outlines do not alias when a 512-px sprite is scaled down.
+    pub last_square_px: u32,
 }
 
 /// Legal moves for one selected square at one recorded position.
@@ -293,6 +297,7 @@ impl Default for BoardView {
             interaction: Interaction::Idle,
             white_on_bottom: true,
             legal: None,
+            last_square_px: 0,
         }
     }
 }
@@ -361,6 +366,7 @@ pub fn show(
         .floor()
         .max(1.0);
     let board_px = square * 8.0;
+    view.last_square_px = physical_square_px(ui.ctx(), square);
 
     let board_min = Pos2::new(
         avail_rect.center().x - board_px / 2.0,
@@ -483,6 +489,7 @@ pub fn show_setup(
         .floor()
         .max(1.0);
     let board_px = square * 8.0;
+    view.last_square_px = physical_square_px(ui.ctx(), square);
     let board_min = Pos2::new(
         avail_rect.center().x - board_px / 2.0,
         avail_rect.center().y - board_px / 2.0,
@@ -803,6 +810,14 @@ fn arrow_shapes(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Paint one piece sprite of `square` pixels centred on `center`.
+/// The number of physical pixels one board square covers on this display.
+/// The app uses it to choose the SVG raster size.
+fn physical_square_px(ctx: &egui::Context, square_points: f32) -> u32 {
+    (square_points.max(1.0) * ctx.pixels_per_point())
+        .ceil()
+        .clamp(1.0, u32::MAX as f32) as u32
+}
+
 pub(crate) fn draw_piece(painter: &Painter, center: Pos2, texture: TextureId, square: f32) {
     let rect = Rect::from_center_size(center, Vec2::splat(square));
     let options = egui::ImageOptions::default();

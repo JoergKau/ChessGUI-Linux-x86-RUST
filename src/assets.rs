@@ -20,13 +20,30 @@ use std::path::{Path, PathBuf};
 
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 
-/// Width × height (in pixels) of every rasterised piece sprite.
-///
-/// 512 is generously above what any sane chess-board square will ever
-/// reach on screen (even a 4K display squeezed into an 8×8 grid is
-/// already in the 300-px range). Bigger rasterisations cost memory; smaller
-/// risk looking soft.
+/// Fallback raster size for a piece sprite when the board's physical size is
+/// not known yet (tests and a headless load). The running app asks for a size
+/// derived from the square's real pixel size, so the SVG is rasterised close
+/// to what the display shows and is never minified by a large factor.
 pub const PIECE_RASTER_SIZE: u32 = 512;
+
+/// The raster size to use for a board square that occupies `physical_px`
+/// pixels on screen. A sprite is rasterised at the square's own pixel size
+/// (rounded up to a 16-pixel step), which keeps the SVG crisp on a 1x Linux
+/// display and on a Retina display alike.
+///
+/// Rasterising a 512-px SVG and drawing it into a ~75-px square undersamples
+/// the thin cburnett outlines: linear filtering has no mipmaps in the wgpu
+/// backend, so an outline breaks into hard pixels. A Retina display only
+/// looked smoother because its square has twice as many physical pixels.
+/// Matching the raster size to the square is the actual fix.
+pub fn raster_size_for_square(physical_px: u32) -> u32 {
+    const STEP: u32 = 16;
+    const MIN: u32 = 32;
+    const MAX: u32 = 1024;
+    let padded = physical_px.max(MIN - STEP);
+    let rounded = padded.saturating_add(STEP - 1) / STEP * STEP;
+    rounded.clamp(MIN, MAX)
+}
 
 /// Path of the board image used when no theme has been chosen yet.
 pub const DEFAULT_BOARD_IMAGE: &str = "blue.png";
@@ -142,18 +159,20 @@ impl Assets {
     /// cburnett SVGs fails to parse or rasterise.
     #[cfg(test)]
     pub fn load(ctx: &Context) -> Result<Self, AssetError> {
-        Self::load_with(ctx, None, None)
+        Self::load_with_size(ctx, None, None, PIECE_RASTER_SIZE)
     }
 
-    /// Like [`Self::load`], with the board theme and piece set chosen in the
-    /// settings. A missing theme or piece set falls back to the defaults.
-    pub fn load_with(
+    /// Load the assets with the board theme and piece set chosen in the
+    /// settings, rasterising the piece sprites at `piece_px`. A missing theme
+    /// or piece set falls back to the defaults.
+    pub fn load_with_size(
         ctx: &Context,
         board: Option<&str>,
         pieces: Option<&str>,
+        piece_px: u32,
     ) -> Result<Self, AssetError> {
         let asset_root = resolve_asset_root();
-        Self::load_from_with(ctx, &asset_root, board, pieces)
+        Self::load_from_with(ctx, &asset_root, board, pieces, piece_px)
     }
 
     /// Load assets from an explicit directory with the given board and pieces.
@@ -162,6 +181,7 @@ impl Assets {
         asset_root: &Path,
         board: Option<&str>,
         pieces: Option<&str>,
+        piece_px: u32,
     ) -> Result<Self, AssetError> {
         let board_dir = asset_root.join("images").join("board");
         let requested = board
@@ -188,7 +208,7 @@ impl Assets {
         let piece_root = asset_root.join("piece");
         let requested_set = pieces.filter(|name| piece_set_exists(&piece_root.join(name)));
         let requested_set = requested_set.unwrap_or(DEFAULT_PIECE_SET);
-        let pieces = match load_pieces(ctx, &piece_root.join(requested_set), PIECE_RASTER_SIZE) {
+        let pieces = match load_pieces(ctx, &piece_root.join(requested_set), piece_px) {
             Ok(pieces) => pieces,
             Err(err) if requested_set != DEFAULT_PIECE_SET => {
                 log::warn!(
@@ -197,7 +217,7 @@ impl Assets {
                     err,
                     DEFAULT_PIECE_SET
                 );
-                load_pieces(ctx, &piece_root.join(DEFAULT_PIECE_SET), PIECE_RASTER_SIZE)?
+                load_pieces(ctx, &piece_root.join(DEFAULT_PIECE_SET), piece_px)?
             }
             Err(err) => return Err(err),
         };
@@ -388,7 +408,10 @@ fn set_label(name: &str) -> String {
 
 /// Rasterise all twelve SVGs of a piece set. Runs on a blocking thread when
 /// the user switches sets; the caller uploads the images afterwards.
-pub fn rasterise_piece_set(dir: &Path) -> Result<Vec<(PieceId, ColorImage)>, AssetError> {
+pub fn rasterise_piece_set(
+    dir: &Path,
+    target_px: u32,
+) -> Result<Vec<(PieceId, ColorImage)>, AssetError> {
     let mut images = Vec::with_capacity(12);
     for &color in &[PieceColor::White, PieceColor::Black] {
         for &kind in &[
@@ -400,7 +423,7 @@ pub fn rasterise_piece_set(dir: &Path) -> Result<Vec<(PieceId, ColorImage)>, Ass
             PieceKind::Pawn,
         ] {
             let id = PieceId { color, kind };
-            let image = rasterise_piece_svg(&dir.join(id.filename()), PIECE_RASTER_SIZE)?;
+            let image = rasterise_piece_svg(&dir.join(id.filename()), target_px)?;
             images.push((id, image));
         }
     }
@@ -1038,5 +1061,23 @@ mod tests {
         let found = project_pgn_path_from(&public, "WorldChamp1972.pgn").expect("bundled PGN");
         assert_eq!(found, pgn.join("WorldChamp1972.pgn"));
         assert!(project_pgn_path_from(&public, "Karpov.pgn").is_none());
+    }
+
+    #[test]
+    fn a_piece_raster_size_follows_the_physical_board_square() {
+        // A typical 1x board: a ~75-px square gets an 80-px sprite, not a
+        // 512-px texture minified by 7x.
+        assert_eq!(raster_size_for_square(75), 80);
+        assert_eq!(raster_size_for_square(100), 112);
+        // A Retina square takes twice the raster size.
+        assert_eq!(raster_size_for_square(150), 160);
+        // Tiny and huge boards stay inside the sane bounds.
+        assert_eq!(raster_size_for_square(0), 32);
+        assert_eq!(raster_size_for_square(10), 32);
+        assert_eq!(raster_size_for_square(10_000), 1024);
+        // Every result is a 16-px step.
+        for px in [17, 43, 76, 151, 513] {
+            assert_eq!(raster_size_for_square(px) % 16, 0, "{px}");
+        }
     }
 }

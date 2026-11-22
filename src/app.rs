@@ -351,8 +351,14 @@ enum AppEvent {
         outcome: Result<egui::ColorImage, AssetError>,
     },
     /// A piece set was rasterised off the UI thread and is ready to upload.
+    /// `size` and `generation` identify the raster request, and `announce`
+    /// separates an explicit set switch from a background re-raster after the
+    /// board was resized.
     PieceSetLoaded {
         set: PieceSet,
+        size: u32,
+        generation: u64,
+        announce: bool,
         outcome: Result<Vec<(PieceId, egui::ColorImage)>, AssetError>,
     },
     /// The settings file was written.
@@ -711,6 +717,15 @@ pub struct SiliconBoardApp {
     board_themes: Vec<BoardTheme>,
     /// Piece sets found in `public/piece/`, for the View menu.
     piece_sets: Vec<PieceSet>,
+    /// Physical raster size of the current piece textures, in pixels.
+    /// Recomputing this when the board changes keeps SVG pieces crisp; see
+    /// [`crate::assets::raster_size_for_square`].
+    piece_raster_px: u32,
+    /// Sequence number of the latest piece-texture request, so a slow older
+    /// request cannot replace a newer piece set or resolution.
+    piece_load_generation: u64,
+    /// Whether a piece-texture rasterisation is running off the UI thread.
+    piece_load_in_flight: bool,
     /// Per-slot SAN cache for the engine principal variations.
     pv_cache: [Option<PvCache>; ENGINE_SLOTS],
     /// Cached move list plus the history revision it was built from.
@@ -870,6 +885,9 @@ impl SiliconBoardApp {
             fen_input: GameState::new().fen(),
             board_themes: Vec::new(),
             piece_sets: Vec::new(),
+            piece_raster_px: 0,
+            piece_load_generation: 0,
+            piece_load_in_flight: false,
             pv_cache: std::array::from_fn(|_| None),
             pgn_cache: None,
             pgn_galleys: None,
@@ -907,16 +925,25 @@ impl SiliconBoardApp {
         }
         self.save_window_size(ctx);
         if self.assets.is_none() {
-            let loaded = Assets::load_with(
+            let piece_px = self.initial_piece_raster_size(ctx);
+            log::debug!(
+                "piece sprites: initial raster size {} px ({} physical px per square)",
+                piece_px,
+                self.view.last_square_px
+            );
+            let loaded = Assets::load_with_size(
                 ctx,
                 self.settings.board_theme.as_deref(),
                 self.settings.piece_set.as_deref(),
+                piece_px,
             );
-            if let Err(err) = &loaded {
-                log::error!("asset load failed: {}", err);
+            match &loaded {
+                Ok(_) => self.piece_raster_px = piece_px,
+                Err(err) => log::error!("asset load failed: {}", err),
             }
             self.assets = Some(loaded);
         }
+        self.sync_piece_resolution();
         self.drain_app_events(ctx);
         let mut engines_changed = false;
         for host in self.engines.iter_mut().flatten() {
@@ -1334,24 +1361,54 @@ impl SiliconBoardApp {
                         );
                     }
                 },
-                AppEvent::PieceSetLoaded { set, outcome } => match outcome {
-                    Ok(images) => {
-                        if let Some(Ok(assets)) = &mut self.assets {
-                            assets.pieces = crate::assets::upload_pieces(ctx, images);
-                        }
-                        self.settings.piece_set = Some(set.name.clone());
-                        self.save_settings();
-                        self.set_status(StatusLevel::Info, format!("Piece set: {}.", set.label));
-                        ctx.request_repaint();
-                    }
-                    Err(err) => {
-                        log::error!("piece set {} failed: {}", set.name, err);
-                        self.set_status(
-                            StatusLevel::Error,
-                            format!("Could not load piece set {}: {}", set.label, err),
+                AppEvent::PieceSetLoaded {
+                    set,
+                    size,
+                    generation,
+                    announce,
+                    outcome,
+                } => {
+                    if generation != self.piece_load_generation {
+                        log::debug!(
+                            "ignoring superseded piece-texture result for {} ({} px)",
+                            set.name,
+                            size
                         );
+                        continue;
                     }
-                },
+                    self.piece_load_in_flight = false;
+                    match outcome {
+                        Ok(images) => {
+                            if let Some(Ok(assets)) = &mut self.assets {
+                                assets.pieces = crate::assets::upload_pieces(ctx, images);
+                            }
+                            self.piece_raster_px = size;
+                            if announce {
+                                self.settings.piece_set = Some(set.name.clone());
+                                self.save_settings();
+                                self.set_status(
+                                    StatusLevel::Info,
+                                    format!("Piece set: {}.", set.label),
+                                );
+                            } else {
+                                log::debug!(
+                                    "piece sprites re-rasterised for the board size: {} px",
+                                    size
+                                );
+                            }
+                            ctx.request_repaint();
+                        }
+                        Err(err) => {
+                            log::error!("piece set {} failed: {}", set.name, err);
+                            if announce {
+                                self.set_status(
+                                    StatusLevel::Error,
+                                    format!("Could not load piece set {}: {}", set.label, err),
+                                );
+                            }
+                        }
+                    }
+                }
                 AppEvent::SettingsSaved { outcome } => {
                     self.settings_saving = false;
                     if let Err(err) = outcome {
@@ -2307,10 +2364,111 @@ impl SiliconBoardApp {
         if current == set.name {
             return;
         }
-        self.set_status(
-            StatusLevel::Info,
-            format!("Loading piece set: {}…", set.label),
+        let size = self
+            .desired_piece_raster_px()
+            .unwrap_or(self.piece_raster_px)
+            .max(crate::assets::PIECE_RASTER_SIZE / 8);
+        self.load_piece_textures(set, size, true);
+    }
+
+    /// The piece set currently named by the settings, if it is in the list
+    /// discovered at start-up. The default is used when nothing is set.
+    fn current_piece_set(&self) -> Option<PieceSet> {
+        let name = self
+            .settings
+            .piece_set
+            .as_deref()
+            .unwrap_or(crate::assets::DEFAULT_PIECE_SET);
+        self.piece_sets
+            .iter()
+            .find(|set| set.name == name)
+            .cloned()
+            .or_else(|| {
+                Some(PieceSet {
+                    name: name.to_string(),
+                    label: name.to_string(),
+                })
+            })
+    }
+
+    /// Physical pixels per board square from the last painted frame, as a
+    /// raster size. `None` before the board has been drawn once.
+    fn desired_piece_raster_px(&self) -> Option<u32> {
+        (self.view.last_square_px > 0)
+            .then(|| crate::assets::raster_size_for_square(self.view.last_square_px))
+    }
+
+    /// A first guess at the piece raster size before the board is drawn. It
+    /// subtracts the saved right panel and move list from the window size, so
+    /// the very first texture upload is already close to the real square.
+    fn initial_piece_raster_size(&self, ctx: &egui::Context) -> u32 {
+        if let Some(px) = self.desired_piece_raster_px() {
+            return px;
+        }
+        let screen = ctx.content_rect().size();
+        let right = self
+            .settings
+            .panels
+            .map_or(520.0, |panels| panels.right_width);
+        let bottom = self
+            .settings
+            .panels
+            .map_or(DEFAULT_MOVE_LIST_HEIGHT, |panels| panels.bottom_height);
+        // The top toolbar is 28 pt plus 10 pt of padding; 40 pt is a safe
+        // allowance for it, the panel gap is the same 8 pt as the layout.
+        let available_w = (screen.x - right - 8.0).max(240.0);
+        let available_h = (screen.y - 40.0 - bottom).max(240.0);
+        let square_points = (available_w.min(available_h) / 8.0).floor().max(1.0);
+        let physical = (square_points * ctx.pixels_per_point()).ceil() as u32;
+        crate::assets::raster_size_for_square(physical)
+    }
+
+    /// Re-rasterise the piece sprites when the board has grown or shrunk
+    /// enough that the current textures would be badly minified or magnified.
+    /// The 20 % band keeps the sampling ratio close to 1:1 while stopping a
+    /// panel drag from starting a render at every pixel.
+    fn sync_piece_resolution(&mut self) {
+        if self.piece_load_in_flight {
+            return;
+        }
+        let Some(desired) = self.desired_piece_raster_px() else {
+            return;
+        };
+        let current = self.piece_raster_px;
+        if current == 0 {
+            return;
+        }
+        // Reload only when the change is real, not when the board moved by a
+        // pixel; the band bounds the worst sampling ratio to about 1.25:1.
+        let grew = desired > current + current / 5;
+        let shrank = current > desired + desired / 5;
+        if !(grew || shrank) {
+            return;
+        }
+        log::debug!(
+            "piece sprites: board square is {} physical px; raster {} px (current {} px)",
+            self.view.last_square_px,
+            desired,
+            current
         );
+        if let Some(set) = self.current_piece_set() {
+            self.load_piece_textures(set, desired, false);
+        }
+    }
+
+    /// Rasterise a piece set at `size` pixels off the UI thread. `announce`
+    /// is true for a View-menu switch (status line and saved setting) and
+    /// false for a background resolution change.
+    fn load_piece_textures(&mut self, set: PieceSet, size: u32, announce: bool) {
+        self.piece_load_generation = self.piece_load_generation.wrapping_add(1);
+        let generation = self.piece_load_generation;
+        self.piece_load_in_flight = true;
+        if announce {
+            self.set_status(
+                StatusLevel::Info,
+                format!("Loading piece set: {}…", set.label),
+            );
+        }
         let tx = self.events_tx.clone();
         let name = set.name.clone();
         self.spawn(async move {
@@ -2318,7 +2476,7 @@ impl SiliconBoardApp {
                 Some(path) => {
                     let error_path = path.clone();
                     match tokio::task::spawn_blocking(move || {
-                        crate::assets::rasterise_piece_set(&path)
+                        crate::assets::rasterise_piece_set(&path, size)
                     })
                     .await
                     {
@@ -2337,7 +2495,13 @@ impl SiliconBoardApp {
                     ),
                 }),
             };
-            tx.send(AppEvent::PieceSetLoaded { set, outcome });
+            tx.send(AppEvent::PieceSetLoaded {
+                set,
+                size,
+                generation,
+                announce,
+                outcome,
+            });
         });
     }
 
