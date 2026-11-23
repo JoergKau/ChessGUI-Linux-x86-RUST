@@ -1258,8 +1258,20 @@ impl SiliconBoardApp {
                         // The user's choice is kept for the next launch. A
                         // restored or `SILICONBOARD_BOOK` start-up book is
                         // not written back.
+                        let mut save = false;
                         if !startup && self.settings.book_path.as_ref() != Some(&path) {
                             self.settings.book_path = Some(path);
+                            save = true;
+                        }
+                        // A book the user has just loaded is meant to be used:
+                        // arm book play, so the Engine menu shows the switch
+                        // selected. A start-up restore keeps the saved choice.
+                        if !startup && !self.book_in_games {
+                            self.book_in_games = true;
+                            self.settings.book_in_games = true;
+                            save = true;
+                        }
+                        if save {
                             self.save_settings();
                         }
                         self.sync_position(true);

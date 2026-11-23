@@ -818,6 +818,40 @@ pub enum ProgressAction {
     Close,
 }
 
+/// One finished-game line in a tournament window, with the result itself in
+/// warning yellow so the scores scan down the list. The status stores lines as
+/// `Game <n>: <result> (<reason>)`.
+fn result_label(ui: &mut Ui, line: &str) {
+    let (prefix, result, suffix) = split_result_line(line);
+    if result.is_empty() {
+        ui.label(RichText::new(prefix).size(12.0).color(theme::TEXT));
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.label(RichText::new(prefix).size(12.0).color(theme::TEXT));
+        ui.label(
+            RichText::new(result)
+                .size(12.0)
+                .strong()
+                .color(theme::ALERT_YELLOW),
+        );
+        ui.label(RichText::new(suffix).size(12.0).color(theme::TEXT));
+    });
+}
+
+/// Split `Game 1: 1-0 (White wins)` into its prefix, the result token and the
+/// reason. A line in any other shape is returned whole as the prefix.
+fn split_result_line(line: &str) -> (&str, &str, &str) {
+    let Some(colon) = line.find(": ") else {
+        return (line, "", "");
+    };
+    let start = colon + 2;
+    let rest = &line[start..];
+    let end = rest.find(" (").map_or(line.len(), |offset| start + offset);
+    (&line[..start], &line[start..end], &line[end..])
+}
+
 /// The movable tournament window shown while the match runs. It can be
 /// dragged anywhere on screen.
 pub fn show_progress(ctx: &egui::Context, status: &TournamentStatus) -> ProgressAction {
@@ -855,7 +889,7 @@ pub fn show_progress(ctx: &egui::Context, status: &TournamentStatus) -> Progress
                 RichText::new(status.match_line())
                     .size(15.0)
                     .strong()
-                    .color(theme::TEXT),
+                    .color(theme::ALERT_YELLOW),
             );
             if !status.results.is_empty() {
                 ui.add_space(6.0);
@@ -871,7 +905,7 @@ pub fn show_progress(ctx: &egui::Context, status: &TournamentStatus) -> Progress
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for result in status.results.iter().rev() {
-                            ui.label(RichText::new(result).size(12.0).color(theme::TEXT));
+                            result_label(ui, result);
                         }
                     });
             }
@@ -956,7 +990,7 @@ pub fn show_finished(ctx: &egui::Context, status: &TournamentStatus) -> bool {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for result in status.results.iter().rev() {
-                            ui.label(RichText::new(result).size(12.0).color(theme::TEXT));
+                            result_label(ui, result);
                         }
                     });
             }
@@ -1090,6 +1124,19 @@ mod tests {
             EngineSpec::from_path(PathBuf::from("/opt/stockfish")),
         );
         assert!(dialog.build_config().is_ok());
+    }
+
+    #[test]
+    fn a_result_line_splits_its_score_from_the_reason() {
+        assert_eq!(
+            split_result_line("Game 3: 1-0 (White wins by checkmate)"),
+            ("Game 3: ", "1-0", " (White wins by checkmate)")
+        );
+        assert_eq!(
+            split_result_line("Game 4: 1/2-1/2 (Draw by agreement)"),
+            ("Game 4: ", "1/2-1/2", " (Draw by agreement)")
+        );
+        assert_eq!(split_result_line("unexpected"), ("unexpected", "", ""));
     }
 
     #[test]

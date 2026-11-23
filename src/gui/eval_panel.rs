@@ -88,7 +88,7 @@ pub struct EvalSummary {
     /// stays after the line leaves the named part of the table, so the book
     /// box keeps showing the last opening.
     pub opening_name: Option<String>,
-    /// Whether engines answer with book moves in games (Game → Book moves in games).
+    /// Whether engines answer with book moves in games (Engine → Book moves in games).
     pub book_in_games: bool,
     /// Whether piece letters in the PV are drawn as figurines.
     pub figurines: bool,
@@ -123,7 +123,7 @@ pub fn show(ui: &mut Ui, summary: &EvalSummary) -> Option<MenuAction> {
         ui.add_space(CARD_GAP);
     }
 
-    // The book box belongs to book play. With Game → Book moves in games
+    // The book box belongs to book play. With Engine → Book moves in games
     // switched off it is not shown at all.
     if summary.book_in_games {
         book_box(ui, summary);

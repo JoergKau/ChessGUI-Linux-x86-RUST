@@ -28,7 +28,7 @@ pub enum MenuAction {
     SetMode(GameMode),
     /// Game → Time control…: open the dialog.
     OpenTimeControl,
-    /// Game → Book moves in games: switch the book reply on or off.
+    /// Engine → Book moves in games: switch the book reply on or off.
     ToggleBookInGames,
     /// Game → Resign: the human side gives up the game.
     Resign,
@@ -257,18 +257,6 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
                 ui.close();
             }
             ui.separator();
-            let book_available = state.book_name.is_some();
-            let book = ui
-                .add_enabled(
-                    book_available,
-                    egui::Button::selectable(state.book_in_games, "Book moves in games"),
-                )
-                .on_disabled_hover_text("Load an opening book first (Engine menu).");
-            if book.clicked() {
-                action = Some(MenuAction::ToggleBookInGames);
-                ui.close();
-            }
-            ui.separator();
             ui.add_enabled(
                 false,
                 egui::Button::new(format!("{} half-moves played", state.ply_count)),
@@ -346,6 +334,17 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
             };
             if ui.button(book_label).clicked() {
                 action = Some(MenuAction::LoadBook);
+                ui.close();
+            }
+            let book_available = state.book_name.is_some();
+            let book = ui
+                .add_enabled(
+                    book_available,
+                    egui::Button::selectable(state.book_in_games, "Book moves in games"),
+                )
+                .on_disabled_hover_text("Load an opening book first.");
+            if book.clicked() {
+                action = Some(MenuAction::ToggleBookInGames);
                 ui.close();
             }
             let tablebases =
