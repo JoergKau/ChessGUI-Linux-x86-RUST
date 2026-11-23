@@ -75,4 +75,4 @@ list along the bottom — with a clean dark theme.
 ## Not (yet) included
 
 - Variation trees and PGN variations; multi-PV engine lines;
-  in-GUI tablebase probing (the engines do the probing); Windows.
+  in-GUI tablebase probing (the engines do the probing).

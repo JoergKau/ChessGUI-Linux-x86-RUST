@@ -4,8 +4,8 @@
 
 A native **UCI chess GUI written in Rust** with `egui`/`eframe` and `wgpu`.
 Board on the left, live engine analysis on the right, the move list along the
-bottom, and a flat toolbar across the top. It runs on **macOS (Apple Silicon)**
-and **Linux (x86-64)** from the same source tree.
+bottom, and a flat toolbar across the top. It runs on **macOS (Apple Silicon)**,
+**Linux (x86-64)** and **Windows (x86-64)** from the same source tree.
 
 - **Analysis:** two engine slots with live depth, nodes, speed, evaluation
   and principal variation; a best-move arrow on the board for each engine
@@ -47,6 +47,7 @@ packaged form differs:
 | --- | --- | --- |
 | macOS (Apple Silicon) | `SiliconBoard-<version>-macos-arm64.zip` | unpack, drag `SiliconBoard.app` to `/Applications`, double-click |
 | Linux (x86-64) | `SiliconBoard-<version>-linux-x86_64.tar.gz` | `tar xzf …`, then `SiliconBoard-<version>-linux-x86_64/bin/siliconboard` |
+| Windows (x86-64) | `SiliconBoard-<version>-windows-x86_64.zip` | unpack and run `siliconboard.exe` from the folder |
 
 Build artefacts live on the Releases page, not in the repository; every
 source release also has GitHub's generated `.tar.gz`/`.zip` archives.
@@ -60,10 +61,20 @@ with `shasum -a 256 <file>` (macOS) or `sha256sum <file>` (Linux).
 (binary, assets, icon and a `.desktop` entry); the tarball is for machines
 where you only unpack and run. No engine is bundled — see the next section.
 
+**Windows first launch:** the build is not code-signed, so SmartScreen may
+show **“Windows protected your PC”**. Choose **More info → Run anyway**.
+Keep the `public/` folder next to `siliconboard.exe` — that is where the
+board and piece assets are found. Check the download in PowerShell with:
+
+```powershell
+Get-FileHash .\SiliconBoard-<version>-windows-x86_64.zip -Algorithm SHA256
+```
+
 ## Requirements
 
 - macOS 12 or later on Apple Silicon, **or** a Linux x86-64 desktop with a
-  working Vulkan or OpenGL driver
+  working Vulkan or OpenGL driver, **or** Windows 10/11 on x86-64 with a
+  DirectX 12 capable GPU
 - Rust 2021 edition (`cargo`) to build from source
 - At least one **UCI engine** of your choice — SiliconBoard ships none
 
@@ -85,6 +96,9 @@ Installing the free Stockfish:
      `stockfish-macos-universal`.
    - **Linux:** take the Linux x86-64 build (or install your distribution's
      `stockfish` package, usually `/usr/games/stockfish`).
+   - **Windows:** take the Windows x86-64 build; the binary is
+     `stockfish-windows-x86-64-avx2.exe` (or the plain `x86-64` variant on
+     older CPUs).
 2. Unpack the file if needed.
 3. In the GUI, _Engine → Load engine A…_ and point it at that binary.
 
@@ -181,12 +195,12 @@ CC BY-NC 4.0 and must be fetched by the user.
 
 Paths follow the platform's conventions:
 
-| What | macOS | Linux |
-| --- | --- | --- |
-| Settings | `~/Library/Application Support/SiliconBoard/settings.json` | `~/.config/siliconboard/settings.json` (`$XDG_CONFIG_HOME`) |
-| Session logs | `~/Library/Logs/SiliconBoard/` | `~/.local/state/siliconboard/logs/` (`$XDG_STATE_HOME`) |
-| Databases | `~/Documents/SiliconBoard/databases/` | `~/Documents/SiliconBoard/databases/` |
-| Tournament PGN | `~/Documents/SiliconBoard/engine-match.pgn` | `~/Documents/SiliconBoard/engine-match.pgn` |
+| What | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Settings | `~/Library/Application Support/SiliconBoard/settings.json` | `~/.config/siliconboard/settings.json` (`$XDG_CONFIG_HOME`) | `%APPDATA%\SiliconBoard\settings.json` |
+| Session logs | `~/Library/Logs/SiliconBoard/` | `~/.local/state/siliconboard/logs/` (`$XDG_STATE_HOME`) | `%LOCALAPPDATA%\SiliconBoard\logs\` |
+| Databases | `~/Documents/SiliconBoard/databases/` | `~/Documents/SiliconBoard/databases/` | `%USERPROFILE%\Documents\SiliconBoard\databases\` |
+| Tournament PGN | `~/Documents/SiliconBoard/engine-match.pgn` | `~/Documents/SiliconBoard/engine-match.pgn` | `%USERPROFILE%\Documents\SiliconBoard\engine-match.pgn` |
 
 The session log records start-up and settings messages, engine life-cycle
 events, the UCI commands and replies exchanged with each engine, engine
@@ -261,9 +275,11 @@ launcher, the icon and the licence texts, then builds the `.tar.gz` and
 verifies it by unpacking. The install step puts the binary, assets and icon
 under `~/.local/share/siliconboard` and a launcher in `~/.local/bin`.
 
-**Publishing:** create one release tag (for example `v1.4.1`) and attach both
-assets plus a `SHA256SUMS` file. The two archives are different on purpose —
-a macOS `.app` bundle and a Linux tarball cannot share one artifact.
+**Publishing:** create one release tag (for example `v1.4.1`) and attach one
+asset per platform plus a `SHA256SUMS` file. The archives are different on
+purpose — a macOS `.app` bundle, a Linux tarball and a Windows zip cannot
+share one artifact. The Windows zip holds `siliconboard.exe` with `public/`,
+`PGN/` and the licence and documentation files next to it.
 
 ## Development
 
