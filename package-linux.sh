@@ -23,8 +23,9 @@
 # the repo; the old `--install` (or `-i`) flags still mean the same; an
 # unknown argument is rejected.
 #
-# The release folder and tarball are build artefacts; they are listed in
-# .gitignore. The tarball is the published release asset.
+# The unpacked release folder is a build artefact and is listed in
+# .gitignore. The tarball is committed at the repo root and published as a
+# release asset.
 
 set -euo pipefail
 

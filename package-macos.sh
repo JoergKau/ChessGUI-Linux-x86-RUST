@@ -16,7 +16,7 @@
 #      holds one folder with the signed app plus LICENSE, LICENSE-MIT,
 #      THIRD-PARTY-NOTICES.md, README.md, RELEASE_NOTES.md and
 #      features-list.md, and the SHA-256 is printed for the release listing.
-#      The zip is a release asset, not a tracked file.
+#      The zip is committed at the repository root and attached to the release.
 #
 # By default the freshly signed bundle is also installed into /Applications
 # (replacing an existing SiliconBoard.app), so the daily-use app is always
@@ -28,8 +28,7 @@
 # step and leaves the bundle in the repo folder.
 #
 # The .app is a build artefact; it is listed in .gitignore. The distribution
-# zip is a release asset as well: build it here, attach it to the GitHub
-# release, and do not commit it.
+# zip is committed at the repo root and attached to the GitHub release.
 
 set -euo pipefail
 

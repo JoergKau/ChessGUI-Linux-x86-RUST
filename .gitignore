@@ -31,13 +31,11 @@ doc/
 /scratch/
 /notes.md
 
-# Build artefacts: the assembled and signed macOS bundle. Distribution
-# archives (macOS zip, Linux tarball) are GitHub release assets, not tracked
-# files.
+# Build artefacts: the assembled and signed macOS bundle and the unpacked
+# Linux release folder. The distribution archives themselves are committed at
+# the repository root and attached to GitHub releases.
 /SiliconBoard.app/
-/SiliconBoard-*-macos-*.zip
 /SiliconBoard-*-linux-*/
-/SiliconBoard-*-linux-*.tar.gz
 ._*
 
 # Tournament output (the Engine match writes its PGN here by default)

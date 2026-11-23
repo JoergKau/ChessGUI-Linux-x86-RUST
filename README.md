@@ -39,8 +39,9 @@ changed in the current version is in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ## Download
 
 Ready-to-run builds are published on the
-[Releases](https://github.com/JoergKau/SiliconBoard-ChessGUI/releases) page.
-Each release carries one asset per platform — the source is the same, but the
+[Releases](https://github.com/JoergKau/SiliconBoard-ChessGUI/releases) page and
+also committed at the repository root, so a clone is ready to run. Each
+release carries one asset per platform — the source is the same, but the
 packaged form differs:
 
 | Platform | Asset | Start it with |
@@ -49,8 +50,8 @@ packaged form differs:
 | Linux (x86-64) | `SiliconBoard-<version>-linux-x86_64.tar.gz` | `tar xzf …`, then `SiliconBoard-<version>-linux-x86_64/bin/siliconboard` |
 | Windows (x86-64) | `SiliconBoard-<version>-windows-x86_64.zip` | unpack and run `siliconboard.exe` from the folder |
 
-Build artefacts live on the Releases page, not in the repository; every
-source release also has GitHub's generated `.tar.gz`/`.zip` archives.
+Every source release also has GitHub's generated `.tar.gz`/`.zip` archives.
+Checksums for the committed archives are in [SHA256SUMS](SHA256SUMS).
 
 **macOS first launch:** the app is ad-hoc signed but not notarized, so a
 downloaded copy is quarantined. Right-click the app → **Open**, then confirm
@@ -224,8 +225,8 @@ Two environment variables change logging for one run:
 ## Packaging a release
 
 Both scripts read the version from `Cargo.toml` and print the archive's
-SHA-256 for the release listing. The generated archives are **not** committed;
-attach them to a GitHub release.
+SHA-256. The generated archives are committed at the repository root and
+attached to a GitHub release.
 
 **macOS:**
 
@@ -279,7 +280,8 @@ under `~/.local/share/siliconboard` and a launcher in `~/.local/bin`.
 asset per platform plus a `SHA256SUMS` file. The archives are different on
 purpose — a macOS `.app` bundle, a Linux tarball and a Windows zip cannot
 share one artifact. The Windows zip holds `siliconboard.exe` with `public/`,
-`PGN/` and the licence and documentation files next to it.
+`PGN/` and the licence and documentation files next to it. Keep the committed
+copies at the repository root in step with the release assets.
 
 ## Development
 
