@@ -1,8 +1,9 @@
 //! Session logging: the console plus one file for the whole run.
 //!
-//! Each run writes its own file, `siliconboard-<UTC time>.log`, in
-//! `~/.local/state/siliconboard/logs/` (XDG; `XDG_STATE_HOME` moves it). The
-//! newest five are kept. Set `SILICONBOARD_LOG_FILE` to choose one file
+//! Each run writes its own file, `siliconboard-<UTC time>.log`, in the
+//! platform's per-user log folder (`~/Library/Logs/SiliconBoard/` on macOS,
+//! `~/.local/state/siliconboard/logs/` on Linux, honouring `XDG_STATE_HOME`).
+//! The newest five are kept. Set `SILICONBOARD_LOG_FILE` to choose one file
 //! instead (it is truncated).
 //!
 //! The console keeps the `RUST_LOG` behaviour. The file defaults to
@@ -140,7 +141,7 @@ const KEEP_LOGS: usize = 5;
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
 /// The file for this run: `SILICONBOARD_LOG_FILE` when set, otherwise a new
-/// file named by the start time in `~/.local/state/siliconboard/logs/`. The
+/// file named by the start time in the platform's per-user log folder. The
 /// working directory is not used: a desktop launch may start anywhere.
 fn session_log_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SILICONBOARD_LOG_FILE") {
@@ -153,7 +154,15 @@ fn session_log_path() -> Option<PathBuf> {
     )))
 }
 
+/// The per-user session-log folder. macOS keeps logs under `~/Library/Logs`;
+/// Linux follows the XDG state-directory spec.
+#[cfg(target_os = "macos")]
+fn log_folder(home: &std::ffi::OsStr) -> PathBuf {
+    PathBuf::from(home).join("Library/Logs/SiliconBoard")
+}
+
 /// The per-user session-log folder; honours `XDG_STATE_HOME`.
+#[cfg(not(target_os = "macos"))]
 fn log_folder(home: &std::ffi::OsStr) -> PathBuf {
     let state = match std::env::var_os("XDG_STATE_HOME") {
         Some(state) if !state.is_empty() && PathBuf::from(&state).is_absolute() => {

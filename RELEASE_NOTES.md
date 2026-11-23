@@ -1,5 +1,28 @@
 # SiliconBoard — Release Notes
 
+## v1.4.1
+
+**One source tree for macOS and Linux.** The macOS and Linux editions are
+now built from this single repository. Platform differences live behind
+`cfg(target_os)` where they belong: the settings and session-log folders
+(Application Support / `~/Library/Logs` on macOS, XDG on Linux), the About
+panel (native application menu on macOS, the toolbar's **ⓘ** window on
+Linux), the file manager action, native executable checks and the Wayland
+app id. Features and fixes are shared from now on.
+
+**Crisp SVG pieces at any display scale.** Pieces used to be rasterised once
+at 512 px and minified into a 60–150-px square; wgpu has no texture mipmaps,
+so the thin outlines aliased into hard pixels on 1x displays (Retina only
+hid it). Each SVG is now rasterised at the square's physical pixel size and
+re-rasterised off the UI thread when the board is resized by more than a
+20 % band. A generation number discards superseded requests.
+
+**Also in this build:** the macOS About panel reads its version from
+`Cargo.toml` (it had been pinned to 1.3.0); the database action is called
+“Reveal in Finder” on macOS and “Show in file manager” on Linux; the
+README is platform-neutral and carries a screenshot; release archives are
+attached to GitHub releases instead of being committed to git.
+
 ## v1.4.0
 
 **Tournaments:** the tournament window now offers three formats. **Match**
@@ -25,25 +48,6 @@ to that exact stored player, so `NN` no longer returns every name containing
 **Also in this build:** the Player label shows `Player (exact)` after picking
 a name; the tournament result points are highlighted; the three existing
 clippy warnings in the app and menu bar were fixed.
-
-**Linux release.** This is the same 1.4.0 feature set as the desktop
-release, built for Linux x86-64 (X11 or Wayland, Vulkan). The platform
-integration follows Linux conventions: settings live in
-`~/.config/siliconboard/` (XDG), session logs in
-`~/.local/state/siliconboard/logs/`, the database's **Show in file manager**
-button uses `xdg-open`, native engines are ELF programs or launcher scripts,
-and the toolbar's **ⓘ** button opens the in-app About panel. The
-`package-linux.sh` script builds the release folder and the
-`SiliconBoard-1.4.0-linux-x86_64.tar.gz` asset.
-
-**Crisp SVG pieces on 1x displays.** The piece sprites were always
-rasterised at 512 px and then minified into a board square of roughly 60–100
-px. The wgpu backend has no texture mipmaps, so that undersampled the thin
-piece outlines and made them look jagged — Retina displays only hid the
-problem because their squares have twice as many physical pixels. The app
-now rasterises each SVG at the square's real pixel size (and re-rasterises
-when the board is resized), so the texture is shown at about 1:1 and the
-outlines are anti-aliased as intended.
 
 ## v1.3.0
 
@@ -92,7 +96,7 @@ live **Tournament** window has already been closed; completed games stay in the
 PGN. The end-of-match result pop-up appears whether or not that window is still
 open.
 
-**Engines launched from the desktop:** a desktop launch can inherit no
+**Engines launched from Finder:** a Finder-launched `.app` inherits no
 `LANG`, and .NET engines such as Pedantic then use the invariant culture, whose
 OEM code page is 1; `Encoding.GetEncoding(1)` throws and the engine exits
 before the handshake. Engines now get `LANG=en_US.UTF-8` when the inherited
@@ -124,7 +128,7 @@ cap, the 500 ms frame tick runs only while a handshake is pending, and analysis
 arrows no longer allocate on every frame. The broadcast buffer is smaller.
 
 **Diagnostics:** development and internal release builds keep their symbol
-table for useful crash reports; only the packaged release folder is stripped.
+table for useful crash reports; only the packaged `.app` is stripped.
 
 ## v1.1.0
 
@@ -158,7 +162,7 @@ only one arrow is drawn. View → Analysis arrows switches the arrows on or off
 
 ## v1.0
 
-A native Linux UCI chess GUI in Rust: board on the left, live
+A native macOS (Apple Silicon) UCI chess GUI in Rust: board on the left, live
 engine analysis on the right, move list along the bottom, and a flat toolbar
 across the top.
 
@@ -186,7 +190,7 @@ across the top.
   (ECO table) and keeps the last known name after the line leaves the book.
 - **Syzygy tablebases:** _Engine → Load tablebases…_ takes the user's
   tablebase folder(s) — several folders are joined into one string
-  (`:`) — and sends it as the `SyzygyPath`
+  (`:` on macOS/Linux, `;` on Windows) — and sends it as the `SyzygyPath`
   option to the loaded engines and to every engine started afterwards.
 - **Games:** resign, draw by agreement, and a FIDE threefold-repetition claim
   (Game → Claim draw (threefold)), with the result written to the PGN.
@@ -234,7 +238,7 @@ across the top.
   Engine A/B options window is a grouped settings page: engine header, dashed
   sections, labeled fields in two columns, and a Default button that resets
   every option.
-- **Diagnostics:** one session log per run in `~/.local/state/siliconboard/logs/`;
+- **Diagnostics:** one session log per run in `~/Library/Logs/SiliconBoard/`;
   the newest five are kept. A log continues in a numbered file at 5 MB, so the
   folder stays below about 25 MB.
   It records lifecycle messages, UCI commands, engine replies (`readyok`,
@@ -251,13 +255,13 @@ across the top.
   stall or exit ends the whole group, helpers included. Engines left running by
   a crash or a forced quit are stopped at the next start.
 - **Engine files:** launcher scripts (shell, Java and Python wrappers) can be
-  loaded. A file that cannot run on this system is refused with the reason before
+  loaded. A file that cannot run on this Mac is refused with the reason before
   it starts. An engine runs from its own folder, and a failed start shows the
   exit status and the engine's last message.
 - **Players on the board:** a loaded PGN shows its White and Black names on the
   player bars. A new game, a FEN, a play mode or a tournament replaces them.
-- **About:** the toolbar's ⓘ button opens the About panel: "SiliconBoard",
-  the version, a short description, the project page
+- **About:** the About item of the app menu shows the standard macOS panel:
+  "SiliconBoard", "Version 1.0.1", the project page as a clickable link
   (https://github.com/JoergKau) and the licence, with the application icon.
 - **Icon:** the application icon is shown in the window and is included as
   `SiliconBoard.icns` for the app bundle.
@@ -270,7 +274,7 @@ across the top.
 
 ### Requirements
 
-- Linux on x86-64 (X11 or Wayland, Vulkan).
+- macOS on Apple Silicon.
 - A UCI engine binary (Stockfish 19 is used in the tests).
 - The workspace `public/` asset tree, or `SILICONBOARD_PUBLIC_ROOT` pointing at
   one.

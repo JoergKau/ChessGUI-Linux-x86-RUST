@@ -6,6 +6,7 @@
 
 use eframe::egui;
 
+#[cfg(not(target_os = "macos"))]
 mod about;
 mod app;
 mod assets;
@@ -14,6 +15,8 @@ mod database;
 mod engine;
 mod gui;
 mod logging;
+#[cfg(target_os = "macos")]
+mod macos_about;
 mod settings;
 mod tournament;
 
@@ -83,6 +86,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let log_file = logging::init(settings.session_log);
 
+    // macOS: the About item of the application menu shows the native panel.
+    #[cfg(target_os = "macos")]
+    macos_about::install();
+
     log::info!(
         "SiliconBoard {} starting on {} {} — booting eframe on wgpu",
         env!("CARGO_PKG_VERSION"),
@@ -127,12 +134,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
-        .with_min_inner_size(min_size)
-        // Wayland ignores the embedded window icon: the taskbar/dock icon
-        // comes from the installed .desktop entry, matched by this app_id
-        // (X11 uses the WM_CLASS, which winit derives from the binary name —
-        // also `siliconboard`).
-        .with_app_id("siliconboard");
+        .with_min_inner_size(min_size);
+    // Wayland ignores the embedded window icon: the taskbar/dock icon comes
+    // from the installed .desktop entry, matched by this app_id (X11 uses the
+    // WM_CLASS, which winit derives from the binary name — also
+    // `siliconboard`). macOS uses the bundle icon instead.
+    #[cfg(not(target_os = "macos"))]
+    {
+        viewport = viewport.with_app_id("siliconboard");
+    }
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }

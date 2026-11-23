@@ -205,7 +205,8 @@ impl EngineProcess {
         // Linux reports ETXTBSY (`Text file busy`) when a just-written script
         // is executed while another thread still holds the file open for
         // writing. It clears as soon as that descriptor closes, so retry
-        // briefly instead of reporting a working engine as broken.
+        // briefly instead of reporting a working engine as broken. Harmless
+        // on macOS, where the condition does not occur.
         let mut child = {
             let mut attempts = 0;
             loop {
@@ -778,13 +779,13 @@ async fn run_supervisor(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The UCI engine used by the real-engine tests. Search order:
-/// `SILICONBOARD_TEST_ENGINE`, then Stockfish in the usual Linux locations.
-/// Panics when none exists: a silently skipped test would pass without
-/// testing anything.
+/// `SILICONBOARD_TEST_ENGINE`, then Stockfish in the usual macOS and Linux
+/// locations, then a workspace Triumviratus build. Panics when none exists: a
+/// silently skipped test would pass without testing anything.
 #[cfg(test)]
 pub(crate) fn test_engine_path() -> PathBuf {
     let mut tried = Vec::new();
-    if let Ok(custom) = std::env::var("SILICONBOARD_TEST_ENGINE") {
+    if let Some(custom) = std::env::var_os("SILICONBOARD_TEST_ENGINE") {
         let p = PathBuf::from(custom);
         if p.exists() {
             return p;
@@ -792,6 +793,7 @@ pub(crate) fn test_engine_path() -> PathBuf {
         tried.push(p);
     }
     let candidates = [
+        "/opt/homebrew/bin/stockfish",
         "/usr/games/stockfish",
         "/usr/local/bin/stockfish",
         "/usr/bin/stockfish",
@@ -802,6 +804,16 @@ pub(crate) fn test_engine_path() -> PathBuf {
             return stockfish;
         }
         tried.push(stockfish);
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for triumviratus in [
+        manifest.join("Triumviratus/Triumviratus_8.0_macos_arm"),
+        manifest.join("../Triumviratus/Triumviratus_8.0_macos_arm"),
+    ] {
+        if triumviratus.exists() {
+            return triumviratus;
+        }
+        tried.push(triumviratus);
     }
     panic!(
         "no test engine found; install Stockfish or set SILICONBOARD_TEST_ENGINE (tried {:?})",

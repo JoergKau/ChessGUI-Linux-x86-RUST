@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "siliconboard"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "byteorder",
  "chess-scid-rw",
@@ -3444,6 +3444,9 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "resvg",
  "rfd",
  "rusqlite",

@@ -4,9 +4,9 @@
 //! The user may point at a program, or at a launcher script that starts one
 //! (a shell script, a Java launcher, a Python wrapper). Both are accepted. A
 //! file that cannot run on this system is refused with the reason, before any
-//! process is started. Engines also run with the usual tool folders on
-//! `PATH` (a desktop launch may give the app only a minimal one), and from
-//! their own folder, since many engines load their data files relative to it.
+//! process is started. Engines also run with the usual tool folders on `PATH`
+//! (a desktop launch may give the app only a minimal one), and from their own
+//! folder, since many engines load their data files relative to it.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 use crate::engine::protocol::EngineError;
 
 /// Folders an engine may need on `PATH` that a GUI launch from a desktop
-/// environment or a minimal shell may not have.
-const TOOL_FOLDERS: [&str; 6] = [
+/// environment or a minimal shell may not have. Both platforms list the other
+/// one's usual folders too; a folder that does not exist is simply ignored.
+const TOOL_FOLDERS: [&str; 7] = [
+    "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
     "/usr/games",
@@ -67,7 +69,8 @@ pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
 enum ProgramKind {
     /// A `#!` script; its interpreter is checked separately.
     Script,
-    /// A native Linux program (ELF), thin or a static binary.
+    /// A native program for this operating system (Mach-O on macOS, ELF on
+    /// Linux).
     Native,
     /// A program or archive for another system, with a short name for it.
     Foreign(&'static str),
@@ -75,26 +78,34 @@ enum ProgramKind {
     Unknown,
 }
 
-/// Classify a file by its first bytes.
+/// Classify a file by its first bytes. The native format depends on the
+/// operating system, so the same copied file is accepted here and named as a
+/// foreign program on the other platform.
 fn program_kind(head: &[u8]) -> ProgramKind {
     if head.starts_with(b"#!") {
         ProgramKind::Script
     } else if head.starts_with(b"\x7fELF") {
-        ProgramKind::Native
+        if cfg!(target_os = "linux") {
+            ProgramKind::Native
+        } else {
+            ProgramKind::Foreign("a Linux program")
+        }
+    } else if is_mach_o(head) {
+        if cfg!(target_os = "macos") {
+            ProgramKind::Native
+        } else {
+            ProgramKind::Foreign("a macOS program")
+        }
     } else if head.starts_with(b"MZ") {
         ProgramKind::Foreign("a Windows program")
     } else if head.starts_with(b"PK\x03\x04") {
         ProgramKind::Foreign("a Java archive or zip file; choose the script that starts it")
-    } else if is_mach_o(head) {
-        ProgramKind::Foreign("a macOS program")
     } else {
         ProgramKind::Unknown
     }
 }
 
-/// The four Mach-O magics, in both byte orders. A copied macOS engine is
-/// recognised so the refusal can name the platform instead of saying only
-/// that the file is not a program.
+/// The four Mach-O magics, in both byte orders.
 fn is_mach_o(head: &[u8]) -> bool {
     const MACH_O: [[u8; 4]; 4] = [
         [0xCF, 0xFA, 0xED, 0xFE],
@@ -282,12 +293,16 @@ mod tests {
         let jar = write_file(dir.path(), "engine.jar", b"PK\x03\x04rest", 0o755);
         let err = check_executable(&jar).unwrap_err().to_string();
         assert!(err.contains("Java archive"), "{err}");
-        // The format of another operating system is refused with its name.
-        let mac = write_file(dir.path(), "engine-macos", b"\xCF\xFA\xED\xFErest", 0o755);
-        assert!(check_executable(&mac)
+        // The other platform's native format is a foreign program here.
+        #[cfg(target_os = "macos")]
+        let (name, bytes, platform) = ("engine-linux", b"\x7fELF\x02\x01".as_slice(), "Linux");
+        #[cfg(not(target_os = "macos"))]
+        let (name, bytes, platform) = ("engine-macos", b"\xCF\xFA\xED\xFErest".as_slice(), "macOS");
+        let foreign = write_file(dir.path(), name, bytes, 0o755);
+        assert!(check_executable(&foreign)
             .unwrap_err()
             .to_string()
-            .contains("macOS program"));
+            .contains(&format!("{platform} program")));
         let windows = write_file(dir.path(), "engine.exe", b"MZ\x90\x00", 0o755);
         assert!(check_executable(&windows)
             .unwrap_err()
@@ -339,19 +354,30 @@ mod tests {
     }
 
     #[test]
-    fn an_elf_header_is_a_native_program() {
-        assert_eq!(program_kind(b"\x7fELF\x02\x01"), ProgramKind::Native);
-        assert_eq!(
-            program_kind(b"\xCF\xFA\xED\xFE"),
-            ProgramKind::Foreign("a macOS program")
-        );
+    fn the_native_format_depends_on_the_platform() {
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(program_kind(b"\xCF\xFA\xED\xFE"), ProgramKind::Native);
+            assert_eq!(
+                program_kind(b"\x7fELF\x02\x01"),
+                ProgramKind::Foreign("a Linux program")
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(program_kind(b"\x7fELF\x02\x01"), ProgramKind::Native);
+            assert_eq!(
+                program_kind(b"\xCF\xFA\xED\xFE"),
+                ProgramKind::Foreign("a macOS program")
+            );
+        }
     }
 
     #[test]
     fn the_engine_path_keeps_the_app_path_and_adds_the_tool_folders() {
         let path = engine_path();
         let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
-        assert!(folders.contains(&PathBuf::from("/usr/local/bin")));
+        assert!(folders.contains(&PathBuf::from("/opt/homebrew/bin")));
         assert!(folders.contains(&PathBuf::from("/usr/bin")));
         for tool in TOOL_FOLDERS {
             let count = folders
@@ -397,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finder_launch_gets_a_utf8_locale_for_engines() {
+    fn a_desktop_launch_gets_a_utf8_locale_for_engines() {
         let none = |_: &str| None;
         assert_eq!(engine_locale_from(none), Some(ENGINE_FALLBACK_LOCALE));
         let empty = |_: &str| Some(OsString::new());

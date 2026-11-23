@@ -235,7 +235,7 @@ pub enum DbAction {
     AddGames,
     /// Pick a PGN destination and export the current selection.
     ExportPgn,
-    /// Show the database file in the desktop file manager.
+    /// Show the database file in the platform's file manager.
     RevealInFileManager,
     /// Delete the database file (after the inline confirmation).
     DeleteDatabase,
@@ -840,8 +840,13 @@ impl DatabaseUi {
                             .size(12.0)
                             .color(theme::TEXT),
                     );
+                    let reveal_label = if cfg!(target_os = "macos") {
+                        "Reveal in Finder"
+                    } else {
+                        "Show in file manager"
+                    };
                     if ui
-                        .add(Button::new("Show in file manager").min_size(Vec2::new(160.0, 22.0)))
+                        .add(Button::new(reveal_label).min_size(Vec2::new(160.0, 22.0)))
                         .clicked()
                     {
                         action = DbAction::RevealInFileManager;

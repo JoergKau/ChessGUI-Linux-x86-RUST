@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Key};
 use tokio::sync::mpsc;
 
-use crate::about;
 use crate::assets::{AssetError, Assets, BoardTexture, BoardTheme, PieceId, PieceSet};
 use std::collections::BTreeMap;
 
@@ -646,7 +645,9 @@ pub struct SiliconBoardApp {
     engine_settings: [BTreeMap<String, String>; ENGINE_SLOTS],
     /// The engine options window, while it is open.
     options_dialog: Option<OptionsDialog>,
-    /// The in-app About window, while it is open (opened by the ⓘ button).
+    /// The in-app About window, while it is open (the toolbar's ⓘ button;
+    /// Linux only — macOS uses the application menu).
+    #[cfg(not(target_os = "macos"))]
     about_open: bool,
     /// The slot whose engine is evaluating a pending draw offer.
     draw_offer: Option<usize>,
@@ -854,6 +855,7 @@ impl SiliconBoardApp {
             game_started: false,
             engine_settings: std::array::from_fn(|_| BTreeMap::new()),
             options_dialog: None,
+            #[cfg(not(target_os = "macos"))]
             about_open: false,
             draw_offer: None,
             settings: Settings::default(),
@@ -1846,6 +1848,7 @@ impl SiliconBoardApp {
                 self.tournament_window_open = true;
                 self.tournament_finished_popup = false;
             }
+            #[cfg(not(target_os = "macos"))]
             MenuAction::ShowAbout => self.about_open = true,
             MenuAction::ToggleSessionLog => self.toggle_session_log(),
         }
@@ -4384,23 +4387,33 @@ impl SiliconBoardApp {
         });
     }
 
-    /// Show the open database's file in the desktop file manager.
+    /// Show the open database's file in the platform's file manager.
     fn reveal_database_file(&mut self) {
         let Some(info) = self.database.info.as_ref() else {
             return;
         };
-        // Open the containing folder: xdg-open hands a folder to the desktop's
-        // file manager. Opening the `.sbd` itself would ask for an application
-        // that handles that private file type.
-        let folder = info
-            .path
-            .parent()
-            .map_or_else(|| info.path.clone(), Path::to_path_buf);
-        if let Err(err) = std::process::Command::new("xdg-open").arg(&folder).spawn() {
-            self.set_status(
-                StatusLevel::Error,
-                format!("Could not open the file manager: {err}"),
-            );
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&info.path)
+            .spawn()
+            .map_err(|err| format!("Could not open Finder: {err}"));
+        // Linux: open the containing folder; xdg-open hands a folder to the
+        // desktop's file manager. Opening the `.sbd` itself would ask for an
+        // application that handles that private file type.
+        #[cfg(not(target_os = "macos"))]
+        let result = {
+            let folder = info
+                .path
+                .parent()
+                .map_or_else(|| info.path.clone(), Path::to_path_buf);
+            std::process::Command::new("xdg-open")
+                .arg(&folder)
+                .spawn()
+                .map_err(|err| format!("Could not open the file manager: {err}"))
+        };
+        if let Err(message) = result {
+            self.set_status(StatusLevel::Error, message);
         }
     }
 
@@ -5821,8 +5834,9 @@ impl eframe::App for SiliconBoardApp {
             }
         }
 
+        #[cfg(not(target_os = "macos"))]
         if self.about_open {
-            about::show(&ctx, &mut self.about_open);
+            crate::about::show(&ctx, &mut self.about_open);
         }
 
         if let Some(dialog) = self.time_dialog.as_mut() {

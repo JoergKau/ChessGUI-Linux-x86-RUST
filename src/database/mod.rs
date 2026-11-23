@@ -58,8 +58,9 @@ pub struct EmptyRemoval {
 /// Folder new databases go to unless the user picks another one:
 /// `~/Documents/SiliconBoard/databases`.
 ///
-/// The same reasoning as the tournament PGN default: a desktop launch may have
-/// an arbitrary working directory, so a relative default would be surprising.
+/// The same reasoning as the tournament PGN default: a desktop launch may
+/// have an arbitrary working directory, so a relative default could land
+/// somewhere unwritable.
 pub fn default_database_dir() -> PathBuf {
     match std::env::var_os("HOME") {
         Some(home) => PathBuf::from(home)

@@ -7,8 +7,8 @@
 //!    decoded once at load time; the board picker comes later).
 //! 2. The twelve cburnett chess-piece sprites (`public/piece/cburnett/<w|b><K|Q|R|B|N|P>.svg`)
 //!    which we **rasterise at load time** through the `usvg`/`resvg`/`tiny-skia`
-//!    stack. That gives us vector-sharpness at any board scale on any
-//!    display without paying a per-frame SVG-decoding cost.
+//!    stack. That gives us vector-sharpness at any board scale on any display
+//!    without paying a per-frame SVG-decoding cost.
 //!
 //! [`Assets`] ties the two together; [`BoardTexture`] and [`PieceTextures`]
 //! stay independently cloneable so the widgets can hold their own borrow.
@@ -28,8 +28,8 @@ pub const PIECE_RASTER_SIZE: u32 = 512;
 
 /// The raster size to use for a board square that occupies `physical_px`
 /// pixels on screen. A sprite is rasterised at the square's own pixel size
-/// (rounded up to a 16-pixel step), which keeps the SVG crisp on a 1x Linux
-/// display and on a Retina display alike.
+/// (rounded up to a 16-pixel step), which keeps the SVG crisp on a 1x display
+/// and on a Retina display alike.
 ///
 /// Rasterising a 512-px SVG and drawing it into a ~75-px square undersamples
 /// the thin cburnett outlines: linear filtering has no mipmaps in the wgpu
@@ -86,7 +86,7 @@ impl PieceId {
 }
 
 /// GPU texture for the chess board image. Wrapped around a single
-/// [`TextureHandle`] owned by egui/wgpu.
+/// [`TextureHandle`] owned by egui/Metal.
 #[derive(Clone)]
 pub struct BoardTexture {
     handle: TextureHandle,
@@ -151,7 +151,7 @@ pub struct Assets {
 impl Assets {
     /// Discover the workspace `public/` root and load every asset with the
     /// default board theme and piece set. Used by the tests and the timing
-    /// harness; the app uses [`Self::load_with`].
+    /// harness; the app uses [`Self::load_with_size`].
     ///
     /// # Errors
     /// Returns an [`AssetError`] if the asset directory cannot be located,

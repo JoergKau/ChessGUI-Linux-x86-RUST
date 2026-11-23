@@ -809,7 +809,6 @@ fn arrow_shapes(
 // Piece drawing
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Paint one piece sprite of `square` pixels centred on `center`.
 /// The number of physical pixels one board square covers on this display.
 /// The app uses it to choose the SVG raster size.
 fn physical_square_px(ctx: &egui::Context, square_points: f32) -> u32 {
@@ -818,6 +817,7 @@ fn physical_square_px(ctx: &egui::Context, square_points: f32) -> u32 {
         .clamp(1.0, u32::MAX as f32) as u32
 }
 
+/// Paint one piece sprite of `square` pixels centred on `center`.
 pub(crate) fn draw_piece(painter: &Painter, center: Pos2, texture: TextureId, square: f32) {
     let rect = Rect::from_center_size(center, Vec2::splat(square));
     let options = egui::ImageOptions::default();

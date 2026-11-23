@@ -11,7 +11,6 @@ target/
 # OS noise
 .DS_Store
 Thumbs.db
-._*
 
 # IDE config
 .vscode/
@@ -32,10 +31,14 @@ doc/
 /scratch/
 /notes.md
 
-# Build artefacts: the assembled Linux release folder and its tarball
-# (package-linux.sh). The tarball is published as a GitHub release asset.
+# Build artefacts: the assembled and signed macOS bundle. Distribution
+# archives (macOS zip, Linux tarball) are GitHub release assets, not tracked
+# files.
+/SiliconBoard.app/
+/SiliconBoard-*-macos-*.zip
 /SiliconBoard-*-linux-*/
 /SiliconBoard-*-linux-*.tar.gz
+._*
 
 # Tournament output (the Engine match writes its PGN here by default)
 /tournament/

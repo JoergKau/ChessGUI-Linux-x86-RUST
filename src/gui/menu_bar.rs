@@ -86,7 +86,9 @@ pub enum MenuAction {
     StopTournament,
     /// Tournament → Show tournament: reopen the tournament window.
     ShowTournament,
-    /// The toolbar's ⓘ button: show the in-app About window.
+    /// The toolbar's ⓘ button: show the in-app About window (Linux; macOS
+    /// uses the application menu's native About panel).
+    #[cfg(not(target_os = "macos"))]
     ShowAbout,
     /// Start: analyse the displayed position with every loaded engine.
     StartAnalysis,
@@ -528,13 +530,14 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         ui.label(RichText::new("FEN").color(theme::MUTED).size(14.0));
         let fen_id = ui.make_persistent_id("fen_field");
         let selection = crate::gui::text_field::selection_before(ui, fen_id);
+        // Linux keeps room for the About button on the same row.
+        let about_reserve = if cfg!(target_os = "macos") { 0.0 } else { 36.0 };
         let field = ui
             .add(
                 egui::TextEdit::singleline(fen_input)
                     .id(fen_id)
                     .font(FontId::monospace(15.0))
-                    // Leave room for the About button on the same row.
-                    .desired_width((ui.available_width() - 36.0).max(120.0))
+                    .desired_width((ui.available_width() - about_reserve).max(120.0))
                     .hint_text("paste a FEN and press Enter"),
             )
             .on_hover_text("Enter loads this position");
@@ -543,7 +546,9 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             action = Some(MenuAction::LoadFen);
         }
-        // About panel: an always-visible ⓘ button.
+        // About panel: an always-visible ⓘ button where the platform has no
+        // application menu (Linux).
+        #[cfg(not(target_os = "macos"))]
         if ui
             .add(egui::Button::new(RichText::new("ⓘ").size(15.0)))
             .on_hover_text("About SiliconBoard")

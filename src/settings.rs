@@ -4,10 +4,12 @@
 //! figurine switches, the window and panel sizes, and the last tournament
 //! configuration.
 //!
-//! The file is JSON, kept under `~/.config/siliconboard/` (XDG; set
-//! `XDG_CONFIG_HOME` to move it). `SILICONBOARD_SETTINGS` overrides the path.
-//! A missing file means the defaults. A file that cannot be read or parsed is
-//! reported, and the defaults are used until the user changes something.
+//! The file is JSON, kept in the platform's per-user configuration folder
+//! (`~/Library/Application Support/SiliconBoard/` on macOS,
+//! `~/.config/siliconboard/` on Linux, honouring `XDG_CONFIG_HOME`).
+//! `SILICONBOARD_SETTINGS` overrides the path. A missing file means the
+//! defaults. A file that cannot be read or parsed is reported, and the
+//! defaults are used until the user changes something.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,9 +50,8 @@ pub struct Settings {
     /// the field keeps using a configured path.
     #[serde(default = "default_tablebases_in_engines")]
     pub tablebases_in_engines: bool,
-    /// Whether the app writes the session log
-    /// (`~/.local/state/siliconboard/logs`). On by default; Engine →
-    /// Session log switches it.
+    /// Whether the app writes the session log (see [`crate::logging`]). On by
+    /// default; Engine → Session log switches it.
     pub session_log: bool,
     /// Option values per engine file (the path as text), by option name.
     pub engine_options: BTreeMap<String, BTreeMap<String, String>>,
@@ -191,8 +192,8 @@ impl std::error::Error for SettingsError {
     }
 }
 
-/// Where the settings file lives: `SILICONBOARD_SETTINGS` if set, else
-/// `~/.config/siliconboard/settings.json` (honouring `XDG_CONFIG_HOME`).
+/// Where the settings file lives: `SILICONBOARD_SETTINGS` if set, else the
+/// platform's per-user configuration folder plus `settings.json`.
 pub fn settings_path() -> Result<PathBuf, SettingsError> {
     if let Some(path) = std::env::var_os("SILICONBOARD_SETTINGS") {
         return Ok(PathBuf::from(path));
@@ -201,9 +202,16 @@ pub fn settings_path() -> Result<PathBuf, SettingsError> {
     Ok(config_folder(&home).join("settings.json"))
 }
 
+/// The per-user configuration folder for the app. macOS uses the Application
+/// Support folder; Linux follows the XDG base-directory spec.
+#[cfg(target_os = "macos")]
+fn config_folder(home: &std::ffi::OsStr) -> PathBuf {
+    PathBuf::from(home).join("Library/Application Support/SiliconBoard")
+}
+
 /// The per-user configuration folder for the app, `siliconboard` beneath the
-/// configuration root. `home` is the user's home directory; the root itself
-/// honours `XDG_CONFIG_HOME`.
+/// XDG configuration root (`~/.config` unless `XDG_CONFIG_HOME` moves it).
+#[cfg(not(target_os = "macos"))]
 fn config_folder(home: &std::ffi::OsStr) -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         if !xdg.is_empty() && PathBuf::from(&xdg).is_absolute() {

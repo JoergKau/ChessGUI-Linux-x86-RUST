@@ -1,8 +1,8 @@
 [package]
 name = "siliconboard"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
-description = "SiliconBoard — A modern, high-performance UCI Chess GUI for Linux written in Rust"
+description = "SiliconBoard — A modern, high-performance UCI Chess GUI for macOS and Linux, written in Rust"
 authors = ["SiliconBoard Contributors"]
 # The package as distributed is GPL-3.0-or-later: the binary links
 # `shakmaty` (GPL-3.0-or-later) statically. The author's own source files
@@ -13,12 +13,13 @@ repository = "https://github.com/JoergKau"
 keywords = ["chess", "uci", "gui", "egui", "shakmaty"]
 categories = ["games", "gui"]
 
-# wgpu picks the platform's GPU backend automatically (Vulkan on Linux),
-# which makes the build artifacts reproducible and unambiguous.
+# wgpu picks the platform's GPU backend automatically (Metal on macOS,
+# Vulkan on Linux), which makes the build artifacts reproducible and
+# unambiguous.
 default-run = "siliconboard"
 
 [dependencies]
-# ── GUI framework: immediate-mode UI on top of wgpu ──────────────────────────
+# ── GUI framework: immediate-mode UI on top of wgpu ─────────────────────────
 eframe = { version = "0.37", features = ["default", "wgpu"] }
 egui = "0.37"
 egui_extras = { version = "0.37", features = ["default", "image"] }
@@ -58,7 +59,8 @@ tokio = { version = "1.40", features = [
 ] }
 
 # ── Native file open / save dialogs for engines, PGNs, books ────────────────
-# The XDG desktop portal on Linux (the platform's own dialogs).
+# Default features pick Cocoa dialogs on macOS and the XDG desktop portal on
+# Linux.
 rfd = "0.17"
 
 # Clipboard writing goes through `egui::Context::copy_text`; no clipboard crate
@@ -91,6 +93,11 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 # feature so a build without the crate still compiles and hides Scid support.
 chess-scid-rw = { version = "1.0", optional = true }
 
+# ── macOS About panel (src/macos_about.rs): Objective-C bindings ────────────
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSAttributedString", "NSImage", "NSParagraphStyle", "NSText", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSAttributedString", "NSRange", "NSURL", "NSBundle"] }
 
 [dev-dependencies]
 # Tests run alongside `cargo test`; lightweight helpers.
@@ -117,6 +124,6 @@ codegen-units = 1
 # engines are left behind (see BUG-7-09).
 #
 # Symbols are intentionally kept in the Cargo release profile: an internal or
-# development build then produces useful crash reports. `package-linux.sh`
-# strips the copy that goes into the distributable folder, so only the shipped
-# build trades diagnostics for size (audit §2.3).
+# development build then produces useful crash reports. `package-macos.sh` and
+# `package-linux.sh` strip the copy that goes into the distributable build, so
+# only the shipped app trades diagnostics for size (audit §2.3).
