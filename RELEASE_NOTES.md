@@ -1,5 +1,19 @@
 # SiliconBoard — Release Notes
 
+## Unreleased
+
+**Windows support.** The same source tree now builds and runs on Windows
+(x86-64) beside macOS and Linux. The settings (`%APPDATA%\SiliconBoard`), the
+session logs (`%LOCALAPPDATA%\SiliconBoard\logs`) and the Documents folder
+come from the Windows environment, including a redirected or OneDrive-synced
+Documents folder. Engines run without a console window, and stopping one
+(Abort, a stall, or leaving the app) ends the whole process tree, so helper
+processes do not survive. The file picker accepts `.exe` programs and
+`.bat`/`.cmd`/`.ps1` launchers, and the engine check recognises PE, ELF and
+Mach-O files. wgpu uses Direct3D 12 by default because a broken or injected
+Vulkan layer can crash before the window appears; `WGPU_BACKEND` overrides it.
+`package-windows.ps1` builds the release zip.
+
 ## v1.4.1
 
 **One source tree for macOS and Linux.** The macOS and Linux editions are

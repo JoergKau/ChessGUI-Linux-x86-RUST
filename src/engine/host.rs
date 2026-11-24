@@ -500,6 +500,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn engine_that_exited_before_attach_shows_offline() {
         use std::os::unix::fs::PermissionsExt;
@@ -581,6 +582,7 @@ mod tests {
         host.shutdown().terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn engine_that_stops_answering_is_reported_as_stalled() {
         use std::os::unix::fs::PermissionsExt;
@@ -731,6 +733,7 @@ mod tests {
     }
 
     /// Writes an executable `sh` script for a fake engine.
+    #[cfg(unix)]
     fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
@@ -741,6 +744,7 @@ mod tests {
 
     /// Deadlines short enough for a test: a stop or a move must end within
     /// about 300 ms of its limit.
+    #[cfg(unix)]
     fn short_deadlines() -> Timing {
         Timing {
             ping_every: Duration::from_millis(50),
@@ -753,6 +757,7 @@ mod tests {
 
     /// A fake engine that completes the handshake, answers `isready` at all
     /// times, starts an `info` line on `go`, and never sends `bestmove`.
+    #[cfg(unix)]
     fn stop_ignoring_engine(dir: &std::path::Path) -> PathBuf {
         write_script(
             dir,
@@ -762,6 +767,7 @@ mod tests {
     }
 
     /// Pump until the host reports a stall (returning its reason) or 5 s pass.
+    #[cfg(unix)]
     fn pump_until_stalled(host: &mut EngineHost) -> Option<StallReason> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
@@ -774,6 +780,7 @@ mod tests {
         None
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_without_bestmove_is_reported_as_a_stall() {
         let dir = tempfile::tempdir().unwrap();
@@ -795,6 +802,7 @@ mod tests {
         host.shutdown().terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_move_search_without_bestmove_is_reported_as_a_stall() {
         let dir = tempfile::tempdir().unwrap();
@@ -817,6 +825,7 @@ mod tests {
         host.shutdown().terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_engine_that_only_prints_noise_is_reported_as_a_stall() {
         let dir = tempfile::tempdir().unwrap();
@@ -851,6 +860,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stall_is_found_while_the_ui_does_not_pump() {
         // With the window hidden the host is not pumped. The monitor task
@@ -878,6 +888,7 @@ mod tests {
         host.shutdown().terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_fast_engine_leaves_one_merged_info_entry_not_a_queue() {
         use std::os::unix::fs::PermissionsExt;
@@ -918,6 +929,7 @@ mod tests {
         host.shutdown().terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_card_score_keeps_the_turn_of_the_searched_position() {
         let dir = tempfile::tempdir().unwrap();

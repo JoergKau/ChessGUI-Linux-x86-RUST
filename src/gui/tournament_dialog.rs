@@ -725,7 +725,7 @@ impl TournamentDialog {
                 TextEdit::singleline(&mut self.pgn_path)
                     .id(id)
                     .desired_width(340.0)
-                    .hint_text("~/Documents/SiliconBoard/engine-match.pgn"),
+                    .hint_text("Documents/SiliconBoard/engine-match.pgn"),
             );
             crate::gui::text_field::after_edit(ui, id, &mut self.pgn_path, selection, &response);
             if ui

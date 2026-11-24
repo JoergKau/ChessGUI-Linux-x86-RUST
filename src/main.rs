@@ -1,3 +1,12 @@
+// A release build on Windows is a GUI application: without this the console
+// window that Windows creates for a console-subsystem program stays open
+// beside the chess board. Debug builds keep the console so the log output of
+// `cargo run` is visible.
+#![cfg_attr(
+    all(windows, not(debug_assertions), not(test)),
+    windows_subsystem = "windows"
+)]
+
 //! SiliconBoard — entry point.
 //!
 //! Boots eframe on wgpu, creates the Tokio runtime that serves engines and
@@ -17,6 +26,7 @@ mod gui;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macos_about;
+mod platform;
 mod settings;
 mod tournament;
 
@@ -146,9 +156,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
+    let options = {
+        let mut options = eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        };
+        // Windows: use Direct3D 12 by default. wgpu would otherwise try
+        // Vulkan first when its loader is installed, and a broken or injected
+        // Vulkan layer (capture overlays such as ReShade are a common cause)
+        // can crash inside the loader before the window appears. DX12 is the
+        // native Windows backend and also has a software adapter (WARP), so it
+        // is the safer default. `WGPU_BACKEND` still overrides the choice.
+        #[cfg(windows)]
+        if std::env::var_os("WGPU_BACKEND").is_none() {
+            if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) =
+                &mut options.wgpu_options.wgpu_setup
+            {
+                setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+                log::info!("wgpu backend: Direct3D 12 (set WGPU_BACKEND to override)");
+            }
+        }
+        options
     };
 
     eframe::run_native(

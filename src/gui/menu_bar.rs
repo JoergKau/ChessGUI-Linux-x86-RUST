@@ -86,8 +86,8 @@ pub enum MenuAction {
     StopTournament,
     /// Tournament → Show tournament: reopen the tournament window.
     ShowTournament,
-    /// The toolbar's ⓘ button: show the in-app About window (Linux; macOS
-    /// uses the application menu's native About panel).
+    /// The toolbar's ⓘ button: show the in-app About window (Linux and
+    /// Windows; macOS uses the application menu's native About panel).
     #[cfg(not(target_os = "macos"))]
     ShowAbout,
     /// Start: analyse the displayed position with every loaded engine.
@@ -529,7 +529,7 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
         ui.label(RichText::new("FEN").color(theme::MUTED).size(14.0));
         let fen_id = ui.make_persistent_id("fen_field");
         let selection = crate::gui::text_field::selection_before(ui, fen_id);
-        // Linux keeps room for the About button on the same row.
+        // Linux and Windows keep room for the About button on the same row.
         let about_reserve = if cfg!(target_os = "macos") { 0.0 } else { 36.0 };
         let field = ui
             .add(
@@ -546,7 +546,7 @@ pub fn show(ui: &mut Ui, state: &MenuState, fen_input: &mut String) -> Option<Me
             action = Some(MenuAction::LoadFen);
         }
         // About panel: an always-visible ⓘ button where the platform has no
-        // application menu (Linux).
+        // application menu (Linux and Windows).
         #[cfg(not(target_os = "macos"))]
         if ui
             .add(egui::Button::new(RichText::new("ⓘ").size(15.0)))

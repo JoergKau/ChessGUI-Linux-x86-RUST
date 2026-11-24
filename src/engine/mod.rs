@@ -11,6 +11,9 @@
 //! 3. **Supervisor task** — waits on either `kill_rx` or
 //!    `child.wait()`; whichever fires first determines cleanup.
 //!
+//! The engine is started in its own process group (Unix) or process tree
+//! (Windows), so a supervisor kill also ends helpers the engine started.
+//!
 //! Splitting writer/reader into separate tasks is essential because UCI
 //! engines can produce dozens of `info …` lines per second — without the
 //! split, a slow downstream consumer could deadlock the writer.
@@ -34,7 +37,9 @@ pub use analysis::{AnalysisStatus, SearchGoal};
 pub use host::{EngineHost, EngineView};
 pub use protocol::{EngineCommand, EngineError, EngineEvent, Score};
 
-use launch::{check_executable, engine_locale, engine_path, Diagnostics};
+#[cfg(unix)]
+use launch::engine_locale;
+use launch::{check_executable, engine_path, Diagnostics};
 use protocol::EngineStats;
 use uci_parser::{parse_line, HandshakeAccumulator, UciParseError};
 use watchdog::{Timing, Watchdog, WatchdogAction};
@@ -132,6 +137,51 @@ fn is_secondary_info(line: &str) -> bool {
     false
 }
 
+/// The command that starts `binary`.
+///
+/// A native executable is started directly. Windows cannot execute a batch
+/// file through `CreateProcess`, so a `.bat`/`.cmd` launcher is run by the
+/// command interpreter (`%COMSPEC%`), and a `.ps1` script by PowerShell — the
+/// Windows equivalents of the shell launchers that Unix supports directly.
+fn engine_command(binary: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let extension = binary
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        match extension.as_deref() {
+            Some("bat" | "cmd") => {
+                let interpreter = std::env::var_os("COMSPEC")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "cmd.exe".into());
+                let mut cmd = Command::new(interpreter);
+                cmd.arg("/C").arg(binary);
+                return cmd;
+            }
+            Some("ps1") => {
+                let powershell = crate::platform::windows_dir()
+                    .join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe");
+                let mut cmd = Command::new(powershell);
+                cmd.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(binary);
+                return cmd;
+            }
+            _ => {}
+        }
+    }
+    Command::new(binary)
+}
+
 /// One event from the engine, already trimmed and reduced.
 #[derive(Debug, Clone)]
 pub enum ParsedUciLine {
@@ -175,21 +225,36 @@ impl EngineProcess {
     /// exit) or when [`Self::terminate`] is called.
     async fn spawn_inner(binary: &Path, wake: Option<EngineWake>) -> Result<Self, EngineError> {
         check_executable(binary)?;
-        let mut cmd = Command::new(binary);
-        // The engine leads its own process group, so a kill also reaches any
-        // helper process it started (see `registry::kill_group`). It runs from
-        // its own folder, where its data files usually are, and with the tool
-        // folders on PATH, which a desktop launch may not give it.
+        let mut cmd = engine_command(binary);
+        // The engine leads its own process group (Unix) or process tree
+        // (Windows), so a kill also reaches any helper process it started (see
+        // `registry::kill_group`). It runs from its own folder, where its data
+        // files usually are, and with the tool folders on PATH, which a desktop
+        // launch may not give it.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .env("PATH", engine_path())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            // A console engine started by a GUI program must not open a black
+            // console window, and it gets its own process group so the whole
+            // tree can be stopped.
+            cmd.creation_flags(
+                crate::platform::CREATE_NO_WINDOW | crate::platform::CREATE_NEW_PROCESS_GROUP,
+            );
+        }
         // A desktop launch may have no locale, and some .NET engines then die
         // during start-up on the invariant culture's OEM code page 1 (see
         // `launch::ENGINE_FALLBACK_LOCALE`). Give such an engine a real UTF-8
-        // locale; a usable one inherited from a terminal is kept.
+        // locale; a usable one inherited from a terminal is kept. Windows
+        // takes its culture from the user account, so the fix is Unix-only.
+        #[cfg(unix)]
         if let Some(locale) = engine_locale() {
             cmd.env_remove("LC_ALL")
                 .env_remove("LC_CTYPE")
@@ -779,8 +844,9 @@ async fn run_supervisor(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The UCI engine used by the real-engine tests. Search order:
-/// `SILICONBOARD_TEST_ENGINE`, then Stockfish in the usual macOS and Linux
-/// locations, then a workspace Triumviratus build. Panics when none exists: a
+/// `SILICONBOARD_TEST_ENGINE`, then Stockfish in the usual locations (the
+/// system `PATH`, the process's own folder and the recognised install
+/// folders), then a workspace Triumviratus build. Panics when none exists: a
 /// silently skipped test would pass without testing anything.
 #[cfg(test)]
 pub(crate) fn test_engine_path() -> PathBuf {
@@ -792,20 +858,53 @@ pub(crate) fn test_engine_path() -> PathBuf {
         }
         tried.push(p);
     }
-    let candidates = [
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    #[cfg(windows)]
+    let candidates: Vec<PathBuf> = {
+        let mut found: Vec<PathBuf> = Vec::new();
+        let mut names = vec!["stockfish.exe", "stockfish-windows-x86-64-avx2.exe"];
+        names.push("stockfish-windows-x86-64.exe");
+        if let Some(path) = std::env::var_os("PATH") {
+            for folder in std::env::split_paths(&path) {
+                for name in &names {
+                    let candidate = folder.join(name);
+                    if candidate.is_file() && !found.contains(&candidate) {
+                        found.push(candidate);
+                    }
+                }
+            }
+        }
+        for folder in [
+            r"C:\Program Files\Stockfish",
+            r"C:\Program Files (x86)\Stockfish",
+            r"C:\Stockfish",
+        ] {
+            for name in &names {
+                let candidate = PathBuf::from(folder).join(name);
+                if !found.contains(&candidate) {
+                    found.push(candidate);
+                }
+            }
+        }
+        found.push(manifest.join("stockfish.exe"));
+        found
+    };
+    #[cfg(not(windows))]
+    let candidates: Vec<PathBuf> = [
         "/opt/homebrew/bin/stockfish",
         "/usr/games/stockfish",
         "/usr/local/bin/stockfish",
         "/usr/bin/stockfish",
-    ];
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
     for candidate in candidates {
-        let stockfish = PathBuf::from(candidate);
-        if stockfish.exists() {
-            return stockfish;
+        if candidate.exists() {
+            return candidate;
         }
-        tried.push(stockfish);
+        tried.push(candidate);
     }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for triumviratus in [
         manifest.join("Triumviratus/Triumviratus_8.0_macos_arm"),
         manifest.join("../Triumviratus/Triumviratus_8.0_macos_arm"),
@@ -858,28 +957,88 @@ mod tests {
 
     #[test]
     fn executable_check_names_the_problem() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
 
         let plain = dir.path().join("notes.md");
         std::fs::write(&plain, "not a program").unwrap();
-        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = check_executable(&plain).unwrap_err();
-        assert!(err.to_string().contains("not marked executable"), "{}", err);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = check_executable(&plain).unwrap_err();
+            assert!(err.to_string().contains("not marked executable"), "{}", err);
+        }
+        #[cfg(windows)]
+        {
+            let err = check_executable(&plain).unwrap_err();
+            assert!(err.to_string().contains("not a program"), "{}", err);
+        }
 
         let folder = dir.path().join("folder");
         std::fs::create_dir(&folder).unwrap();
         let err = check_executable(&folder).unwrap_err();
         assert!(err.to_string().contains("not a regular file"), "{}", err);
 
-        // A script with the execute bit passes; only the handshake can tell
-        // whether it is a UCI engine.
-        let script = dir.path().join("wrapper.sh");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(check_executable(&script).is_ok());
+        // A launcher passes; only the handshake can tell whether it is a UCI
+        // engine.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = dir.path().join("wrapper.sh");
+            std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(check_executable(&script).is_ok());
+        }
+        #[cfg(windows)]
+        {
+            let script = dir.path().join("wrapper.bat");
+            std::fs::write(&script, "@echo off\r\nexit /b 0\r\n").unwrap();
+            assert!(check_executable(&script).is_ok());
+        }
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_windows_powershell_engine_answers_the_handshake() {
+        // The Windows counterpart of the shell-script engines below: a plain
+        // PowerShell file that speaks enough UCI to complete a handshake. A
+        // batch file would be more obvious, but `set /p` reads only the first
+        // line of a redirected pipe, so it cannot answer a second command.
+        let body = r#"while ($null -ne ($line = [Console]::In.ReadLine())) {
+    switch -Regex ($line) {
+        '^uci$' {
+            [Console]::Out.WriteLine('id name PsEngine')
+            [Console]::Out.WriteLine('option name Hash type spin default 16 min 1 max 1024')
+            [Console]::Out.WriteLine('uciok')
+        }
+        '^isready$' { [Console]::Out.WriteLine('readyok') }
+        '^quit$' { break }
+    }
+    [Console]::Out.Flush()
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("engine.ps1");
+        std::fs::write(&script, body).unwrap();
+
+        let engine = EngineProcess::spawn(&script).await.unwrap();
+        let rx = engine.subscribe();
+        engine.try_send(EngineCommand::Initialize).unwrap();
+        let drained = wait_until(rx, Duration::from_secs(15), |line| {
+            matches!(line, ParsedUciLine::Event(EngineEvent::UciOk { .. }))
+        })
+        .await;
+        assert!(
+            drained
+                .iter()
+                .any(|line| matches!(line, ParsedUciLine::Event(EngineEvent::UciOk { .. }))),
+            "a PowerShell engine must complete the UCI handshake: {}",
+            engine.diagnosis()
+        );
+        engine.terminate().await.unwrap();
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn engine_exit_publishes_terminated_event() {
         use std::os::unix::fs::PermissionsExt;
@@ -905,6 +1064,7 @@ mod tests {
         assert!(engine.has_exited(), "the sticky exit flag must be set too");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn engine_output_calls_the_wake_callback() {
         use std::os::unix::fs::PermissionsExt;
@@ -1068,6 +1228,7 @@ mod tests {
         engine.terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn helper_processes_are_stopped_with_their_engine() {
         use std::os::unix::fs::PermissionsExt;
@@ -1130,6 +1291,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_launcher_script_runs_the_program_it_names_from_its_own_folder() {
         use std::os::unix::fs::PermissionsExt;
@@ -1163,6 +1325,7 @@ mod tests {
         engine.terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_launcher_that_names_a_missing_program_reports_exit_127() {
         use std::os::unix::fs::PermissionsExt;
@@ -1183,6 +1346,7 @@ mod tests {
         engine.terminate().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_engine_reports_its_last_message_with_the_exit_status() {
         use std::os::unix::fs::PermissionsExt;
@@ -1207,6 +1371,7 @@ mod tests {
         assert!(report.contains("boom: data file missing"), "{report}");
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn currmove_lines_and_noise_do_not_wake_the_window() {
         use std::os::unix::fs::PermissionsExt;

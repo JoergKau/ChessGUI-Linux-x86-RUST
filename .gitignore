@@ -31,11 +31,13 @@ doc/
 /scratch/
 /notes.md
 
-# Build artefacts: the assembled and signed macOS bundle and the unpacked
-# Linux release folder. The distribution archives themselves are committed at
-# the repository root and attached to GitHub releases.
+# Build artefacts: the assembled and signed macOS bundle, the unpacked Linux
+# release folder and the unpacked Windows release folder. The distribution
+# archives themselves are committed at the repository root and attached to
+# GitHub releases.
 /SiliconBoard.app/
 /SiliconBoard-*-linux-*/
+/SiliconBoard-*-windows-*/
 ._*
 
 # Tournament output (the Engine match writes its PGN here by default)

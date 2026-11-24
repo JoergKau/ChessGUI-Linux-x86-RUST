@@ -4,8 +4,8 @@
 
 A native **UCI chess GUI written in Rust** with `egui`/`eframe` and `wgpu`.
 Board on the left, live engine analysis on the right, the move list along the
-bottom, and a flat toolbar across the top. It runs on **macOS (Apple Silicon)**
-and **Linux (x86-64)** from the same source tree.
+bottom, and a flat toolbar across the top. It runs on **macOS (Apple Silicon)**,
+**Linux (x86-64)** and **Windows (x86-64)** from the same source tree.
 
 - **Analysis:** two engine slots with live depth, nodes, speed, evaluation
   and principal variation; a best-move arrow on the board for each engine
@@ -39,45 +39,62 @@ changed in the current version is in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ## Download
 
 Ready-to-run builds are published on the
-[Releases](https://github.com/JoergKau/SiliconBoard-ChessGUI/releases) page and
-also committed at the repository root, so a clone is ready to run. Each
-release carries one asset per platform — the source is the same, but the
+[Releases](https://github.com/JoergKau/SiliconBoard-ChessGUI/releases) page.
+Each release carries one asset per platform — the source is the same, but the
 packaged form differs:
 
 | Platform | Asset | Start it with |
 | --- | --- | --- |
 | macOS (Apple Silicon) | `SiliconBoard-<version>-macos-arm64.zip` | unpack, drag `SiliconBoard.app` to `/Applications`, double-click |
 | Linux (x86-64) | `SiliconBoard-<version>-linux-x86_64.tar.gz` | `tar xzf …`, then `SiliconBoard-<version>-linux-x86_64/bin/siliconboard` |
+| Windows (x86-64) | `SiliconBoard-<version>-windows-x86_64.zip` | unpack, then run `bin\siliconboard.exe` |
 
 Every source release also has GitHub's generated `.tar.gz`/`.zip` archives.
+The macOS and Linux archives are also committed at the repository root, so a
+clone is ready to run on those platforms; the Windows zip is built with
+`package-windows.ps1` (see [Packaging a release](#packaging-a-release)).
 Checksums for the committed archives are in [SHA256SUMS](SHA256SUMS).
 
 **macOS first launch:** the app is ad-hoc signed but not notarized, so a
 downloaded copy is quarantined. Right-click the app → **Open**, then confirm
 **Open** once. Each release prints the archive's SHA-256; check a download
-with `shasum -a 256 <file>` (macOS) or `sha256sum <file>` (Linux).
+with `shasum -a 256 <file>` (macOS), `sha256sum <file>` (Linux) or
+`Get-FileHash <file> -Algorithm SHA256` (Windows PowerShell).
 
 **Linux:** `package-linux.sh` installs the app under `~/.local` by default
 (binary, assets, icon and a `.desktop` entry); the tarball is for machines
 where you only unpack and run. No engine is bundled — see the next section.
 
+**Windows:** unpack the zip anywhere and run `bin\siliconboard.exe`. The
+release is a GUI program without a console window; `package-windows.ps1`
+assembles the same layout and can install it under
+`%LOCALAPPDATA%\Programs\SiliconBoard` with a Start Menu entry. No engine is
+bundled.
+
 ## Requirements
 
 - macOS 12 or later on Apple Silicon, **or** a Linux x86-64 desktop with a
-  working Vulkan or OpenGL driver
+  working Vulkan or OpenGL driver, **or** Windows 10/11 on x86-64 with
+  Direct3D 12 (the Microsoft Basic Render Driver is used when no GPU driver
+  is available)
 - Rust 2021 edition (`cargo`) to build from source
 - At least one **UCI engine** of your choice — SiliconBoard ships none
+
+On Windows, SiliconBoard uses the Direct3D 12 backend by default. If you want
+to try another wgpu backend, set `WGPU_BACKEND` for one run, for example
+`$env:WGPU_BACKEND="vulkan"` in PowerShell or `set WGPU_BACKEND=vulkan` in
+`cmd.exe`.
 
 ## Loading a UCI engine (example: Stockfish)
 
 No engine is distributed with SiliconBoard: _Engine → Load engine A…_ and
 _Load engine B…_ always open the native file picker, and whichever engine
 the user points them at fills the slot (loading into an occupied slot
-replaces it). The chosen file is checked before it starts — a launcher
-script must name an existing interpreter, and a non-program or a binary for
-another operating system is refused with the reason. Each engine keeps its
-own option values, which are sent again after a restart and restored at the
-next launch.
+replaces it). The chosen file is checked before it starts — on macOS and
+Linux a launcher script must name an existing interpreter — and a non-program
+or a binary for another operating system is refused with the reason. Each
+engine keeps its own option values, which are sent again after a restart and
+restored at the next launch.
 
 Installing the free Stockfish:
 
@@ -86,8 +103,14 @@ Installing the free Stockfish:
      `stockfish-macos-universal`.
    - **Linux:** take the Linux x86-64 build (or install your distribution's
      `stockfish` package, usually `/usr/games/stockfish`).
+   - **Windows:** take the Windows x86-64 build; the UCI binary inside is
+     `stockfish-windows-x86-64-*.exe`.
 2. Unpack the file if needed.
 3. In the GUI, _Engine → Load engine A…_ and point it at that binary.
+
+On Windows the file picker also accepts `.bat`, `.cmd` and `.ps1` launchers,
+so a small wrapper script that starts an engine works as it does on the other
+platforms.
 
 The process is the same for any other UCI engine: unpack it and point the
 menu at its executable.
@@ -97,6 +120,11 @@ menu at its executable.
 ```shell
 cargo run --release
 ```
+
+On Windows, install the Rust MSVC toolchain and the Visual Studio C++ build
+tools (the bundled SQLite and the MSVC linker need them), then run the same
+command from PowerShell or `cmd.exe`. A debug build keeps the console open for
+the session log; a release build is a windowed application without a console.
 
 The **asset tree** is bundled in this repository under `public/`: board
 themes under `public/images/board/`, piece sets (twelve SVGs per folder)
@@ -130,7 +158,7 @@ to every loaded engine — and to every engine loaded later — as the
 `SyzygyPath` option.
 
 - Several folders are joined into **one string**, separated by `:` on macOS
-  and Linux. This matters when the 5-men and 6-men files
+  and Linux and `;` on Windows. This matters when the 5-men and 6-men files
   live in different folders, as in
   `/home/you/EGTB/Syzygy-3-4-5:/home/you/EGTB/Syzygy-6`.
 - Applying an empty line clears the tablebases again: the loaded engines get
@@ -182,12 +210,16 @@ CC BY-NC 4.0 and must be fetched by the user.
 
 Paths follow the platform's conventions:
 
-| What | macOS | Linux |
-| --- | --- | --- |
-| Settings | `~/Library/Application Support/SiliconBoard/settings.json` | `~/.config/siliconboard/settings.json` (`$XDG_CONFIG_HOME`) |
-| Session logs | `~/Library/Logs/SiliconBoard/` | `~/.local/state/siliconboard/logs/` (`$XDG_STATE_HOME`) |
-| Databases | `~/Documents/SiliconBoard/databases/` | `~/Documents/SiliconBoard/databases/` |
-| Tournament PGN | `~/Documents/SiliconBoard/engine-match.pgn` | `~/Documents/SiliconBoard/engine-match.pgn` |
+| What | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Settings | `~/Library/Application Support/SiliconBoard/settings.json` | `~/.config/siliconboard/settings.json` (`$XDG_CONFIG_HOME`) | `%APPDATA%\SiliconBoard\settings.json` |
+| Session logs | `~/Library/Logs/SiliconBoard/` | `~/.local/state/siliconboard/logs/` (`$XDG_STATE_HOME`) | `%LOCALAPPDATA%\SiliconBoard\logs\` |
+| Databases | `~/Documents/SiliconBoard/databases/` | `~/Documents/SiliconBoard/databases/` | `%USERPROFILE%\Documents\SiliconBoard\databases\` |
+| Tournament PGN | `~/Documents/SiliconBoard/engine-match.pgn` | `~/Documents/SiliconBoard/engine-match.pgn` | `%USERPROFILE%\Documents\SiliconBoard\engine-match.pgn` |
+
+On Windows the Documents folder is read from the system, so a redirected or
+OneDrive-synced Documents folder is used instead of assuming
+`%USERPROFILE%\Documents`.
 
 The session log records start-up and settings messages, engine life-cycle
 events, the UCI commands and replies exchanged with each engine, engine
@@ -210,9 +242,9 @@ Two environment variables change logging for one run:
 
 ## Packaging a release
 
-Both scripts read the version from `Cargo.toml` and print the archive's
-SHA-256. The generated archives are committed at the repository root and
-attached to a GitHub release.
+The macOS, Linux and Windows scripts read the version from `Cargo.toml` and
+print the archive's SHA-256. The generated archives are committed at the
+repository root and attached to a GitHub release.
 
 **macOS:**
 
@@ -262,10 +294,28 @@ launcher, the icon and the licence texts, then builds the `.tar.gz` and
 verifies it by unpacking. The install step puts the binary, assets and icon
 under `~/.local/share/siliconboard` and a launcher in `~/.local/bin`.
 
+**Windows:**
+
+```powershell
+.\package-windows.ps1              # build and zip
+.\package-windows.ps1 -Install     # also copy to %LOCALAPPDATA%\Programs and add a Start Menu entry
+```
+
+If PowerShell refuses to run a local script, start it through the host:
+`powershell -ExecutionPolicy Bypass -File .\package-windows.ps1`.
+
+The script runs `cargo build --release` and assembles
+`SiliconBoard-<version>-windows-x86_64\` with the executable in `bin\`, the
+assets in `public\`, the start-up PGN in `PGN\` and the licence texts, then
+writes the `.zip` and prints its SHA-256. The folder can be moved anywhere:
+the asset resolver walks up from `bin\siliconboard.exe` to the neighbouring
+`public\` and `PGN\`.
+
 **Publishing:** create one release tag (for example `v1.4.1`) and attach one
-asset per platform plus a `SHA256SUMS` file. The macOS `.app` bundle and the
-Linux tarball are different on purpose and cannot share one artifact. Keep
-the committed copies at the repository root in step with the release assets.
+asset per platform plus a `SHA256SUMS` file. The macOS `.app` bundle, the
+Linux tarball and the Windows zip are different on purpose and cannot share
+one artifact. Keep the committed copies at the repository root in step with
+the release assets.
 
 ## Development
 
@@ -276,8 +326,11 @@ cargo clippy --all-targets        # zero warnings
 
 The real-engine tests need an available UCI engine fixture
 (`$SILICONBOARD_TEST_ENGINE`, or Stockfish in a usual location); they fail
-(rather than skip) when it is missing. The opening-book tests use small
-built-in books, so no external `.bin` file is needed.
+(rather than skip) when it is missing. On Windows the search covers
+`stockfish.exe` on `PATH` and the usual `C:\Program Files\Stockfish` install
+folders. The opening-book tests use small built-in books, so no external
+`.bin` file is needed. The shell-script engine fixtures run on macOS and
+Linux; on Windows a PowerShell fixture exercises the same engine paths.
 
 ## AI Assisted by DeepSeek V.4.1 Flash
 

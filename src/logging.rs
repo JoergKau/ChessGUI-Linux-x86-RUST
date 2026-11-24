@@ -2,6 +2,7 @@
 //!
 //! Each run writes its own file, `siliconboard-<UTC time>.log`, in the
 //! platform's per-user log folder (`~/Library/Logs/SiliconBoard/` on macOS,
+//! `%LOCALAPPDATA%\SiliconBoard\logs` on Windows,
 //! `~/.local/state/siliconboard/logs/` on Linux, honouring `XDG_STATE_HOME`).
 //! The newest five are kept. Set `SILICONBOARD_LOG_FILE` to choose one file
 //! instead (it is truncated).
@@ -121,8 +122,7 @@ pub fn file_enabled() -> bool {
 
 /// The session-log folder, for status messages and menu hints.
 pub fn log_folder_for_display() -> String {
-    std::env::var_os("HOME")
-        .map(|home| log_folder(&home))
+    crate::platform::log_dir()
         .unwrap_or_default()
         .display()
         .to_string()
@@ -147,30 +147,10 @@ fn session_log_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("SILICONBOARD_LOG_FILE") {
         return Some(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME")?;
-    Some(log_folder(&home).join(format!(
+    Some(crate::platform::log_dir()?.join(format!(
         "siliconboard-{}.log",
         utc_stamp(std::time::SystemTime::now())
     )))
-}
-
-/// The per-user session-log folder. macOS keeps logs under `~/Library/Logs`;
-/// Linux follows the XDG state-directory spec.
-#[cfg(target_os = "macos")]
-fn log_folder(home: &std::ffi::OsStr) -> PathBuf {
-    PathBuf::from(home).join("Library/Logs/SiliconBoard")
-}
-
-/// The per-user session-log folder; honours `XDG_STATE_HOME`.
-#[cfg(not(target_os = "macos"))]
-fn log_folder(home: &std::ffi::OsStr) -> PathBuf {
-    let state = match std::env::var_os("XDG_STATE_HOME") {
-        Some(state) if !state.is_empty() && PathBuf::from(&state).is_absolute() => {
-            PathBuf::from(state)
-        }
-        _ => PathBuf::from(home).join(".local/state"),
-    };
-    state.join("siliconboard/logs")
 }
 
 /// Opens this run's log. A file given by `SILICONBOARD_LOG_FILE` is truncated

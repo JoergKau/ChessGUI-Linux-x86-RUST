@@ -383,8 +383,8 @@ pub fn default_pgn_path() -> PathBuf {
 /// by an older version, when the default followed the working directory — are
 /// anchored here as well, so they never resolve against `/`.
 pub fn default_output_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home).join("Documents").join("SiliconBoard"),
+    match crate::platform::documents_dir() {
+        Some(documents) => documents.join("SiliconBoard"),
         None => std::env::temp_dir().join("SiliconBoard"),
     }
 }
@@ -1304,9 +1304,9 @@ mod tests {
             "old relative settings land under the default folder"
         );
 
-        let absolute = Path::new("/tmp/games.pgn");
+        let absolute = std::env::temp_dir().join("games.pgn");
         assert_eq!(
-            resolve_pgn_path(absolute),
+            resolve_pgn_path(&absolute),
             absolute,
             "absolute paths are kept"
         );

@@ -1,8 +1,8 @@
 # SiliconBoard — Features
 
-SiliconBoard is a native UCI chess GUI for macOS (Apple Silicon) and Linux.
-The board sits on the left, the engine analysis on the right, and the move
-list along the bottom — with a clean dark theme.
+SiliconBoard is a native UCI chess GUI for macOS (Apple Silicon), Linux and
+Windows. The board sits on the left, the engine analysis on the right, and the
+move list along the bottom — with a clean dark theme.
 
 ## Play and analyse
 
@@ -35,7 +35,8 @@ list along the bottom — with a clean dark theme.
 
 ## Engines and tournaments
 
-- Load engine files directly (including launcher scripts); an options
+- Load engine files directly (including launcher scripts — shell scripts on
+  macOS and Linux, `.bat`/`.cmd`/`.ps1` files on Windows); an options
   dialog for every UCI option an engine declares. Each engine card's name is
   a pulldown of the known engines (loaded A/B and the engines used before,
   remembered across launches, the same list as the tournament window) with
@@ -70,9 +71,10 @@ list along the bottom — with a clean dark theme.
 - Everything — engines, engine options, time control, themes, window layout
   — is restored on the next launch.
 - The About panel shows the version, project link and licence — from the
-  application menu on macOS, or the toolbar's **ⓘ** button on Linux.
+  application menu on macOS, or the toolbar's **ⓘ** button on Linux and
+  Windows.
 
 ## Not (yet) included
 
 - Variation trees and PGN variations; multi-PV engine lines;
-  in-GUI tablebase probing (the engines do the probing); Windows.
+  in-GUI tablebase probing (the engines do the probing).

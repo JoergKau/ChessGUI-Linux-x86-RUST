@@ -2,32 +2,53 @@
 //! engine runs in.
 //!
 //! The user may point at a program, or at a launcher script that starts one
-//! (a shell script, a Java launcher, a Python wrapper). Both are accepted. A
-//! file that cannot run on this system is refused with the reason, before any
-//! process is started. Engines also run with the usual tool folders on `PATH`
-//! (a desktop launch may give the app only a minimal one), and from their own
-//! folder, since many engines load their data files relative to it.
+//! (a shell script, a Java launcher, a Python wrapper; on Windows also a
+//! `.bat`, `.cmd` or `.ps1` file). Both are accepted. A file that cannot run
+//! on this system is refused with the reason, before any process is started.
+//! Engines also run with the usual tool folders on `PATH` (a desktop launch
+//! may give the app only a minimal one), and from their own folder, since
+//! many engines load their data files relative to it.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::engine::protocol::EngineError;
 
 /// Folders an engine may need on `PATH` that a GUI launch from a desktop
-/// environment or a minimal shell may not have. Both platforms list the other
-/// one's usual folders too; a folder that does not exist is simply ignored.
-const TOOL_FOLDERS: [&str; 7] = [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/usr/games",
-    "/bin",
-    "/usr/sbin",
-    "/sbin",
-];
+/// environment or a minimal shell may not have. Unix lists the usual tool
+/// folders; Windows asks the system for its own folders. A folder that does
+/// not exist is simply ignored.
+#[cfg(unix)]
+pub(crate) fn tool_folders() -> Vec<PathBuf> {
+    const TOOL_FOLDERS: [&str; 7] = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/usr/games",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ];
+    TOOL_FOLDERS.iter().map(PathBuf::from).collect()
+}
+
+/// The Windows system folders. A GUI launch still inherits `PATH`, but these
+/// are the folders that hold `cmd.exe`, PowerShell and the system DLLs, and
+/// they are added even when the inherited `PATH` was shortened.
+#[cfg(windows)]
+pub(crate) fn tool_folders() -> Vec<PathBuf> {
+    let root = crate::platform::windows_dir();
+    vec![
+        root.join("System32"),
+        root.join("System32").join("Wbem"),
+        root.join("System32").join("WindowsPowerShell").join("v1.0"),
+        root,
+    ]
+}
 
 /// How many recent stderr lines are kept for a failure report.
 const STDERR_KEPT: usize = 5;
@@ -47,15 +68,22 @@ pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
     if !metadata.is_file() {
         return Err(fail("not a regular file".to_string()));
     }
+    #[cfg(unix)]
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err(fail("file is not marked executable".to_string()));
+    }
+    // Windows launchers are plain text files with a known extension; there is
+    // no execute bit to inspect and no `#!` line to follow.
+    #[cfg(windows)]
+    if is_windows_launcher(binary) {
+        return Ok(());
     }
     let head = read_head(binary).map_err(|source| EngineError::SpawnFailed {
         binary: Some(binary.to_path_buf()),
         source,
     })?;
     match program_kind(&head) {
-        ProgramKind::Script => check_interpreter(&head).map_err(fail),
+        ProgramKind::Script => check_script(&head).map_err(fail),
         ProgramKind::Native => Ok(()),
         ProgramKind::Foreign(what) => {
             Err(fail(format!("it is {what}, which this system cannot run")))
@@ -64,13 +92,45 @@ pub fn check_executable(binary: &Path) -> Result<(), EngineError> {
     }
 }
 
+/// Whether a `#!` script can start here. On Unix its interpreter must exist;
+/// Windows cannot run such a file at all.
+#[cfg(unix)]
+fn check_script(head: &[u8]) -> Result<(), String> {
+    check_interpreter(head)
+}
+
+/// Whether a `#!` script can start here. On Unix its interpreter must exist;
+/// Windows cannot run such a file at all.
+#[cfg(windows)]
+fn check_script(_head: &[u8]) -> Result<(), String> {
+    Err(
+        "it is a Unix shell script; on Windows use an .exe, .bat, .cmd or .ps1 launcher"
+            .to_string(),
+    )
+}
+
+/// `true` for the launcher types Windows can start through its shell: batch
+/// files, command scripts and PowerShell scripts.
+#[cfg(windows)]
+fn is_windows_launcher(binary: &Path) -> bool {
+    binary
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "bat" | "cmd" | "ps1"
+            )
+        })
+}
+
 /// What the first bytes of a file say about it.
 #[derive(Debug, PartialEq, Eq)]
 enum ProgramKind {
     /// A `#!` script; its interpreter is checked separately.
     Script,
     /// A native program for this operating system (Mach-O on macOS, ELF on
-    /// Linux).
+    /// Linux, PE on Windows).
     Native,
     /// A program or archive for another system, with a short name for it.
     Foreign(&'static str),
@@ -97,7 +157,11 @@ fn program_kind(head: &[u8]) -> ProgramKind {
             ProgramKind::Foreign("a macOS program")
         }
     } else if head.starts_with(b"MZ") {
-        ProgramKind::Foreign("a Windows program")
+        if cfg!(windows) {
+            ProgramKind::Native
+        } else {
+            ProgramKind::Foreign("a Windows program")
+        }
     } else if head.starts_with(b"PK\x03\x04") {
         ProgramKind::Foreign("a Java archive or zip file; choose the script that starts it")
     } else {
@@ -118,6 +182,7 @@ fn is_mach_o(head: &[u8]) -> bool {
 
 /// The interpreter named on a script's `#!` line must exist. For `env`, the
 /// program it starts must be on the engine search path.
+#[cfg(unix)]
 fn check_interpreter(head: &[u8]) -> Result<(), String> {
     let first_line = head.split(|&byte| byte == b'\n').next().unwrap_or_default();
     let line = String::from_utf8_lossy(&first_line[2..]).into_owned();
@@ -160,6 +225,7 @@ fn read_head(binary: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 /// Find an executable named `program` in the engine search path.
+#[cfg(unix)]
 fn find_on_engine_path(program: &str) -> Option<PathBuf> {
     let path = engine_path();
     std::env::split_paths(&path)
@@ -175,7 +241,7 @@ fn find_on_engine_path(program: &str) -> Option<PathBuf> {
 pub fn engine_path() -> OsString {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let mut folders: Vec<PathBuf> = Vec::new();
-    for folder in std::env::split_paths(&inherited).chain(TOOL_FOLDERS.iter().map(PathBuf::from)) {
+    for folder in std::env::split_paths(&inherited).chain(tool_folders()) {
         if !folder.as_os_str().is_empty() && !folders.contains(&folder) {
             folders.push(folder);
         }
@@ -188,11 +254,16 @@ pub fn engine_path() -> OsString {
 /// .NET engines (Pedantic, for example) then use the invariant culture. Its
 /// OEM code page is 1, and `Encoding.GetEncoding(1)` throws during start-up,
 /// so such an engine exits before the handshake (owner report, round 33).
+///
+/// The whole locale fix is Unix-only: Windows takes the culture from the user
+/// account, not from `LANG`.
+#[cfg(any(unix, test))]
 pub const ENGINE_FALLBACK_LOCALE: &str = "en_US.UTF-8";
 
 /// The locale an engine needs, or `None` when the inherited one is already
 /// usable. `C`, `POSIX` and `C.UTF-8` count as unusable: .NET still maps them
 /// to the invariant culture and its code page 1.
+#[cfg(any(unix, test))]
 pub fn engine_locale_from(lookup: impl Fn(&str) -> Option<OsString>) -> Option<&'static str> {
     let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
         .iter()
@@ -209,6 +280,7 @@ pub fn engine_locale_from(lookup: impl Fn(&str) -> Option<OsString>) -> Option<&
 }
 
 /// The locale an engine gets in this process: see [`engine_locale_from`].
+#[cfg(unix)]
 pub fn engine_locale() -> Option<&'static str> {
     engine_locale_from(|name| std::env::var_os(name))
 }
@@ -283,7 +355,13 @@ mod tests {
     fn write_file(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
         path
     }
 
@@ -293,17 +371,43 @@ mod tests {
         let jar = write_file(dir.path(), "engine.jar", b"PK\x03\x04rest", 0o755);
         let err = check_executable(&jar).unwrap_err().to_string();
         assert!(err.contains("Java archive"), "{err}");
-        // The other platform's native format is a foreign program here.
+        // The other platform's native formats are foreign programs here.
+        let elf = write_file(dir.path(), "engine-linux", b"\x7fELF\x02\x01", 0o755);
+        let mach_o = write_file(dir.path(), "engine-macos", b"\xCF\xFA\xED\xFErest", 0o755);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(check_executable(&elf).is_ok());
+            assert!(check_executable(&mach_o)
+                .unwrap_err()
+                .to_string()
+                .contains("macOS program"));
+        }
         #[cfg(target_os = "macos")]
-        let (name, bytes, platform) = ("engine-linux", b"\x7fELF\x02\x01".as_slice(), "Linux");
-        #[cfg(not(target_os = "macos"))]
-        let (name, bytes, platform) = ("engine-macos", b"\xCF\xFA\xED\xFErest".as_slice(), "macOS");
-        let foreign = write_file(dir.path(), name, bytes, 0o755);
-        assert!(check_executable(&foreign)
-            .unwrap_err()
-            .to_string()
-            .contains(&format!("{platform} program")));
+        {
+            assert!(check_executable(&mach_o).is_ok());
+            assert!(check_executable(&elf)
+                .unwrap_err()
+                .to_string()
+                .contains("Linux program"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(check_executable(&elf)
+                .unwrap_err()
+                .to_string()
+                .contains("Linux program"));
+            assert!(check_executable(&mach_o)
+                .unwrap_err()
+                .to_string()
+                .contains("macOS program"));
+        }
         let windows = write_file(dir.path(), "engine.exe", b"MZ\x90\x00", 0o755);
+        #[cfg(windows)]
+        assert!(
+            check_executable(&windows).is_ok(),
+            "a PE image is a native program on Windows"
+        );
+        #[cfg(not(windows))]
         assert!(check_executable(&windows)
             .unwrap_err()
             .to_string()
@@ -315,6 +419,7 @@ mod tests {
             .contains("not a program"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_script_whose_interpreter_is_missing_is_refused_with_its_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -328,6 +433,7 @@ mod tests {
         assert!(err.contains("/opt/nowhere/python"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_script_started_through_env_needs_its_program_on_the_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -350,7 +456,34 @@ mod tests {
 
     #[test]
     fn a_native_program_passes_the_check() {
+        #[cfg(unix)]
         assert!(check_executable(Path::new("/bin/ls")).is_ok());
+        #[cfg(windows)]
+        {
+            let command = std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+            assert!(check_executable(&command).is_ok(), "{command:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_launcher_is_accepted_and_a_unix_script_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = write_file(dir.path(), "engine.bat", b"@echo off\r\n", 0);
+        assert!(
+            check_executable(&batch).is_ok(),
+            "a .bat launcher is runnable"
+        );
+        let cmd = write_file(dir.path(), "engine.cmd", b"@echo off\r\n", 0);
+        assert!(
+            check_executable(&cmd).is_ok(),
+            "a .cmd launcher is runnable"
+        );
+        let shell = write_file(dir.path(), "engine.sh", b"#!/bin/sh\r\nexit 0\r\n", 0);
+        let err = check_executable(&shell).unwrap_err().to_string();
+        assert!(err.contains("Unix shell script"), "{err}");
     }
 
     #[test]
@@ -362,10 +495,30 @@ mod tests {
                 program_kind(b"\x7fELF\x02\x01"),
                 ProgramKind::Foreign("a Linux program")
             );
+            assert_eq!(
+                program_kind(b"MZ\x90\x00"),
+                ProgramKind::Foreign("a Windows program")
+            );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         {
             assert_eq!(program_kind(b"\x7fELF\x02\x01"), ProgramKind::Native);
+            assert_eq!(
+                program_kind(b"\xCF\xFA\xED\xFE"),
+                ProgramKind::Foreign("a macOS program")
+            );
+            assert_eq!(
+                program_kind(b"MZ\x90\x00"),
+                ProgramKind::Foreign("a Windows program")
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(program_kind(b"MZ\x90\x00"), ProgramKind::Native);
+            assert_eq!(
+                program_kind(b"\x7fELF\x02\x01"),
+                ProgramKind::Foreign("a Linux program")
+            );
             assert_eq!(
                 program_kind(b"\xCF\xFA\xED\xFE"),
                 ProgramKind::Foreign("a macOS program")
@@ -377,14 +530,13 @@ mod tests {
     fn the_engine_path_keeps_the_app_path_and_adds_the_tool_folders() {
         let path = engine_path();
         let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
-        assert!(folders.contains(&PathBuf::from("/opt/homebrew/bin")));
-        assert!(folders.contains(&PathBuf::from("/usr/bin")));
-        for tool in TOOL_FOLDERS {
-            let count = folders
-                .iter()
-                .filter(|folder| folder.as_os_str() == tool)
-                .count();
-            assert!(count <= 1, "{tool} is listed {count} times");
+        for tool in tool_folders() {
+            assert!(
+                folders.contains(&tool),
+                "{tool:?} is missing from the engine path"
+            );
+            let count = folders.iter().filter(|folder| **folder == tool).count();
+            assert_eq!(count, 1, "{tool:?} is listed {count} times");
         }
     }
 

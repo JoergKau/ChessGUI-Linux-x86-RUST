@@ -6,7 +6,8 @@
 //!
 //! The file is JSON, kept in the platform's per-user configuration folder
 //! (`~/Library/Application Support/SiliconBoard/` on macOS,
-//! `~/.config/siliconboard/` on Linux, honouring `XDG_CONFIG_HOME`).
+//! `%APPDATA%\SiliconBoard` on Windows, `~/.config/siliconboard/` on Linux,
+//! honouring `XDG_CONFIG_HOME`).
 //! `SILICONBOARD_SETTINGS` overrides the path. A missing file means the
 //! defaults. A file that cannot be read or parsed is reported, and the
 //! defaults are used until the user changes something.
@@ -198,27 +199,9 @@ pub fn settings_path() -> Result<PathBuf, SettingsError> {
     if let Some(path) = std::env::var_os("SILICONBOARD_SETTINGS") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME").ok_or(SettingsError::NoLocation)?;
-    Ok(config_folder(&home).join("settings.json"))
-}
-
-/// The per-user configuration folder for the app. macOS uses the Application
-/// Support folder; Linux follows the XDG base-directory spec.
-#[cfg(target_os = "macos")]
-fn config_folder(home: &std::ffi::OsStr) -> PathBuf {
-    PathBuf::from(home).join("Library/Application Support/SiliconBoard")
-}
-
-/// The per-user configuration folder for the app, `siliconboard` beneath the
-/// XDG configuration root (`~/.config` unless `XDG_CONFIG_HOME` moves it).
-#[cfg(not(target_os = "macos"))]
-fn config_folder(home: &std::ffi::OsStr) -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() && PathBuf::from(&xdg).is_absolute() {
-            return PathBuf::from(xdg).join("siliconboard");
-        }
-    }
-    PathBuf::from(home).join(".config").join("siliconboard")
+    crate::platform::config_dir()
+        .map(|folder| folder.join("settings.json"))
+        .ok_or(SettingsError::NoLocation)
 }
 
 /// Read the settings at `path`. A missing file gives the defaults.

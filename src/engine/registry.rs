@@ -5,8 +5,12 @@
 //! `app-pid TAB engine-pid TAB binary`. The app's own process ID is part of the
 //! line, so a second copy of the app that is still running keeps its engines:
 //! a sweep only touches lines whose app is gone. At start-up, [`sweep`] kills
-//! the engine's process group if it still runs the recorded binary, and drops
+//! the engine's process tree if it still runs the recorded binary, and drops
 //! the line either way.
+//!
+//! "Process tree" means a Unix process group or a Windows process tree
+//! (`taskkill /T`). The engine is spawned so that any helper it starts belongs
+//! to it on both platforms.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,7 +27,8 @@ pub fn configure(path: PathBuf) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
 }
 
-/// Record a running engine. `engine_pid` is also its process group ID.
+/// Record a running engine. On Unix `engine_pid` is also its process group ID;
+/// on Windows the kill walks the process tree from the same ID.
 pub fn register(engine_pid: u32, binary: &Path) {
     let Some(path) = configured() else { return };
     let _guard = lock();
@@ -71,7 +76,7 @@ pub fn sweep(path: &Path) -> Vec<String> {
             continue;
         }
         if process_alive(entry.engine)
-            && command_of(entry.engine).is_some_and(|cmd| cmd.contains(&entry.binary))
+            && command_of(entry.engine).is_some_and(|cmd| same_binary(&cmd, &entry.binary))
         {
             kill_group(entry.engine);
             messages.push(format!(
@@ -84,12 +89,36 @@ pub fn sweep(path: &Path) -> Vec<String> {
     messages
 }
 
-/// Stop the process group `pid` with SIGKILL. Errors are ignored: the group may
+/// Stop the process tree led by `pid`. Errors are ignored: the process may
 /// already be gone.
+///
+/// Unix sends `SIGKILL` to the process group. Windows asks `taskkill` to end
+/// the process and its children (`/T`), which is the equivalent of the group
+/// kill and also reaches a helper an engine started.
 pub fn kill_group(pid: u32) {
-    // SAFETY: `killpg` only sends a signal; it reads no memory of ours.
-    unsafe {
-        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    #[cfg(unix)]
+    {
+        // SAFETY: `killpg` only sends a signal; it reads no memory of ours.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+
+        let _ = std::process::Command::new(
+            crate::platform::windows_dir()
+                .join("System32")
+                .join("taskkill.exe"),
+        )
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(crate::platform::CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     }
 }
 
@@ -163,18 +192,86 @@ fn write_lines(path: &Path, lines: &[String]) {
 
 /// `true` when a process with this ID exists.
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // SAFETY: the handle is opened for a query only and closed before
+        // returning; the out-parameter points at a live local variable.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE as u32
+        }
+    }
 }
 
-/// The command line of a process, when `ps` can tell.
+/// The command line (Unix) or full image path (Windows) of a process, when the
+/// system can tell. Used to make sure a recorded PID still belongs to the
+/// engine it was recorded for before killing it.
 fn command_of(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // SAFETY: the buffer is a live local array and its length is passed
+        // in and out; the process handle is closed before returning.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let mut buffer = [0u16; 32_768];
+            let mut len = buffer.len() as u32;
+            let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut len);
+            CloseHandle(handle);
+            if ok == 0 {
+                return None;
+            }
+            let text = String::from_utf16_lossy(&buffer[..len as usize]);
+            (!text.is_empty()).then_some(text)
+        }
+    }
+}
+
+/// Whether a process description names `binary`. Windows paths are compared
+/// case-insensitively and with either slash, because the image path that the
+/// system reports and the path the settings stored can differ in both.
+fn same_binary(command: &str, binary: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let normalize = |text: &str| text.replace('/', "\\").to_lowercase();
+        normalize(command).contains(&normalize(binary))
+    }
+    #[cfg(not(windows))]
+    {
+        command.contains(binary)
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +317,7 @@ mod tests {
         assert_eq!(read_lines(&path), vec![line], "a live app's line is kept");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_helper_of_a_dead_app_is_stopped_with_its_engine() {
         use std::os::unix::fs::PermissionsExt;
@@ -250,5 +348,51 @@ mod tests {
         let mut child = child;
         let _ = child.wait();
         assert!(!process_alive(engine), "the group is gone");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_process_of_a_dead_app_is_stopped_by_the_registry() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+
+        // A long-running system program stands in for an engine: it must be
+        // found alive, matched by its image path, and killed after its app is
+        // recorded as gone.
+        let ping = crate::platform::windows_dir()
+            .join("System32")
+            .join("ping.exe");
+        let mut child = std::process::Command::new(&ping)
+            .args(["-n", "30", "127.0.0.1"])
+            .creation_flags(crate::platform::CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let engine = child.id();
+        assert!(process_alive(engine), "the stand-in engine runs");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engines.txt");
+        std::fs::write(
+            &path,
+            format!("{}\n", format_line(4_000_004, engine, &ping)),
+        )
+        .unwrap();
+
+        let messages = sweep(&path);
+        assert_eq!(
+            messages.len(),
+            1,
+            "the engine of a dead app is stopped: {messages:?}"
+        );
+        assert!(!path.exists(), "the stale line is removed");
+        let _ = child.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_alive(engine) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!process_alive(engine), "the process is gone");
     }
 }

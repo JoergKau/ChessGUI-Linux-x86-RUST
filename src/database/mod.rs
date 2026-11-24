@@ -62,11 +62,8 @@ pub struct EmptyRemoval {
 /// have an arbitrary working directory, so a relative default could land
 /// somewhere unwritable.
 pub fn default_database_dir() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home)
-            .join("Documents")
-            .join("SiliconBoard")
-            .join("databases"),
+    match crate::platform::documents_dir() {
+        Some(documents) => documents.join("SiliconBoard").join("databases"),
         None => std::env::temp_dir().join("SiliconBoard").join("databases"),
     }
 }

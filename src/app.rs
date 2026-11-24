@@ -4404,27 +4404,7 @@ impl SiliconBoardApp {
         let Some(info) = self.database.info.as_ref() else {
             return;
         };
-        #[cfg(target_os = "macos")]
-        let result = std::process::Command::new("open")
-            .arg("-R")
-            .arg(&info.path)
-            .spawn()
-            .map_err(|err| format!("Could not open Finder: {err}"));
-        // Linux: open the containing folder; xdg-open hands a folder to the
-        // desktop's file manager. Opening the `.sbd` itself would ask for an
-        // application that handles that private file type.
-        #[cfg(not(target_os = "macos"))]
-        let result = {
-            let folder = info
-                .path
-                .parent()
-                .map_or_else(|| info.path.clone(), Path::to_path_buf);
-            std::process::Command::new("xdg-open")
-                .arg(&folder)
-                .spawn()
-                .map_err(|err| format!("Could not open the file manager: {err}"))
-        };
-        if let Err(message) = result {
+        if let Err(message) = crate::platform::reveal_in_file_manager(&info.path) {
             self.set_status(StatusLevel::Error, message);
         }
     }
@@ -7413,6 +7393,7 @@ mod game_flow_tests {
         assert!(!app.tournament_window_open);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_engine_that_exits_after_handshake_is_restarted_once() {
         use std::os::unix::fs::PermissionsExt;
@@ -7638,6 +7619,7 @@ mod game_flow_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn switching_the_tablebases_off_sends_the_empty_sentinel() {
         use std::os::unix::fs::PermissionsExt;
@@ -7900,6 +7882,7 @@ mod game_flow_tests {
     /// A scripted UCI engine that keeps searching (a background loop prints
     /// `info` lines while the flag file exists), answers `isready` and `stop`
     /// like a real engine, and reports `pv`.
+    #[cfg(unix)]
     fn write_script_engine(dir: &std::path::Path, slot: usize, pv: &str) -> std::path::PathBuf {
         let script = dir.join(format!("engine{slot}.sh"));
         let flag = dir.join(format!("search{slot}.flag"));
@@ -7918,6 +7901,7 @@ mod game_flow_tests {
     /// Owner report: with two engines analysing the displayed position and
     /// picking different moves from the same from-square (Kc4 vs Kb4), only
     /// one arrow appeared. Both arrows must be on the board.
+    #[cfg(unix)]
     #[test]
     fn two_engines_picking_different_moves_show_two_arrows() {
         let dir = tempfile::tempdir().unwrap();
@@ -7954,6 +7938,7 @@ mod game_flow_tests {
     /// the user then moves to the reported FEN while both are searching, so
     /// both run a stop -> bestmove -> restart cycle. After it, both arrows
     /// must be back and stay.
+    #[cfg(unix)]
     #[test]
     fn both_arrows_survive_browsing_to_the_reported_position() {
         let dir = tempfile::tempdir().unwrap();
@@ -8010,6 +7995,7 @@ mod game_flow_tests {
     /// happen, so the arrow - like the card - comes back. Before the fix the
     /// slot stayed Offline forever while its card kept showing the last
     /// evaluation, which looked like a missing arrow.
+    #[cfg(unix)]
     #[test]
     fn an_engine_killed_by_the_watchdog_returns_and_draws_its_arrow_again() {
         let dir = tempfile::tempdir().unwrap();

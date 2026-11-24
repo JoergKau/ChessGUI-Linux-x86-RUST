@@ -3458,6 +3458,7 @@ dependencies = [
  "tiny-skia 0.12.0",
  "tokio",
  "usvg",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
